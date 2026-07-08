@@ -1,0 +1,57 @@
+
+# .NET
+bin/
+obj/
+*.user
+*.userosscache
+*.suo
+*.suo.cache
+*.vspscc
+*.vssscc
+.vs/
+*.db
+*.sqlite
+*.db-journal
+*.pdb.cache
+packages/
+TestInit/
+TestInit.csproj
+
+# Arduino
+*.elf
+*.hex
+*.bin
+*.map
+build/
+.pioenvs/
+.piolibdeps/
+.vscode/
+.arduino/
+preferences.txt
+*.o
+*.a
+*.d
+
+# 数据库文件
+Data/
+fingerprint_lock.db
+*.db-shm
+*.db-wal
+
+# 临时文件
+tmp/
+temp/
+*.tmp
+*.log
+app_config.json
+
+# 文档构建输出
+publish/
+publish/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 临时测试
+/tmp/
