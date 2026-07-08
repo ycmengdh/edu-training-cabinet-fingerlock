@@ -1,0 +1,92 @@
+namespace FingerprintLockManager
+{
+    /// <summary>
+    /// 用户角色枚举（与权限等级对应）
+    /// </summary>
+    public enum UserRole
+    {
+        /// <summary>系统管理员：可开启所有4个锁</summary>
+        Admin,
+
+        /// <summary>老师：可开启除系统锁外的所有锁</summary>
+        Teacher,
+
+        /// <summary>学生：由老师分配指定锁的权限</summary>
+        Student
+    }
+
+    /// <summary>
+    /// ESP32 通讯工作模式
+    /// </summary>
+    public enum WorkMode
+    {
+        /// <summary>STA 路由模式：ESP32 作为 TCP 客户端连接上位机</summary>
+        STA,
+
+        /// <summary>AP 热点模式：ESP32 开热点，上位机作为 TCP 客户端连接进来</summary>
+        AP
+    }
+
+    /// <summary>
+    /// 通信命令类型枚举（对应协议中的 cmd 字段）
+    /// </summary>
+    public enum CommandType
+    {
+        /// <summary>设备注册（下位机 -> 上位机）</summary>
+        Register,
+
+        /// <summary>指纹验证请求（下位机 -> 上位机）</summary>
+        FingerVerify,
+
+        /// <summary>验证成功（上位机 -> 下位机）</summary>
+        AuthOk,
+
+        /// <summary>验证失败（上位机 -> 下位机）</summary>
+        AuthFail,
+
+        /// <summary>同步权限（上位机 -> 下位机）</summary>
+        SyncPermissions,
+
+        /// <summary>添加指纹（上位机 -> 下位机）</summary>
+        AddFingerprint,
+
+        /// <summary>删除指纹（上位机 -> 下位机）</summary>
+        DeleteFingerprint,
+
+        /// <summary>控制锁（上位机 -> 下位机）</summary>
+        ControlLock,
+
+        /// <summary>读取设备配置（上位机 -> 下位机）</summary>
+        ReadConfig,
+
+        /// <summary>写入设备配置（上位机 -> 下位机）</summary>
+        WriteConfig,
+
+        /// <summary>读取设备状态（上位机 -> 下位机）</summary>
+        ReadStatus,
+
+        /// <summary>清除本地日志（上位机 -> 下位机）</summary>
+        ClearLogs,
+
+        /// <summary>重启设备（上位机 -> 下位机）</summary>
+        Reboot,
+
+        /// <summary>状态上报（下位机 -> 上位机）</summary>
+        StatusReport,
+
+        /// <summary>日志上报（下位机 -> 上位机）</summary>
+        LogReport,
+
+        /// <summary>配置读取响应（下位机 -> 上位机）</summary>
+        ConfigResponse,
+
+        /// <summary>状态读取响应（下位机 -> 上位机）</summary>
+        StatusResponse,
+
+        /// <summary>配置保存成功（下位机 -> 上位机）</summary>
+        ConfigSaved,
+
+        /// <summary>心跳（双向，用于保活检测）</summary>
+        Heartbeat
+    }
+}

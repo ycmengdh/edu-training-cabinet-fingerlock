@@ -1,0 +1,105 @@
+<Window x:Class="FingerprintLockManager.DeviceConfigWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="设备配置（AP模式）"
+        Height="560" Width="500"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize"
+        Background="{StaticResource BackgroundBrush}"
+        Loaded="Window_Loaded"
+        Closed="Window_Closed">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- 标题 -->
+        <TextBlock Grid.Row="0" Text="设备配置（AP模式）" Style="{StaticResource TitleText}" Margin="0,0,0,12"/>
+
+        <!-- 连接区 -->
+        <Border Grid.Row="1" Style="{StaticResource Card}" Margin="0,0,0,12">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Grid.Column="0" Text="AP地址：" Style="{StaticResource LabelText}" Margin="0,0,8,0"/>
+                <TextBox x:Name="ApIpBox" Grid.Column="1" Text="192.168.4.1" Margin="0,0,8,0"/>
+                <TextBlock Grid.Column="2" Text="端口：" Style="{StaticResource LabelText}" Margin="0,0,8,0"/>
+                <TextBox x:Name="ApPortBox" Grid.Column="3" Width="70" Text="8888"/>
+
+                <!-- 第二行：状态 + 按钮 -->
+            </Grid>
+        </Border>
+
+        <!-- 配置表单 -->
+        <Border Grid.Row="2" Style="{StaticResource Card}">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <!-- 状态与连接按钮 -->
+                <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,12">
+                    <Ellipse x:Name="StatusDot" Width="10" Height="10" Fill="{StaticResource DangerBrush}"
+                             VerticalAlignment="Center"/>
+                    <TextBlock x:Name="StatusText" Text="未连接" Margin="8,0,0,0" VerticalAlignment="Center"
+                               Foreground="{StaticResource SubTextBrush}"/>
+                    <Button x:Name="ConnectButton" Content="连接设备" Margin="16,0,0,0" Click="ConnectButton_Click"/>
+                    <Button x:Name="ReadConfigButton" Content="读取配置" Style="{StaticResource SecondaryButton}"
+                            Margin="8,0,0,0" Click="ReadConfigButton_Click" IsEnabled="False"/>
+                </StackPanel>
+
+                <!-- 配置字段 -->
+                <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+                    <StackPanel>
+                        <TextBlock Text="设备ID" Style="{StaticResource LabelText}" Margin="0,0,0,6"/>
+                        <TextBox x:Name="DeviceIdBox" IsReadOnly="True" Margin="0,0,0,12"/>
+
+                        <TextBlock Text="设备名称" Style="{StaticResource LabelText}" Margin="0,0,0,6"/>
+                        <TextBox x:Name="DeviceNameBox" Margin="0,0,0,12"/>
+
+                        <TextBlock Text="WiFi SSID" Style="{StaticResource LabelText}" Margin="0,0,0,6"/>
+                        <TextBox x:Name="WifiSsidBox" Margin="0,0,0,12"/>
+
+                        <TextBlock Text="WiFi 密码" Style="{StaticResource LabelText}" Margin="0,0,0,6"/>
+                        <TextBox x:Name="WifiPasswordBox" Margin="0,0,0,12"/>
+
+                        <TextBlock Text="上位机服务器IP" Style="{StaticResource LabelText}" Margin="0,0,0,6"/>
+                        <TextBox x:Name="ServerIpBox" Margin="0,0,0,12"/>
+
+                        <TextBlock Text="上位机服务器端口" Style="{StaticResource LabelText}" Margin="0,0,0,6"/>
+                        <TextBox x:Name="ServerPortBox" Margin="0,0,0,12"/>
+
+                        <CheckBox x:Name="StaticIpCheckBox" Content="启用静态IP" Margin="0,0,0,12"/>
+
+                        <TextBlock Text="静态IP" Style="{StaticResource LabelText}" Margin="0,0,0,6"/>
+                        <TextBox x:Name="StaticIpBox" Margin="0,0,0,12"/>
+
+                        <TextBlock Text="网关" Style="{StaticResource LabelText}" Margin="0,0,0,6"/>
+                        <TextBox x:Name="GatewayBox" Margin="0,0,0,12"/>
+
+                        <TextBlock Text="子网掩码" Style="{StaticResource LabelText}" Margin="0,0,0,6"/>
+                        <TextBox x:Name="SubnetBox" Margin="0,0,0,12"/>
+                    </StackPanel>
+                </ScrollViewer>
+            </Grid>
+        </Border>
+
+        <!-- 底部操作按钮 -->
+        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+            <Button Content="下发配置" Click="WriteConfigButton_Click"/>
+            <Button Content="重启设备" Style="{StaticResource DangerButton}" Margin="8,0,0,0"
+                    Click="RebootButton_Click"/>
+            <Button Content="关闭" Style="{StaticResource SecondaryButton}" Margin="8,0,0,0"
+                    Click="CloseButton_Click"/>
+        </StackPanel>
+    </Grid>
+</Window>
