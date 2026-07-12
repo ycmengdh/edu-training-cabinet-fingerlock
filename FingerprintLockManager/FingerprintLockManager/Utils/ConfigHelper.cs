@@ -22,6 +22,43 @@ namespace FingerprintLockManager
 
         /// <summary>设备离线判定阈值（秒），超过该时间未收到心跳视为离线</summary>
         public int OfflineTimeoutSeconds { get; set; } = 60;
+
+        /// <summary>Mesh 链路传输类型：UsbSerial / TcpClient / TcpServer</summary>
+        public string TransportType { get; set; } = "UsbSerial";
+
+        /// <summary>USB 串口名（UsbSerial 用，留空则自动选择首个串口）</summary>
+        public string SerialPortName { get; set; } = "";
+
+        /// <summary>USB 串口波特率（默认 921600）</summary>
+        public int SerialBaudRate { get; set; } = 921600;
+
+        /// <summary>TCP 客户端目标主机（TcpClient 用，根节点 AP IP，默认 192.168.4.1）</summary>
+        public string TcpClientHost { get; set; } = "192.168.4.1";
+
+        /// <summary>TCP 客户端目标端口（TcpClient 用，默认 8888）</summary>
+        public int TcpClientPort { get; set; } = 8888;
+
+        /// <summary>TCP 服务端监听端口（TcpServer 用，默认 8888）</summary>
+        public int TcpServerPort { get; set; } = 8888;
+
+        /// <summary>
+        /// 将 AppConfig 转为 MeshBridge 启动所需的 TransportConfig
+        /// 注意：本类中存在同名 string 属性 TransportType，引用枚举需用全限定名避免歧义。
+        /// </summary>
+        public TransportConfig ToTransportConfig()
+        {
+            var type = Enum.TryParse<global::FingerprintLockManager.TransportType>(TransportType, true, out var t)
+                ? t
+                : global::FingerprintLockManager.TransportType.UsbSerial;
+            return new TransportConfig
+            {
+                Type = type,
+                PortName = SerialPortName ?? "",
+                BaudRate = SerialBaudRate > 0 ? SerialBaudRate : 921600,
+                Host = TcpClientHost ?? "192.168.4.1",
+                Port = type == global::FingerprintLockManager.TransportType.TcpServer ? TcpServerPort : TcpClientPort
+            };
+        }
     }
 
     /// <summary>

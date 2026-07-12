@@ -6,9 +6,22 @@ namespace FingerprintLockManager
     /// 消息处理器
     /// 解析收到的消息，根据 cmd 字段分发到对应的处理方法，
     /// 并通过事件通知 UI 层（UI 层再调用 UserService / PermissionService / LogService 等完成业务）。
+    /// 维护最近 100 条 MsgId 的 LRU 缓存用于消息去重，避免 ACK/转发重复处理。
     /// </summary>
     public class MessageHandler
     {
+        /// <summary>LRU 去重缓存容量</summary>
+        private const int DedupCapacity = 100;
+
+        /// <summary>最近处理过的 MsgId 缓存（链表头部为最新，尾部为最旧）</summary>
+        private readonly LinkedList<string> _recentMsgIds = new LinkedList<string>();
+
+        /// <summary>MsgId 快速查找索引（同一 MsgId 在链表中的节点）</summary>
+        private readonly Dictionary<string, LinkedListNode<string>> _msgIdIndex = new Dictionary<string, LinkedListNode<string>>();
+
+        /// <summary>去重缓存锁</summary>
+        private readonly object _dedupLock = new object();
+
         /// <summary>指纹验证请求事件：参数为 deviceId, fingerprintId</summary>
         public event Action<string, string> OnFingerVerifyRequest;
 
@@ -30,6 +43,9 @@ namespace FingerprintLockManager
         /// <summary>配置保存成功事件：参数为 deviceId</summary>
         public event Action<string> OnConfigSaved;
 
+        /// <summary>ACK 应答事件：参数为 msgId（原命令消息 ID）, result（结果/错误码）</summary>
+        public event Action<string, string> OnAckReceived;
+
         /// <summary>
         /// 处理收到的消息，根据 cmd 字段分发到对应处理方法
         /// </summary>
@@ -38,6 +54,12 @@ namespace FingerprintLockManager
         public void HandleMessage(DeviceClient? device, Message msg)
         {
             if (msg == null || string.IsNullOrEmpty(msg.Cmd)) return;
+
+            // 消息去重：同一 MsgId 仅处理一次（无 MsgId 的消息不去重）
+            if (!string.IsNullOrEmpty(msg.MsgId))
+            {
+                if (IsDuplicate(msg.MsgId)) return;
+            }
 
             // 同步设备 ID
             if (device != null && string.IsNullOrEmpty(device.DeviceId) && !string.IsNullOrEmpty(msg.DeviceId))
@@ -71,9 +93,47 @@ namespace FingerprintLockManager
                 case CommandType.ConfigSaved:
                     HandleConfigSaved(device, msg);
                     break;
+                case CommandType.Ack:
+                    HandleAck(device, msg);
+                    break;
                 case CommandType.Heartbeat:
                     // 心跳包：仅维持连接，无需业务处理
                     break;
+            }
+        }
+
+        /// <summary>
+        /// 判断 MsgId 是否为重复消息，并记录到 LRU 缓存
+        /// </summary>
+        /// <param name="msgId">消息 ID</param>
+        /// <returns>重复返回 true；首次出现返回 false</returns>
+        private bool IsDuplicate(string msgId)
+        {
+            lock (_dedupLock)
+            {
+                if (_msgIdIndex.TryGetValue(msgId, out var node))
+                {
+                    // 已存在：移到链表头部（最新），视为重复
+                    _recentMsgIds.Remove(node);
+                    _recentMsgIds.AddFirst(node);
+                    return true;
+                }
+
+                // 新 MsgId：加入头部
+                var newNode = _recentMsgIds.AddFirst(msgId);
+                _msgIdIndex[msgId] = newNode;
+
+                // 超容量则淘汰尾部
+                while (_recentMsgIds.Count > DedupCapacity)
+                {
+                    var oldest = _recentMsgIds.Last;
+                    if (oldest != null)
+                    {
+                        _recentMsgIds.RemoveLast();
+                        _msgIdIndex.Remove(oldest.Value);
+                    }
+                }
+                return false;
             }
         }
 
@@ -165,13 +225,29 @@ namespace FingerprintLockManager
         }
 
         /// <summary>
+        /// 处理 ACK 应答
+        /// 触发 OnAckReceived 事件，携带原命令 MsgId 与结果码
+        /// </summary>
+        private void HandleAck(DeviceClient? device, Message msg)
+        {
+            var msgId = msg.MsgId;
+            var result = TryGetStringData(msg, "result")
+                ?? TryGetStringData(msg, "code")
+                ?? Protocol.ErrOk;
+            if (!string.IsNullOrEmpty(msgId))
+            {
+                OnAckReceived?.Invoke(msgId, result);
+            }
+        }
+
+        /// <summary>
         /// 从消息 Data 中尝试获取字符串字段
         /// Data 反序列化后为 JObject，支持按字段名查找
         /// </summary>
         /// <param name="msg">消息对象</param>
         /// <param name="fieldName">字段名</param>
         /// <returns>字段值字符串；不存在时返回 null</returns>
-        private string TryGetStringData(Message msg, string fieldName)
+        private string? TryGetStringData(Message msg, string fieldName)
         {
             if (msg?.Data == null) return null;
             try

@@ -5,7 +5,8 @@ namespace FingerprintLockManager
 {
     /// <summary>
     /// 数据库初始化服务
-    /// 负责初始化全局 FreeSql 实例、自动建表，并创建默认管理员账号
+    /// 负责初始化全局 FreeSql 实例、自动建表（含 RolePermission / UserPermission），
+    /// 并创建默认管理员账号（加盐密码）与 3 条角色默认权限记录。
     /// </summary>
     public class DatabaseService
     {
@@ -15,7 +16,7 @@ namespace FingerprintLockManager
         /// <summary>默认管理员账号</summary>
         private const string DefaultAdminId = "admin";
 
-        /// <summary>默认管理员密码（明文，存储前会进行 SHA256 哈希）</summary>
+        /// <summary>默认管理员密码（明文，存储前会进行加盐 SHA256 哈希）</summary>
         private const string DefaultAdminPassword = "admin123";
 
         /// <summary>
@@ -38,17 +39,21 @@ namespace FingerprintLockManager
             }
 
             // 使用 FreeSqlBuilder 构建 SQLite 数据库实例
+            // UseAutoSyncStructure 自动建表/同步表结构，包含 RolePermission 与 UserPermission
             Fsql = new FreeSqlBuilder()
                 .UseConnectionString(DataType.Sqlite, $"Data Source={dbPath}")
-                .UseAutoSyncStructure(true)   // 自动同步表结构（建表）
+                .UseAutoSyncStructure(true)
                 .Build();
 
-            // 初始化默认管理员账号
+            // 初始化默认管理员账号（加盐密码）
             InitDefaultAdmin();
+
+            // 初始化 3 条角色默认权限记录
+            new RolePermissionService().InitDefaultRolePermissions();
         }
 
         /// <summary>
-        /// 检查并创建默认管理员账号（admin / admin123）
+        /// 检查并创建默认管理员账号（admin / admin123，加盐哈希）
         /// 若数据库中已存在任意管理员账号则跳过
         /// </summary>
         private void InitDefaultAdmin()
@@ -62,6 +67,10 @@ namespace FingerprintLockManager
 
                 if (hasAdmin) return;
 
+                // 生成盐值并加盐哈希
+                string salt = PasswordHelper.GenerateSalt();
+                string hash = PasswordHelper.HashPassword(DefaultAdminPassword, salt);
+
                 // 创建默认管理员
                 var admin = new User
                 {
@@ -69,7 +78,8 @@ namespace FingerprintLockManager
                     Name = "系统管理员",
                     Role = "admin",
                     FingerprintId = null,
-                    PasswordHash = PasswordHelper.HashPassword(DefaultAdminPassword),
+                    PasswordSalt = salt,
+                    PasswordHash = hash,
                     CreateTime = DateTime.Now,
                     UpdateTime = DateTime.Now
                 };

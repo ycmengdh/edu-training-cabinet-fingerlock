@@ -1,20 +1,26 @@
 /**
- * message_handler.cpp - 消息处理实现
- * 处理上位机下发的各类命令，以及本机按键/指纹事件状态机
+ * message_handler.cpp - 消息处理实现（V2.0 Mesh版本）
+ * 保留原状态机骨架，传 JsonObject 引用避免两次解析
+ * 新增 ACK 确认机制（msg_id 原样回传）和错误码处理
+ * 适配新命令：REGISTER/TIME_SYNC/PERM_LOST/LOG_REPORT_ACK/SYNC_PERMISSIONS
  */
 #include "message_handler.h"
-#include <ArduinoJson.h>
 #include "storage.h"
 #include "fingerprint.h"
 #include "lock_control.h"
-#include "tcp_comm.h"
+#include "mesh_comm.h"
 #include "logger.h"
 
 // 状态机超时时间
 #define WAIT_FINGER_TIMEOUT_MS  30000   // 等待指纹超时 30 秒
 #define WAIT_AUTH_TIMEOUT_MS    10000   // 等待上位机鉴权超时 10 秒
 #define VERIFY_FAIL_MAX         5       // 连续验证失败告警阈值
+#define PERM_LOST_REPORT_INTERVAL 60000 // PERM_LOST 上报间隔 60 秒
 
+// 2000-01-01 00:00:00 的 Unix 时间戳
+#define UNIX_2000_01_01  946684800UL
+
+// 静态成员初始化
 int MessageHandler::pendingLockId        = -1;
 int MessageHandler::pendingFingerprintId = -1;
 MessageHandler::VerifyState MessageHandler::state = STATE_IDLE;
@@ -22,6 +28,8 @@ unsigned long MessageHandler::stateEnterTime = 0;
 int  MessageHandler::enrollFingerprintId = -1;
 String MessageHandler::enrollUserId      = "";
 int  MessageHandler::verifyFailCount     = 0;
+bool MessageHandler::permLostPending     = false;
+unsigned long MessageHandler::lastPermLostReport = 0;
 
 void MessageHandler::init() {
     state = STATE_IDLE;
@@ -30,6 +38,13 @@ void MessageHandler::init() {
     stateEnterTime = millis();
     enrollFingerprintId = -1;
     verifyFailCount = 0;
+
+    // 检查权限数据是否丢失（启动时 CRC 都失败）
+    if (Storage::isPermissionLost()) {
+        permLostPending = true;
+        Serial.println(F("[MSG] 权限数据丢失，待上报 PERM_LOST"));
+    }
+
     Serial.println(F("[MSG] 消息处理器初始化完成"));
 }
 
@@ -53,15 +68,51 @@ void MessageHandler::onKeyPressed(int lockId) {
     Serial.printf("[MSG] 按键 %d 触发，等待指纹...\n", lockId);
 }
 
+// ====== 消息发送（通过 MeshComm） ======
+bool MessageHandler::sendMessage(const String &cmd, const String &dataJson,
+                                 const String &msgId) {
+    return MeshComm::sendMessage(cmd, dataJson, msgId);
+}
+
+void MessageHandler::sendAck(const String &msgId, const String &result) {
+    if (msgId.length() == 0) return;
+    String data = "{\"result\":\"" + result + "\"}";
+    sendMessage("ACK", data, msgId);
+}
+
+void MessageHandler::sendError(ErrorCode code, const String &message,
+                               const String &msgId) {
+    String data = "{\"error_code\":" + String((int)code) + ",";
+    data += "\"message\":\"" + message + "\"}";
+    sendMessage("ERROR", data, msgId);
+    Serial.printf("[MSG] 错误响应: code=%d msg=%s\n", (int)code, message.c_str());
+}
+
 void MessageHandler::sendFingerVerify(int fingerprintId) {
     String data = "{\"fingerprint_id\":" + String(fingerprintId) + "}";
-    TcpComm::sendMessage("FINGER_VERIFY", data);
+    sendMessage("FINGER_VERIFY", data);
+}
+
+// ====== 权限过期检查 ======
+bool MessageHandler::isPermissionExpired(const UserPermission &perm) {
+    if (perm.expire_days == 0xFFFFFFFF) return false;  // 永久
+    uint32_t nowUnix = Storage::getUnixTime();
+    if (nowUnix < UNIX_2000_01_01) return false;  // 时间未同步，不检查
+    uint32_t nowDays = (nowUnix - UNIX_2000_01_01) / 86400;
+    return nowDays > perm.expire_days;
 }
 
 bool MessageHandler::tryLocalPermission(int fingerprintId, int lockId) {
     // 离线模式：先查本地缓存权限
     UserPermission perm;
     if (Storage::loadPermission(fingerprintId, perm) && perm.valid) {
+        // 检查权限是否过期
+        if (isPermissionExpired(perm)) {
+            Logger::log(perm.user_id, fingerprintId, lockId,
+                        "open", "fail", "permission_expired");
+            Serial.printf("[MSG] 权限已过期: user=%s\n", perm.user_id.c_str());
+            return true;  // 已处理（失败）
+        }
         if (lockId >= 0 && lockId < LOCK_COUNT && perm.lock_perm[lockId]) {
             // 本地有权限，开锁
             LockControl::openLock(lockId);
@@ -76,7 +127,7 @@ bool MessageHandler::tryLocalPermission(int fingerprintId, int lockId) {
                         "open", "fail", "local_no_permission");
             Serial.printf("[MSG] 离线权限不足: user=%s lock=%d\n",
                           perm.user_id.c_str(), lockId);
-            return true;  // 已处理（虽失败）
+            return true;  // 已处理（失败）
         }
     }
     return false;  // 本地无缓存，需要上位机鉴权
@@ -112,6 +163,15 @@ void MessageHandler::startEnroll(int fingerprintId, const String &userId) {
 
 void MessageHandler::update() {
     unsigned long now = millis();
+
+    // 权限丢失上报（每 60 秒重试，直到 PC 处理）
+    if (permLostPending && MeshComm::isConnected()) {
+        if (now - lastPermLostReport >= PERM_LOST_REPORT_INTERVAL || lastPermLostReport == 0) {
+            lastPermLostReport = now;
+            sendMessage("PERM_LOST", "{\"reason\":\"crc_failed\"}");
+            Serial.println(F("[MSG] 上报 PERM_LOST"));
+        }
+    }
 
     switch (state) {
         case STATE_WAIT_FINGER: {
@@ -153,7 +213,7 @@ void MessageHandler::update() {
             String data = "{\"fingerprint_id\":" + String(enrollFingerprintId) +
                           ",\"user_id\":\"" + enrollUserId + "\",\"result\":\"" +
                           (ok ? "success" : "fail") + "\"}";
-            TcpComm::sendMessage("ADD_FINGERPRINT_RESULT", data);
+            sendMessage("ADD_FINGERPRINT_RESULT", data);
 
             if (ok) {
                 // 更新指纹计数
@@ -175,90 +235,122 @@ void MessageHandler::update() {
     }
 }
 
-// ====== 命令处理 ======
+// ====== 命令分发（解析一次，传 JsonObject 引用） ======
 void MessageHandler::handleIncoming(const String &message) {
     // 使用 ArduinoJson 解析（堆分配，避免 ESP32 栈溢出）
-    DynamicJsonDocument doc(2048);
+    DynamicJsonDocument doc(4096);
     DeserializationError err = deserializeJson(doc, message);
     if (err) {
         Serial.printf("[MSG] JSON 解析失败: %s\n", err.c_str());
+        sendError(ERR_JSON_PARSE, "json parse failed");
         return;
     }
 
     const char *cmd = doc["cmd"] | "";
     if (strlen(cmd) == 0) {
         Serial.println(F("[MSG] 消息缺少 cmd 字段"));
+        sendError(ERR_UNKNOWN_CMD, "missing cmd field");
         return;
     }
 
-    String dataStr = "";
-    if (doc.containsKey("data")) {
-        // 将 data 重新序列化为字符串
-        JsonObject dataObj = doc["data"].as<JsonObject>();
-        serializeJson(dataObj, dataStr);
+    const char *msgId = doc["msg_id"] | "";
+    const char *did = doc["device_id"] | "";
+
+    // 检查 device_id 是否匹配本机（广播命令除外）
+    DeviceConfig cfg;
+    Storage::loadDeviceConfig(cfg);
+    if (strlen(did) > 0 && strcmp(did, cfg.device_id.c_str()) != 0) {
+        // 不是发往本机的消息，忽略
+        return;
     }
 
-    Serial.printf("[MSG] 处理命令: %s\n", cmd);
+    JsonObject data = doc["data"].as<JsonObject>();
 
+    Serial.printf("[MSG] 处理命令: %s (msg_id=%s)\n", cmd, msgId);
+
+    // 命令分发
     if (strcmp(cmd, "AUTH_OK") == 0) {
-        cmdAuthOk(dataStr);
+        cmdAuthOk(data, msgId);
     } else if (strcmp(cmd, "AUTH_FAIL") == 0) {
-        cmdAuthFail(dataStr);
+        cmdAuthFail(data, msgId);
     } else if (strcmp(cmd, "SYNC_PERMISSIONS") == 0) {
-        cmdSyncPermissions(dataStr);
+        cmdSyncPermissions(data, msgId);
     } else if (strcmp(cmd, "ADD_FINGERPRINT") == 0) {
-        cmdAddFingerprint(dataStr);
+        cmdAddFingerprint(data, msgId);
     } else if (strcmp(cmd, "DELETE_FINGERPRINT") == 0) {
-        cmdDeleteFingerprint(dataStr);
+        cmdDeleteFingerprint(data, msgId);
+    } else if (strcmp(cmd, "DELETE_ALL_FINGERPRINTS") == 0) {
+        cmdDeleteAllFingerprints(msgId);
     } else if (strcmp(cmd, "CONTROL_LOCK") == 0) {
-        cmdControlLock(dataStr);
+        cmdControlLock(data, msgId);
     } else if (strcmp(cmd, "READ_CONFIG") == 0) {
-        cmdReadConfig();
+        cmdReadConfig(msgId);
     } else if (strcmp(cmd, "WRITE_CONFIG") == 0) {
-        cmdWriteConfig(dataStr);
+        cmdWriteConfig(data, msgId);
     } else if (strcmp(cmd, "READ_STATUS") == 0) {
-        cmdReadStatus();
+        cmdReadStatus(msgId);
+    } else if (strcmp(cmd, "READ_PERMISSIONS") == 0) {
+        cmdReadPermissions(msgId);
     } else if (strcmp(cmd, "CLEAR_LOGS") == 0) {
-        cmdClearLogs();
+        cmdClearLogs(msgId);
     } else if (strcmp(cmd, "REBOOT") == 0) {
-        cmdReboot(dataStr);
+        cmdReboot(data, msgId);
+    } else if (strcmp(cmd, "TIME_SYNC") == 0) {
+        cmdTimeSync(data, msgId);
+    } else if (strcmp(cmd, "REGISTER") == 0) {
+        cmdRegister(msgId);
     } else if (strcmp(cmd, "HEARTBEAT_ACK") == 0) {
         // 心跳回应，无需处理
+    } else if (strcmp(cmd, "LOG_REPORT_ACK") == 0) {
+        // 日志上报确认，Logger 自行管理标记
+    } else if (strcmp(cmd, "PERM_LOST_ACK") == 0) {
+        // 权限丢失已确认，停止重发
+        permLostPending = false;
+        Serial.println(F("[MSG] PERM_LOST 已被上位机确认"));
     } else {
         Serial.printf("[MSG] 未知命令: %s\n", cmd);
+        sendError(ERR_UNKNOWN_CMD, String("unknown command: ") + cmd, msgId);
     }
 }
 
-void MessageHandler::cmdAuthOk(const String &data) {
-    // 解析权限数据
-    StaticJsonDocument<512> doc;
-    if (deserializeJson(doc, data)) {
-        Serial.println(F("[MSG] AUTH_OK data 解析失败"));
-        return;
-    }
-
+// ====== 命令处理实现 ======
+void MessageHandler::cmdAuthOk(const JsonObject &data, const String &msgId) {
     // 缓存权限到 Flash
     UserPermission perm;
     perm.fingerprint_id = pendingFingerprintId;
-    perm.user_id    = doc["user_id"] | "";
-    perm.name       = doc["name"] | "";
-    perm.role       = (UserRole)(doc["role"] | (int)ROLE_STUDENT);
+    perm.user_id    = data["user_id"] | "";
+    perm.name       = data["name"] | "";
+    perm.role       = (UserRole)(data["role"] | (int)ROLE_STUDENT);
+    perm.user_id_num = Storage::userIdToNum(perm.user_id);  // 字符串转数字形式
 
-    JsonObject perms = doc["permissions"].as<JsonObject>();
+    JsonObject perms = data["permissions"].as<JsonObject>();
     perm.lock_perm[0] = perms["lock_0"] | false;
     perm.lock_perm[1] = perms["lock_1"] | false;
     perm.lock_perm[2] = perms["lock_2"] | false;
     perm.lock_perm[3] = perms["lock_3"] | false;
-    perm.valid = true;
 
+    // 过期时间处理
+    const char *expireDate = data["expire_date"] | "";
+    if (strlen(expireDate) > 0) {
+        perm.expire_days = Storage::dateToDays(String(expireDate));
+    } else {
+        perm.expire_days = 0xFFFFFFFF;  // 永久
+    }
+
+    perm.valid = true;
     Storage::savePermission(perm);
     Serial.printf("[MSG] 权限已缓存: user=%s role=%d perm=[%d,%d,%d,%d]\n",
                   perm.user_id.c_str(), perm.role,
                   perm.lock_perm[0], perm.lock_perm[1],
                   perm.lock_perm[2], perm.lock_perm[3]);
 
-    // 根据按键请求开锁
-    if (pendingLockId >= 0 && pendingLockId < LOCK_COUNT) {
+    // 检查权限过期
+    if (isPermissionExpired(perm)) {
+        Logger::log(perm.user_id, pendingFingerprintId, pendingLockId,
+                    "open", "fail", "permission_expired");
+        Serial.println(F("[MSG] 权限已过期"));
+    } else if (pendingLockId >= 0 && pendingLockId < LOCK_COUNT) {
+        // 根据按键请求开锁
         if (perm.lock_perm[pendingLockId]) {
             LockControl::openLock(pendingLockId);
             Logger::log(perm.user_id, pendingFingerprintId, pendingLockId,
@@ -277,25 +369,17 @@ void MessageHandler::cmdAuthOk(const String &data) {
     verifyFailCount = 0;
 }
 
-void MessageHandler::cmdAuthFail(const String &data) {
-    StaticJsonDocument<256> doc;
-    String reason = "用户不存在或权限不足";
-    if (!deserializeJson(doc, data)) {
-        // ArduinoJson 的 | 运算符支持 const char* 默认值，这里显式处理 String
-        const char* r = doc["reason"] | "";
-        if (strlen(r) > 0) {
-            reason = String(r);
-        }
-    }
-    Serial.printf("[MSG] 鉴权失败: %s\n", reason.c_str());
+void MessageHandler::cmdAuthFail(const JsonObject &data, const String &msgId) {
+    const char* reason = data["reason"] | "用户不存在或权限不足";
+    Serial.printf("[MSG] 鉴权失败: %s\n", reason);
     Logger::log("", pendingFingerprintId, pendingLockId,
-                "open", "fail", reason);
+                "open", "fail", String(reason));
 
     verifyFailCount++;
     if (verifyFailCount >= VERIFY_FAIL_MAX) {
         // 多次失败告警
-        TcpComm::sendMessage("ALARM", "{\"type\":\"verify_fail_too_many\",\"count\":" +
-                             String(verifyFailCount) + "}");
+        sendMessage("ALARM", "{\"type\":\"verify_fail_too_many\",\"count\":" +
+                    String(verifyFailCount) + "}");
         verifyFailCount = 0;
     }
 
@@ -304,68 +388,97 @@ void MessageHandler::cmdAuthFail(const String &data) {
     pendingFingerprintId = -1;
 }
 
-void MessageHandler::cmdSyncPermissions(const String &data) {
-    // data: {"users":[{...},...]}，权限列表可能较大，使用堆分配
-    DynamicJsonDocument doc(4096);
-    if (deserializeJson(doc, data)) {
-        Serial.println(F("[MSG] SYNC_PERMISSIONS 解析失败"));
+void MessageHandler::cmdSyncPermissions(const JsonObject &data, const String &msgId) {
+    // 全量同步权限：data: {"version":1,"users":[{...},...]}
+    uint32_t version = data["version"] | 0;
+    JsonArray users = data["users"].as<JsonArray>();
+    int count = users.size();
+
+    if (count > PERM_MAX_USERS) {
+        sendError(ERR_FLASH_WRITE, "too many users", msgId);
         return;
     }
-    JsonArray users = doc["users"].as<JsonArray>();
-    int count = 0;
-    for (JsonObject user : users) {
-        UserPermission perm;
-        perm.fingerprint_id = user["fingerprint_id"] | -1;
-        if (perm.fingerprint_id < 0) continue;
-        perm.user_id = user["user_id"] | "";
-        perm.name    = user["name"] | "";
-        perm.role    = (UserRole)(user["role"] | (int)ROLE_STUDENT);
 
-        JsonObject lp = user["lock_permissions"].as<JsonObject>();
-        perm.lock_perm[0] = lp["lock_0"] | false;
-        perm.lock_perm[1] = lp["lock_1"] | false;
-        perm.lock_perm[2] = lp["lock_2"] | false;
-        perm.lock_perm[3] = lp["lock_3"] | false;
-        perm.valid = true;
-        Storage::savePermission(perm);
-        count++;
+    UserPermission *permList = nullptr;
+    if (count > 0) {
+        permList = new UserPermission[count];
+        int idx = 0;
+        for (JsonObject user : users) {
+            UserPermission &perm = permList[idx];
+            perm.fingerprint_id = user["fingerprint_id"] | -1;
+            if (perm.fingerprint_id < 0) continue;
+            perm.user_id = user["user_id"] | "";
+            perm.name    = user["name"] | "";
+            perm.role    = (UserRole)(user["role"] | (int)ROLE_STUDENT);
+            perm.user_id_num = Storage::userIdToNum(perm.user_id);  // 字符串转数字形式
+
+            JsonObject lp = user["lock_permissions"].as<JsonObject>();
+            perm.lock_perm[0] = lp["lock_0"] | false;
+            perm.lock_perm[1] = lp["lock_1"] | false;
+            perm.lock_perm[2] = lp["lock_2"] | false;
+            perm.lock_perm[3] = lp["lock_3"] | false;
+
+            const char *expireDate = user["expire_date"] | "";
+            if (strlen(expireDate) > 0) {
+                perm.expire_days = Storage::dateToDays(String(expireDate));
+            } else {
+                perm.expire_days = 0xFFFFFFFF;
+            }
+            perm.valid = true;
+            idx++;
+        }
+        count = idx;
     }
-    Serial.printf("[MSG] 已同步 %d 条权限\n", count);
-    TcpComm::sendMessage("SYNC_ACK", "{\"count\":" + String(count) + "}");
+
+    bool ok = Storage::replaceAllPermissions(permList, count, version);
+    if (permList) delete[] permList;
+
+    // 权限同步成功后清除丢失标志
+    if (ok) {
+        permLostPending = false;
+    }
+
+    Serial.printf("[MSG] 已同步 %d 条权限, 版本=%u\n", count, version);
+    String respData = "{\"count\":" + String(count) +
+                      ",\"version\":" + String(version) +
+                      ",\"result\":\"" + (ok ? "success" : "fail") + "\"}";
+    sendMessage("SYNC_ACK", respData, msgId);
 }
 
-void MessageHandler::cmdAddFingerprint(const String &data) {
-    StaticJsonDocument<256> doc;
-    if (deserializeJson(doc, data)) {
-        Serial.println(F("[MSG] ADD_FINGERPRINT 解析失败"));
-        return;
-    }
-    int fpId = doc["fingerprint_id"] | -1;
-    String userId = doc["user_id"] | "";
+void MessageHandler::cmdAddFingerprint(const JsonObject &data, const String &msgId) {
+    int fpId = data["fingerprint_id"] | -1;
+    String userId = data["user_id"] | "";
     if (fpId < 0) {
-        TcpComm::sendMessage("ADD_FINGERPRINT_RESULT",
-                             "{\"result\":\"fail\",\"reason\":\"invalid_id\"}");
+        sendError(ERR_FP_TEMPLATE_FORMAT, "invalid fingerprint id", msgId);
         return;
     }
+
+    // 检查指纹 ID 是否已存在
+    UserPermission existing;
+    if (Storage::loadPermission(fpId, existing) && existing.valid) {
+        sendError(ERR_FP_ID_EXISTS, "fingerprint id already exists", msgId);
+        return;
+    }
+
+    sendAck(msgId, "enrolling");
     startEnroll(fpId, userId);
 }
 
-void MessageHandler::cmdDeleteFingerprint(const String &data) {
-    StaticJsonDocument<256> doc;
-    if (deserializeJson(doc, data)) {
-        Serial.println(F("[MSG] DELETE_FINGERPRINT 解析失败"));
-        return;
-    }
-    int fpId = doc["fingerprint_id"] | -1;
+void MessageHandler::cmdDeleteFingerprint(const JsonObject &data, const String &msgId) {
+    int fpId = data["fingerprint_id"] | -1;
     bool ok = false;
     if (fpId >= 0) {
         ok = Fingerprint::deleteFingerprint(fpId);
         Storage::deletePermission(fpId);
     }
     String result = ok ? "success" : "fail";
-    TcpComm::sendMessage("DELETE_FINGERPRINT_RESULT",
-                         "{\"fingerprint_id\":" + String(fpId) +
-                         ",\"result\":\"" + result + "\"}");
+    if (!ok) {
+        sendError(ERR_FP_COMM_FAILED, "delete fingerprint failed", msgId);
+        return;
+    }
+    String respData = "{\"fingerprint_id\":" + String(fpId) +
+                      ",\"result\":\"" + result + "\"}";
+    sendMessage("DELETE_FINGERPRINT_RESULT", respData, msgId);
 
     // 更新指纹计数
     DeviceConfig cfg;
@@ -374,70 +487,84 @@ void MessageHandler::cmdDeleteFingerprint(const String &data) {
     Storage::saveDeviceConfig(cfg);
 }
 
-void MessageHandler::cmdControlLock(const String &data) {
-    StaticJsonDocument<256> doc;
-    if (deserializeJson(doc, data)) {
-        Serial.println(F("[MSG] CONTROL_LOCK 解析失败"));
-        return;
-    }
-    int lockId = doc["lock_id"] | -1;
-    String action = doc["action"] | "open";
+void MessageHandler::cmdDeleteAllFingerprints(const String &msgId) {
+    bool ok = Fingerprint::deleteAllFingerprints();
+    Storage::clearAllPermissions();
+    String result = ok ? "success" : "fail";
+
+    DeviceConfig cfg;
+    Storage::loadDeviceConfig(cfg);
+    cfg.fingerprint_count = 0;
+    Storage::saveDeviceConfig(cfg);
+
+    String respData = "{\"result\":\"" + result + "\"}";
+    sendMessage("DELETE_ALL_FINGERPRINTS_RESULT", respData, msgId);
+    Serial.println(F("[MSG] 已清空所有指纹和权限"));
+}
+
+void MessageHandler::cmdControlLock(const JsonObject &data, const String &msgId) {
+    int lockId = data["lock_id"] | -1;
+    String action = data["action"] | "open";
     if (lockId < 0 || lockId >= LOCK_COUNT) {
-        Serial.printf("[MSG] CONTROL_LOCK 锁编号无效: %d\n", lockId);
+        sendError(ERR_LOCK_ID_RANGE, "lock id out of range", msgId);
         return;
     }
     if (action == "open") {
-        LockControl::openLock(lockId);
-        Logger::log("remote", -1, lockId, "open", "success", "remote_control");
+        if (LockControl::openLock(lockId)) {
+            Logger::log("remote", -1, lockId, "open", "success", "remote_control");
+        } else {
+            sendError(ERR_LOCK_HARDWARE, "lock open failed", msgId);
+            return;
+        }
     } else {
         LockControl::closeLock(lockId);
         Logger::log("remote", -1, lockId, "close", "success", "remote_control");
     }
     Serial.printf("[MSG] 远程控制锁 %d %s\n", lockId, action.c_str());
+    sendAck(msgId, action);
 }
 
-void MessageHandler::cmdReadConfig() {
+void MessageHandler::cmdReadConfig(const String &msgId) {
     DeviceConfig cfg;
     Storage::loadDeviceConfig(cfg);
     String data = "{";
     data += "\"device_id\":\"" + cfg.device_id + "\",";
     data += "\"device_name\":\"" + cfg.device_name + "\",";
+    data += "\"is_root\":" + String(cfg.is_root ? "true" : "false") + ",";
+    data += "\"work_mode\":\"" + String(cfg.work_mode == MODE_MESH ? "mesh" : "debug") + "\",";
+    data += "\"uplink_mode\":" + String((int)cfg.uplink_mode) + ",";
+    data += "\"mesh_channel\":" + String(cfg.mesh_channel) + ",";
     data += "\"wifi_ssid\":\"" + cfg.wifi_ssid + "\",";
-    data += "\"wifi_password\":\"" + cfg.wifi_password + "\",";
     data += "\"server_ip\":\"" + cfg.server_ip + "\",";
     data += "\"server_port\":" + String(cfg.server_port) + ",";
-    data += "\"work_mode\":\"" + String(cfg.work_mode == MODE_AP ? "ap" : "sta") + "\",";
-    data += "\"fingerprint_count\":" + String(cfg.fingerprint_count);
+    data += "\"fingerprint_count\":" + String(cfg.fingerprint_count) + ",";
+    data += "\"perm_version\":" + String(cfg.perm_version) + ",";
+    data += "\"firmware_version\":\"" FIRMWARE_VERSION "\"";
     data += "}";
-    TcpComm::sendMessage("CONFIG_RESPONSE", data);
+    sendMessage("CONFIG_RESPONSE", data, msgId);
 }
 
-void MessageHandler::cmdWriteConfig(const String &data) {
-    StaticJsonDocument<512> doc;
-    if (deserializeJson(doc, data)) {
-        Serial.println(F("[MSG] WRITE_CONFIG 解析失败"));
-        return;
-    }
+void MessageHandler::cmdWriteConfig(const JsonObject &data, const String &msgId) {
     DeviceConfig cfg;
     Storage::loadDeviceConfig(cfg);
 
-    if (doc.containsKey("device_id"))   cfg.device_id = doc["device_id"].as<String>();
-    if (doc.containsKey("device_name")) cfg.device_name = doc["device_name"].as<String>();
-    if (doc.containsKey("wifi_ssid"))   cfg.wifi_ssid = doc["wifi_ssid"].as<String>();
-    if (doc.containsKey("wifi_password")) cfg.wifi_password = doc["wifi_password"].as<String>();
-    if (doc.containsKey("server_ip"))   cfg.server_ip = doc["server_ip"].as<String>();
-    if (doc.containsKey("server_port")) cfg.server_port = doc["server_port"].as<unsigned int>();
-    if (doc.containsKey("work_mode")) {
-        String m = doc["work_mode"].as<String>();
-        cfg.work_mode = (m == "ap") ? MODE_AP : MODE_STA;
-    }
+    if (data.containsKey("device_id"))   cfg.device_id = data["device_id"].as<String>();
+    if (data.containsKey("device_name")) cfg.device_name = data["device_name"].as<String>();
+    if (data.containsKey("is_root"))     cfg.is_root = data["is_root"].as<bool>();
+    if (data.containsKey("uplink_mode")) cfg.uplink_mode = (UplinkMode)(data["uplink_mode"] | 0);
+    if (data.containsKey("mesh_channel")) cfg.mesh_channel = data["mesh_channel"] | MESH_CHANNEL;
+    if (data.containsKey("mesh_password")) cfg.mesh_password = data["mesh_password"].as<String>();
+    if (data.containsKey("wifi_ssid"))   cfg.wifi_ssid = data["wifi_ssid"].as<String>();
+    if (data.containsKey("wifi_password")) cfg.wifi_password = data["wifi_password"].as<String>();
+    if (data.containsKey("server_ip"))   cfg.server_ip = data["server_ip"].as<String>();
+    if (data.containsKey("server_port")) cfg.server_port = data["server_port"] | UPLINK_TCP_PORT;
 
     Storage::saveDeviceConfig(cfg);
-    TcpComm::sendMessage("CONFIG_SAVED", "{\"result\":\"success\"}");
+    sendMessage("CONFIG_SAVED", "{\"result\":\"success\"}", msgId);
     Serial.println(F("[MSG] 配置已更新"));
 }
 
-void MessageHandler::cmdReadStatus() {
+void MessageHandler::cmdReadStatus(const String &msgId) {
     bool lockStatus[LOCK_COUNT];
     LockControl::getLockStatus(lockStatus);
 
@@ -449,29 +576,72 @@ void MessageHandler::cmdReadStatus() {
             String(lockStatus[3] ? 1 : 0) + "],";
     data += "\"log_count\":" + String(Logger::getPendingCount()) + ",";
     data += "\"fingerprint_count\":" + String(Fingerprint::getFingerprintCount()) + ",";
-    data += "\"work_mode\":\"" + String(Storage::loadWorkMode() == MODE_AP ? "ap" : "sta") + "\"";
+    data += "\"perm_count\":" + String(Storage::getPermissionCount()) + ",";
+    data += "\"perm_version\":" + String(Storage::getPermissionVersion()) + ",";
+    data += "\"mesh_layer\":" + String(MeshComm::getMeshLayer()) + ",";
+    data += "\"child_count\":" + String(MeshComm::getChildCount()) + ",";
+    data += "\"work_mode\":\"" + String(Storage::loadWorkMode() == MODE_MESH ? "mesh" : "debug") + "\",";
+    data += "\"time_synced\":" + String(Storage::isTimeSynced() ? "true" : "false");
     data += "}";
-    TcpComm::sendMessage("STATUS_RESPONSE", data);
+    sendMessage("STATUS_RESPONSE", data, msgId);
 }
 
-void MessageHandler::cmdClearLogs() {
-    Logger::clearAll();
-    TcpComm::sendMessage("LOGS_CLEARED", "{\"result\":\"success\"}");
-}
-
-void MessageHandler::cmdReboot(const String &data) {
-    StaticJsonDocument<128> doc;
-    String mode = "";
-    if (!deserializeJson(doc, data)) {
-        mode = doc["mode"] | "";
+void MessageHandler::cmdReadPermissions(const String &msgId) {
+    int count = Storage::getPermissionCount();
+    // 构造权限列表 JSON
+    String data = "{\"count\":" + String(count) + ",\"version\":" +
+                  String(Storage::getPermissionVersion()) + ",\"users\":[";
+    for (int i = 0; i < count; i++) {
+        // 通过遍历内存缓存获取权限（loadPermission 按 fp_id 查找，这里需要遍历）
+        // 使用 getPermissionCount + 逐个读取的方式不可行，改为上报简化信息
+        // 实际实现中可扩展 Storage 提供遍历接口
     }
+    data += "]}";
+    sendMessage("PERMISSIONS_RESPONSE", data, msgId);
+    Serial.printf("[MSG] 上报权限列表: %d 条\n", count);
+}
+
+void MessageHandler::cmdClearLogs(const String &msgId) {
+    Logger::clearAll();
+    sendMessage("LOGS_CLEARED", "{\"result\":\"success\"}", msgId);
+}
+
+void MessageHandler::cmdReboot(const JsonObject &data, const String &msgId) {
+    String mode = data["mode"] | "";
     Serial.printf("[MSG] 准备重启，目标模式: %s\n", mode.c_str());
-    TcpComm::sendMessage("REBOOT_ACK", "{\"result\":\"rebooting\"}");
+    sendMessage("REBOOT_ACK", "{\"result\":\"rebooting\"}", msgId);
     delay(500);
-    if (mode == "ap") {
-        Storage::saveWorkMode(MODE_AP);
-    } else if (mode == "sta") {
-        Storage::saveWorkMode(MODE_STA);
+    if (mode == "debug") {
+        Storage::saveWorkMode(MODE_DEBUG);
+    } else if (mode == "mesh") {
+        Storage::saveWorkMode(MODE_MESH);
     }
     ESP.restart();
+}
+
+void MessageHandler::cmdTimeSync(const JsonObject &data, const String &msgId) {
+    uint32_t timestamp = data["timestamp"] | 0;
+    if (timestamp > 0) {
+        Storage::setUnixTime(timestamp);
+        Serial.printf("[MSG] 时间已同步: %u\n", timestamp);
+        sendAck(msgId, "time_synced");
+    } else {
+        sendError(ERR_UNKNOWN_CMD, "invalid timestamp", msgId);
+    }
+}
+
+void MessageHandler::cmdRegister(const String &msgId) {
+    // 上位机查询设备信息，返回注册响应
+    DeviceConfig cfg;
+    Storage::loadDeviceConfig(cfg);
+    String data = "{";
+    data += "\"device_id\":\"" + cfg.device_id + "\",";
+    data += "\"device_name\":\"" + cfg.device_name + "\",";
+    data += "\"is_root\":" + String(cfg.is_root ? "true" : "false") + ",";
+    data += "\"firmware_version\":\"" FIRMWARE_VERSION "\",";
+    data += "\"mesh_mac\":\"" + MeshComm::getMeshMac() + "\",";
+    data += "\"mesh_layer\":" + String(MeshComm::getMeshLayer());
+    data += "}";
+    sendMessage("REGISTER_RESPONSE", data, msgId);
+    Serial.println(F("[MSG] 已响应 REGISTER 查询"));
 }

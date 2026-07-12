@@ -71,6 +71,38 @@ namespace FingerprintLockManager
         /// <summary>心跳（双向，用于保活检测）</summary>
         public const string CmdHeartbeat = "HEARTBEAT";
 
+        /// <summary>应答（下位机 -> 上位机，对下发命令的确认）</summary>
+        public const string CmdAck = "ACK";
+
+        // ===== 错误码常量（ACK 中 result 字段使用） =====
+
+        /// <summary>成功</summary>
+        public const string ErrOk = "OK";
+
+        /// <summary>未知错误</summary>
+        public const string ErrUnknown = "ERR_UNKNOWN";
+
+        /// <summary>参数错误</summary>
+        public const string ErrBadParam = "ERR_BAD_PARAM";
+
+        /// <summary>指纹未注册</summary>
+        public const string ErrFingerprintNotFound = "ERR_FP_NOT_FOUND";
+
+        /// <summary>权限不足</summary>
+        public const string ErrPermissionDenied = "ERR_PERMISSION_DENIED";
+
+        /// <summary>设备繁忙</summary>
+        public const string ErrDeviceBusy = "ERR_DEVICE_BUSY";
+
+        /// <summary>硬件故障（如指纹模块通信失败）</summary>
+        public const string ErrHardware = "ERR_HARDWARE";
+
+        /// <summary>存储失败（如写 Flash 失败）</summary>
+        public const string ErrStorage = "ERR_STORAGE";
+
+        /// <summary>超时</summary>
+        public const string ErrTimeout = "ERR_TIMEOUT";
+
         /// <summary>
         /// CommandType 枚举转换为命令字符串
         /// </summary>
@@ -99,6 +131,7 @@ namespace FingerprintLockManager
                 case CommandType.StatusResponse: return CmdStatusResponse;
                 case CommandType.ConfigSaved: return CmdConfigSaved;
                 case CommandType.Heartbeat: return CmdHeartbeat;
+                case CommandType.Ack: return CmdAck;
                 default: return null;
             }
         }
@@ -132,6 +165,7 @@ namespace FingerprintLockManager
                 case CmdStatusResponse: return CommandType.StatusResponse;
                 case CmdConfigSaved: return CommandType.ConfigSaved;
                 case CmdHeartbeat: return CommandType.Heartbeat;
+                case CmdAck: return CommandType.Ack;
                 default: return null;
             }
         }

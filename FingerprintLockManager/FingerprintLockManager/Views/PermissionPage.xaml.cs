@@ -1,12 +1,13 @@
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Media;
 
 namespace FingerprintLockManager
 {
     /// <summary>
-    /// 权限管理页面
-    /// 左侧用户列表，右侧4把锁（Lock0-3）权限勾选
-    /// 注意：系统锁(Lock0)只有 admin 角色可勾选，其他角色禁用
+    /// 权限管理页面（双层权限模型）
+    /// 左侧用户列表，右侧 4 把锁（Lock0-3）权限勾选，每把锁显示权限来源标记（默认/覆盖）。
+    /// 保存时写入个人覆盖项（SetUserPermission）；"重置为角色默认"按钮删除个人覆盖回退到角色默认。
     /// </summary>
     public partial class PermissionPage : Page
     {
@@ -39,7 +40,10 @@ namespace FingerprintLockManager
             LoadUserPermissions(user);
         }
 
-        /// <summary>加载指定用户的权限并填充勾选框</summary>
+        /// <summary>
+        /// 加载指定用户的权限并填充勾选框
+        /// 合并角色默认权限 + 个人覆盖项，并标记每把锁的权限来源
+        /// </summary>
         private void LoadUserPermissions(User user)
         {
             // 显示用户信息
@@ -53,29 +57,27 @@ namespace FingerprintLockManager
             bool isAdmin = user.Role == "admin";
             Lock0CheckBox.IsEnabled = isAdmin;
 
-            // 获取用户权限
-            var permissions = App.PermissionService.GetUserPermissions(user.UserId);
+            // 第一层：角色默认权限
+            var rolePerm = App.RolePermissionService.GetRolePermission(user.Role);
+            bool[] finalAccess = rolePerm.ToArray();
 
-            // 默认全 false，再按数据库记录填充
-            bool[] access = new bool[4];
-            foreach (var p in permissions)
+            // 第二层：个人覆盖项（存在覆盖则替换对应锁，并标记来源）
+            bool[] hasOverride = new bool[4];
+            var overrides = App.PermissionService.GetUserPermissions(user.UserId);
+            foreach (var p in overrides)
             {
                 if (p.LockId >= 0 && p.LockId < 4)
                 {
-                    access[p.LockId] = p.HasAccess;
+                    finalAccess[p.LockId] = p.HasAccess;
+                    hasOverride[p.LockId] = true;
                 }
             }
 
-            // 若数据库无记录，按角色默认权限
-            if (permissions.Count == 0)
-            {
-                access = GetDefaultByRole(user.Role);
-            }
-
-            Lock0CheckBox.IsChecked = access[0] && isAdmin;
-            Lock1CheckBox.IsChecked = access[1];
-            Lock2CheckBox.IsChecked = access[2];
-            Lock3CheckBox.IsChecked = access[3];
+            // 填充勾选框与来源标记
+            SetLockState(Lock0CheckBox, Lock0Source, finalAccess[0] && isAdmin, hasOverride[0]);
+            SetLockState(Lock1CheckBox, Lock1Source, finalAccess[1], hasOverride[1]);
+            SetLockState(Lock2CheckBox, Lock2Source, finalAccess[2], hasOverride[2]);
+            SetLockState(Lock3CheckBox, Lock3Source, finalAccess[3], hasOverride[3]);
 
             // 非 admin 用户 Lock0 强制不勾选并禁用
             if (!isAdmin)
@@ -84,7 +86,23 @@ namespace FingerprintLockManager
             }
         }
 
-        /// <summary>保存权限按钮</summary>
+        /// <summary>设置单个锁的勾选状态与来源标记</summary>
+        private void SetLockState(CheckBox cb, TextBlock sourceText, bool hasAccess, bool isOverride)
+        {
+            cb.IsChecked = hasAccess;
+            if (isOverride)
+            {
+                sourceText.Text = "[覆盖]";
+                sourceText.Foreground = FindResource("PrimaryBrush") as Brush;
+            }
+            else
+            {
+                sourceText.Text = "[默认]";
+                sourceText.Foreground = FindResource("SubTextBrush") as Brush;
+            }
+        }
+
+        /// <summary>保存权限按钮：写入个人覆盖项</summary>
         private void SaveButton_Click(object sender, RoutedEventArgs e)
         {
             if (_selectedUser == null)
@@ -96,7 +114,7 @@ namespace FingerprintLockManager
             string userId = _selectedUser.UserId;
             bool isAdmin = _selectedUser.Role == "admin";
 
-            // 构造权限字典
+            // 构造个人覆盖字典（Lock0 仅 admin 可写）
             var dict = new Dictionary<int, bool>
             {
                 [0] = isAdmin && (Lock0CheckBox.IsChecked == true),
@@ -105,9 +123,12 @@ namespace FingerprintLockManager
                 [3] = Lock3CheckBox.IsChecked == true
             };
 
-            if (App.PermissionService.SetPermissions(userId, dict))
+            if (App.PermissionService.SetUserPermissions(userId, dict))
             {
-                MessageBox.Show("权限保存成功", "成功", MessageBoxButton.OK, MessageBoxImage.Information);
+                MessageBox.Show("权限保存成功（已写入个人覆盖项）", "成功", MessageBoxButton.OK, MessageBoxImage.Information);
+
+                // 重新加载以刷新来源标记
+                LoadUserPermissions(_selectedUser);
 
                 // 同步权限到该用户所在的所有在线设备
                 SyncPermissionsToDevice(userId);
@@ -118,7 +139,32 @@ namespace FingerprintLockManager
             }
         }
 
-        /// <summary>同步权限到在线设备（按指纹查询权限后下发）</summary>
+        /// <summary>重置为角色默认按钮：删除该用户所有个人覆盖项，回退到角色默认权限</summary>
+        private void ResetButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_selectedUser == null)
+            {
+                MessageBox.Show("请先选择用户", "提示");
+                return;
+            }
+
+            var result = MessageBox.Show($"确认将用户「{_selectedUser.Name}」的权限重置为角色默认？\n所有个人覆盖项将被删除。",
+                "确认重置", MessageBoxButton.YesNo, MessageBoxImage.Question);
+            if (result != MessageBoxResult.Yes) return;
+
+            if (App.PermissionService.DeleteAllUserPermissions(_selectedUser.UserId))
+            {
+                MessageBox.Show("已重置为角色默认权限", "成功", MessageBoxButton.OK, MessageBoxImage.Information);
+                LoadUserPermissions(_selectedUser);
+                SyncPermissionsToDevice(_selectedUser.UserId);
+            }
+            else
+            {
+                MessageBox.Show("重置失败", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        /// <summary>同步权限到在线设备（按指纹查询最终权限后广播下发）</summary>
         private void SyncPermissionsToDevice(string userId)
         {
             try
@@ -126,7 +172,7 @@ namespace FingerprintLockManager
                 var user = App.UserService.GetUser(userId);
                 if (user == null || !user.FingerprintId.HasValue) return;
 
-                bool[] permissions = App.PermissionService.GetPermissionsByFingerprint(user.FingerprintId.Value);
+                bool[] permissions = App.PermissionService.GetFinalPermissions(user.UserId);
 
                 var data = new Dictionary<string, object>
                 {
@@ -135,33 +181,14 @@ namespace FingerprintLockManager
                     ["permissions"] = permissions
                 };
 
-                // 广播同步权限到所有在线设备
+                // 广播同步权限到所有在线设备（经 Root 转发）
                 var msg = Message.Create(Protocol.CmdSyncPermissions, "", data);
-                App.TcpServer.Broadcast(msg);
+                App.MeshBridge.Broadcast(msg);
             }
             catch
             {
                 // 同步失败时忽略，不影响本地保存
             }
-        }
-
-        /// <summary>根据角色获取默认权限（与 PermissionService 保持一致）</summary>
-        private static bool[] GetDefaultByRole(string role)
-        {
-            bool[] result = new bool[4];
-            switch (role)
-            {
-                case "admin":
-                    result[0] = true; result[1] = true; result[2] = true; result[3] = true;
-                    break;
-                case "teacher":
-                    result[0] = false; result[1] = true; result[2] = true; result[3] = true;
-                    break;
-                default:
-                    result[0] = false; result[1] = false; result[2] = false; result[3] = false;
-                    break;
-            }
-            return result;
         }
     }
 }

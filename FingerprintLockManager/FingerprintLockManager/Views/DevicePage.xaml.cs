@@ -51,18 +51,18 @@ namespace FingerprintLockManager
                 int.TryParse(item.Tag.ToString(), out lockId);
             }
 
-            // 检查设备是否在线（通过 TCP 连接列表判断）
-            bool tcpOnline = false;
-            foreach (var dc in App.TcpServer.GetOnlineDevices())
+            // 检查设备是否在线（通过 Mesh 桥接器的在线设备列表判断）
+            bool meshOnline = false;
+            foreach (var dc in App.MeshBridge.GetOnlineDevices())
             {
                 if (dc.DeviceId == selected.DeviceId && dc.IsOnline)
                 {
-                    tcpOnline = true;
+                    meshOnline = true;
                     break;
                 }
             }
 
-            if (!tcpOnline)
+            if (!meshOnline)
             {
                 MessageBox.Show($"设备「{selected.DeviceName}」当前未连接，无法远程开锁", "提示",
                     MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -77,7 +77,7 @@ namespace FingerprintLockManager
                 return;
             }
 
-            // 构造并发送控制命令
+            // 构造并发送控制命令（经 Mesh 桥接器转发到目标设备）
             var data = new Dictionary<string, object>
             {
                 ["lock_id"] = lockId,
@@ -85,7 +85,7 @@ namespace FingerprintLockManager
                 ["operator"] = App.CurrentUser?.UserId ?? "system"
             };
             var msg = Message.Create(Protocol.CmdControlLock, selected.DeviceId, data);
-            App.TcpServer.SendToDevice(selected.DeviceId, msg);
+            App.MeshBridge.SendToDevice(selected.DeviceId, msg);
 
             // 记录日志
             App.LogService.AddLog(new LogEntry

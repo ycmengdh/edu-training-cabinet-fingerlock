@@ -4,6 +4,7 @@ namespace FingerprintLockManager
 {
     /// <summary>
     /// 用户模型（对应 users 表）
+    /// 所有角色（admin/teacher/student）均可登录，均需密码
     /// </summary>
     public class User
     {
@@ -23,8 +24,12 @@ namespace FingerprintLockManager
         [Column(IsNullable = true)]
         public int? FingerprintId { get; set; }
 
-        /// <summary>登录密码哈希（SHA256，仅管理员需要）</summary>
-        [Column(IsNullable = true)]
+        /// <summary>密码盐值（随机16字节十六进制字符串，所有角色均需）</summary>
+        [Column(IsNullable = false)]
+        public string PasswordSalt { get; set; }
+
+        /// <summary>登录密码哈希（SHA256(password+salt)，所有角色均需）</summary>
+        [Column(IsNullable = false)]
         public string PasswordHash { get; set; }
 
         /// <summary>创建时间</summary>

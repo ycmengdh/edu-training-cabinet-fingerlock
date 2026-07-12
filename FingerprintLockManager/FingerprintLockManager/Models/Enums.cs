@@ -28,6 +28,21 @@ namespace FingerprintLockManager
     }
 
     /// <summary>
+    /// 上位机与 Mesh 根节点之间的传输链路类型
+    /// </summary>
+    public enum TransportType
+    {
+        /// <summary>USB 串口直连根节点（SerialTransport）</summary>
+        UsbSerial,
+
+        /// <summary>TCP 客户端：上位机主动连接根节点 AP 热点（TcpClientTransport）</summary>
+        TcpClient,
+
+        /// <summary>TCP 服务端：上位机监听端口，等待根节点连接（TcpServerTransport）</summary>
+        TcpServer
+    }
+
+    /// <summary>
     /// 通信命令类型枚举（对应协议中的 cmd 字段）
     /// </summary>
     public enum CommandType
@@ -87,6 +102,9 @@ namespace FingerprintLockManager
         ConfigSaved,
 
         /// <summary>心跳（双向，用于保活检测）</summary>
-        Heartbeat
+        Heartbeat,
+
+        /// <summary>应答（下位机 -> 上位机，对下发命令的确认）</summary>
+        Ack
     }
 }

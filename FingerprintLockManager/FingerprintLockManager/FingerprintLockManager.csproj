@@ -29,6 +29,8 @@
     <PackageReference Include="FreeSql.Provider.Sqlite" Version="3.2.0" />
     <!-- JSON 序列化 -->
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <!-- USB 串口通讯（与 Mesh 根节点 USB 双链路） -->
+    <PackageReference Include="System.IO.Ports" Version="8.0.0" />
   </ItemGroup>
 
 </Project>

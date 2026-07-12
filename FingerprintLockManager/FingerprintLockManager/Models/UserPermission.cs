@@ -3,10 +3,13 @@ using FreeSql.DataAnnotations;
 namespace FingerprintLockManager
 {
     /// <summary>
-    /// 权限模型（对应 permissions 表）
-    /// 描述某个用户对某个锁（0-3）的访问权限
+    /// 用户个人权限覆盖模型（对应 user_permissions 表）
+    /// 双层权限模型的第二层：个人动态覆盖项，优先级高于角色默认权限。
+    /// 若某用户对某锁存在覆盖记录，则以覆盖值为准；否则回退到角色默认权限。
     /// </summary>
-    public class Permission
+    [Table(Name = "user_permissions")]
+    [Index("idx_user_lock", "UserId,LockId", true)]
+    public class UserPermission
     {
         /// <summary>权限 ID（自增主键）</summary>
         [Column(IsPrimary = true, IsIdentity = true)]
@@ -20,7 +23,7 @@ namespace FingerprintLockManager
         [Column(IsNullable = false)]
         public int LockId { get; set; }
 
-        /// <summary>是否有访问权限</summary>
+        /// <summary>是否有访问权限（个人覆盖值）</summary>
         [Column(IsNullable = false)]
         public bool HasAccess { get; set; }
 

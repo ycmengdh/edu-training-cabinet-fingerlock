@@ -63,8 +63,8 @@ namespace FingerprintLockManager
         /// <summary>添加用户</summary>
         private void AddUserButton_Click(object sender, RoutedEventArgs e)
         {
-            // 弹出对话框输入姓名和角色
-            if (!ShowAddUserDialog(out string name, out string role))
+            // 弹出对话框输入姓名、角色与密码
+            if (!ShowAddUserDialog(out string name, out string role, out string password))
             {
                 return;
             }
@@ -72,6 +72,12 @@ namespace FingerprintLockManager
             if (string.IsNullOrWhiteSpace(name))
             {
                 MessageBox.Show("请输入姓名", "提示");
+                return;
+            }
+
+            if (string.IsNullOrEmpty(password))
+            {
+                MessageBox.Show("请输入密码", "提示");
                 return;
             }
 
@@ -84,14 +90,12 @@ namespace FingerprintLockManager
                 Name = name.Trim(),
                 Role = role,
                 FingerprintId = null,
-                PasswordHash = "",
                 CreateTime = DateTime.Now
             };
 
-            if (App.UserService.AddUser(user))
+            // 双层权限模型：无需初始化个人权限，用户默认继承角色权限模板
+            if (App.UserService.AddUser(user, password))
             {
-                // 初始化默认权限
-                App.PermissionService.InitDefaultPermissions(userId, role);
                 MessageBox.Show($"用户添加成功！\n用户ID：{userId}", "成功", MessageBoxButton.OK, MessageBoxImage.Information);
                 LoadUsers();
             }
@@ -180,17 +184,18 @@ namespace FingerprintLockManager
 
         // ===== 代码构建的对话框（避免额外文件） =====
 
-        /// <summary>显示添加用户对话框，返回姓名与角色</summary>
-        private bool ShowAddUserDialog(out string name, out string role)
+        /// <summary>显示添加用户对话框，返回姓名、角色与密码</summary>
+        private bool ShowAddUserDialog(out string name, out string role, out string password)
         {
             name = "";
             role = "student";
+            password = "";
 
             var dlg = new Window
             {
                 Title = "添加用户",
                 Width = 320,
-                Height = 240,
+                Height = 300,
                 WindowStartupLocation = WindowStartupLocation.CenterOwner,
                 Owner = Window.GetWindow(this),
                 ResizeMode = ResizeMode.NoResize,
@@ -211,6 +216,10 @@ namespace FingerprintLockManager
             roleCombo.SelectedIndex = 1;
             panel.Children.Add(roleCombo);
 
+            panel.Children.Add(new TextBlock { Text = "密码", Margin = new Thickness(0, 0, 0, 6) });
+            var passwordBox = new PasswordBox { Margin = new Thickness(0, 0, 0, 16) };
+            panel.Children.Add(passwordBox);
+
             var btnPanel = new StackPanel
             {
                 Orientation = Orientation.Horizontal,
@@ -229,6 +238,7 @@ namespace FingerprintLockManager
             // 使用局部变量在 lambda 中暂存（out 参数不能在 lambda 中赋值）
             string localName = "";
             string localRole = "student";
+            string localPassword = "";
             okBtn.Click += (s, e) =>
             {
                 localName = nameBox.Text;
@@ -236,6 +246,7 @@ namespace FingerprintLockManager
                 {
                     localRole = item.Tag?.ToString() ?? "student";
                 }
+                localPassword = passwordBox.Password;
                 confirmed = true;
                 dlg.Close();
             };
@@ -246,6 +257,7 @@ namespace FingerprintLockManager
             {
                 name = localName;
                 role = localRole;
+                password = localPassword;
             }
             return confirmed;
         }
