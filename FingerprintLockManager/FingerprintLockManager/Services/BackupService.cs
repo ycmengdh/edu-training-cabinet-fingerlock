@@ -10,19 +10,10 @@ namespace FingerprintLockManager
     /// 备份仅用于还原，数据以根节点为主。
     /// 分配设备/权限成功才更新根节点，保证根节点数据准确。
     ///
-    /// 备份内容：
-    ///   - 业务表 JSON（users/classes/role_permissions/user_permissions/device_authorizations/devices/fingerprint_templates）
-    ///   - 指纹模板二进制文件（FP_&lt;userId&gt;.bin，仅完整备份包含）
+    /// 备份内容：业务表 JSON + 指纹模板二进制文件（全量备份）
     ///
-    /// 两种备份模式：
-    ///   1. BackupBeforeAction（同步，自动备份）：仅业务表 JSON，快速（&lt;1秒），不阻塞用户操作
-    ///   2. CreateFullBackupAsync（异步，手动备份）：业务表 JSON + 所有指纹模板二进制文件，完整恢复点
-    ///
-    /// 还原逻辑：
-    ///   - 还原前自动备份当前状态
-    ///   - 业务表 JSON 写回根节点 SD 卡
-    ///   - 如果 zip 中含 templates/ 目录，把指纹模板文件上传回根节点
-    ///   - 重新加载 DataStore 内存数据
+    /// 串口波特率 2Mbps + 并行下载（10 并发），200 枚指纹模板全量备份约 1-2 秒完成。
+    /// 根节点不在线时跳过模板下载，仅备份业务表（从内存快照，&lt;100ms）。
     /// </summary>
     public class BackupService
     {
@@ -36,6 +27,12 @@ namespace FingerprintLockManager
             "device_authorizations", "devices", "fingerprint_templates"
         };
 
+        /// <summary>模板下载并发数</summary>
+        private const int TemplateDownloadConcurrency = 10;
+
+        /// <summary>单枚模板下载超时（毫秒，配合 2Mbps 波特率）</summary>
+        private const int TemplateDownloadTimeoutMs = 3000;
+
         /// <summary>获取备份列表</summary>
         public List<BackupRecord> GetBackupRecords()
         {
@@ -43,10 +40,12 @@ namespace FingerprintLockManager
         }
 
         /// <summary>
-        /// 在用户操作前创建自动备份（仅业务表 JSON，快速）
+        /// 在用户操作前创建自动备份（全量：业务表 JSON + 指纹模板二进制文件）
         ///
-        /// 此方法为同步，供各业务操作前调用，保证不阻塞主流程。
-        /// 不下载指纹模板二进制文件（耗时较长），如需完整备份请用 CreateFullBackupAsync。
+        /// 同步方法，供各业务操作前调用。
+        /// 内部在 ThreadPool 线程执行异步全量备份，避免 UI 死锁。
+        /// 2Mbps 波特率 + 10 并发下载，200 枚模板约 1-2 秒完成。
+        /// 根节点不在线时跳过模板下载，仅备份业务表（&lt;100ms）。
         /// </summary>
         /// <param name="triggerAction">触发备份的操作描述</param>
         /// <param name="operatorUserId">操作人</param>
@@ -55,23 +54,10 @@ namespace FingerprintLockManager
         {
             try
             {
-                Directory.CreateDirectory(BackupDir);
-
-                // 生成备份 ID（时间戳，精确到秒）
-                string backupId = DateTime.Now.ToString("yyyyMMddHHmmss");
-                string zipPath = Path.Combine(BackupDir, $"backup_{backupId}.zip");
-
-                // 拉取 DataStore 业务表全量快照
-                var snapshot = TakeSnapshot();
-
-                // 打包为 zip
-                using (var fs = new FileStream(zipPath, FileMode.Create, FileAccess.Write))
-                using (var zip = new ZipArchive(fs, ZipArchiveMode.Create))
-                {
-                    WriteTablesToZip(zip, snapshot);
-                }
-
-                return SaveBackupRecord(zipPath, backupId, triggerAction, operatorUserId, snapshot.Keys, 0);
+                // 在 ThreadPool 线程执行异步全量备份，同步等待结果
+                // 避免在 UI 线程直接 .Result 导致死锁
+                return Task.Run(() =>
+                    ExecuteFullBackupAsync(triggerAction, operatorUserId)).GetAwaiter().GetResult();
             }
             catch (Exception ex)
             {
@@ -84,7 +70,6 @@ namespace FingerprintLockManager
         /// 创建完整备份（业务表 JSON + 所有指纹模板二进制文件）
         ///
         /// 用于手动备份场景，可作为完整的系统恢复点。
-        /// 异步方法，因为需要逐个下载指纹模板文件（每个 512B，网络往返耗时）。
         /// </summary>
         /// <param name="triggerAction">触发备份的操作描述</param>
         /// <param name="operatorUserId">操作人</param>
@@ -93,50 +78,70 @@ namespace FingerprintLockManager
         {
             try
             {
-                Directory.CreateDirectory(BackupDir);
-
-                string backupId = DateTime.Now.ToString("yyyyMMddHHmmss");
-                string zipPath = Path.Combine(BackupDir, $"backup_{backupId}.zip");
-
-                var snapshot = TakeSnapshot();
-                int templateCount = 0;
-
-                using (var fs = new FileStream(zipPath, FileMode.Create, FileAccess.Write))
-                using (var zip = new ZipArchive(fs, ZipArchiveMode.Create))
-                {
-                    // 1. 写入业务表 JSON
-                    WriteTablesToZip(zip, snapshot);
-
-                    // 2. 下载并写入指纹模板二进制文件
-                    templateCount = await WriteTemplatesToZipAsync(zip);
-                }
-
-                string action = triggerAction;
-                if (templateCount > 0)
-                {
-                    action += $"（含 {templateCount} 枚指纹模板）";
-                }
-
-                var record = SaveBackupRecord(zipPath, backupId, action, operatorUserId,
-                    snapshot.Keys, 0);
-
-                if (templateCount > 0)
-                {
-                    record.Tables = record.Tables + ",templates";
-                    // 更新 SQLite 中的记录（重新写入）
-                    LogDbService.Current.AddBackupRecord(record);
-                }
-
-                System.Diagnostics.Debug.WriteLine(
-                    $"[Backup] 完整备份完成：{backupId}，模板 {templateCount} 枚");
-
-                return record;
+                return await ExecuteFullBackupAsync(triggerAction, operatorUserId);
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[Backup] 完整备份失败：{ex.Message}");
                 return null;
             }
+        }
+
+        /// <summary>
+        /// 执行全量备份的核心逻辑（业务表 + 指纹模板并行下载）
+        /// </summary>
+        private static async Task<BackupRecord?> ExecuteFullBackupAsync(string triggerAction, string? operatorUserId)
+        {
+            Directory.CreateDirectory(BackupDir);
+
+            // 生成备份 ID（时间戳，精确到秒）
+            string backupId = DateTime.Now.ToString("yyyyMMddHHmmss");
+            string zipPath = Path.Combine(BackupDir, $"backup_{backupId}.zip");
+
+            // 拉取 DataStore 业务表全量快照
+            var snapshot = TakeSnapshot();
+
+            // 并行下载指纹模板二进制文件
+            var templates = snapshot["fingerprint_templates"] as List<FingerprintTemplate> ?? new List<FingerprintTemplate>();
+            var templateData = await DownloadTemplatesParallelAsync(templates);
+            int templateCount = templateData.Count;
+
+            // 打包为 zip
+            using (var fs = new FileStream(zipPath, FileMode.Create, FileAccess.Write))
+            using (var zip = new ZipArchive(fs, ZipArchiveMode.Create))
+            {
+                // 1. 写入业务表 JSON
+                WriteTablesToZip(zip, snapshot);
+
+                // 2. 写入指纹模板二进制文件
+                foreach (var (userId, bytes) in templateData)
+                {
+                    var entry = zip.CreateEntry($"templates/FP_{userId}.bin");
+                    using var stream = entry.Open();
+                    stream.Write(bytes, 0, bytes.Length);
+                }
+            }
+
+            string action = triggerAction;
+            if (templateCount > 0)
+            {
+                action += $"（含 {templateCount} 枚指纹模板）";
+            }
+
+            var record = SaveBackupRecord(zipPath, backupId, action, operatorUserId,
+                snapshot.Keys, 0);
+
+            if (templateCount > 0)
+            {
+                record.Tables = record.Tables + ",templates";
+                // 更新 SQLite 中的记录
+                LogDbService.Current.AddBackupRecord(record);
+            }
+
+            System.Diagnostics.Debug.WriteLine(
+                $"[Backup] 全量备份完成：{backupId}，模板 {templateCount} 枚");
+
+            return record;
         }
 
         /// <summary>
@@ -150,7 +155,7 @@ namespace FingerprintLockManager
         /// </summary>
         /// <param name="backupId">备份 ID</param>
         /// <param name="operatorUserId">操作人</param>
-        /// <returns>成功返回 null；失败返回错误信息</returns>
+        /// <returns>还原结果；失败时 ErrorMessage 非空</returns>
         public async Task<RestoreResult?> RestoreFromBackupAsync(string backupId, string? operatorUserId)
         {
             try
@@ -172,7 +177,7 @@ namespace FingerprintLockManager
                 {
                     foreach (var entry in zip.Entries)
                     {
-                        // 业务表 JSON
+                        // 业务表 JSON（根目录下的 .json 文件）
                         if (entry.FullName.EndsWith(".json") && !entry.FullName.Contains("/"))
                         {
                             string tableName = Path.GetFileNameWithoutExtension(entry.Name);
@@ -305,36 +310,50 @@ namespace FingerprintLockManager
         }
 
         /// <summary>
-        /// 下载所有指纹模板并写入 zip 的 templates/ 目录
+        /// 并行下载所有指纹模板二进制文件（并发 TemplateDownloadConcurrency，单个超时 TemplateDownloadTimeoutMs）
+        ///
+        /// 2Mbps 波特率下，单枚 512B 模板传输 + 往返约 30-50ms。
+        /// 200 枚 × 10 并发 = 20 批 × 50ms ≈ 1 秒。
+        /// 单枚失败不影响其他，最终返回成功下载的列表。
         /// </summary>
-        /// <returns>成功写入的模板数量</returns>
-        private static async Task<int> WriteTemplatesToZipAsync(ZipArchive zip)
+        /// <param name="templates">指纹模板元数据列表</param>
+        /// <returns>成功下载的 (userId, bytes) 列表</returns>
+        private static async Task<List<(string userId, byte[] bytes)>> DownloadTemplatesParallelAsync(
+            List<FingerprintTemplate> templates)
         {
-            if (!App.SdStorageService.IsAvailable) return 0;
-
-            var templates = DataStore.Current.GetFingerprintTemplates();
-            int count = 0;
-
-            foreach (var t in templates)
+            if (!App.SdStorageService.IsAvailable || templates.Count == 0)
             {
+                return new List<(string, byte[])>();
+            }
+
+            var semaphore = new SemaphoreSlim(TemplateDownloadConcurrency);
+            var tasks = templates.Select(async t =>
+            {
+                await semaphore.WaitAsync();
                 try
                 {
-                    var bytes = await App.SdStorageService.DownloadTemplateAsync(t.UserId, 1);
-                    if (bytes != null && bytes.Length > 0)
-                    {
-                        var entry = zip.CreateEntry($"templates/FP_{t.UserId}.bin");
-                        using var stream = entry.Open();
-                        stream.Write(bytes, 0, bytes.Length);
-                        count++;
-                    }
+                    var bytes = await App.SdStorageService.DownloadTemplateAsync(
+                        t.UserId, 1, TemplateDownloadTimeoutMs);
+                    return (t.UserId, bytes);
                 }
                 catch
                 {
-                    // 单个模板下载失败忽略，继续下一个
+                    // 单个模板下载失败忽略，不影响整体备份
+                    return (t.UserId, (byte[]?)null);
                 }
-            }
+                finally
+                {
+                    semaphore.Release();
+                }
+            }).ToList();
 
-            return count;
+            var results = await Task.WhenAll(tasks);
+
+            // 过滤掉失败的
+            return results
+                .Where(r => r.Item2 != null && r.Item2.Length > 0)
+                .Select(r => (r.UserId, r.Item2!))
+                .ToList();
         }
 
         /// <summary>保存备份记录到 SQLite</summary>

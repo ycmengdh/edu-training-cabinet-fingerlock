@@ -11,7 +11,7 @@ namespace FingerprintLockManager
         /// <summary>串口名（UsbSerial 用，如 COM3 / /dev/ttyUSB0）</summary>
         public string PortName { get; set; } = "";
 
-        /// <summary>波特率（UsbSerial 用，默认 921600）</summary>
+        /// <summary>波特率（UsbSerial 用，默认 2Mbps）</summary>
         public int BaudRate { get; set; } = SerialTransport.DefaultBaudRate;
 
         /// <summary>目标主机（TcpClient 用，根节点 AP IP，默认 192.168.4.1）</summary>

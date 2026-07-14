@@ -128,7 +128,7 @@ void initNTP() {
 
 // ====== 初始化 ======
 void setup() {
-    // 串口初始化（调试输出；Root USB 上行模式后续会切到 921600）
+    // 串口初始化（调试输出；Root USB 上行模式后续会切到 2Mbps）
     Serial.begin(115200);
     delay(300);
     Serial.println();

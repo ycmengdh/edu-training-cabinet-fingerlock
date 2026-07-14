@@ -84,7 +84,7 @@
 #define MESH_RX_BUFFER_SIZE     1500     // Mesh 接收缓冲大小
 
 // ===================== 上行链路（Root节点专用） =====================
-#define UPLINK_USB_BAUD         921600   // USB 串口波特率
+#define UPLINK_USB_BAUD         2000000  // USB 串口波特率（2Mbps，满足指纹模板传输带宽需求）
 #define UPLINK_AP_SSID          "ESP32_Root"   // AP 模式热点名
 #define UPLINK_AP_PASSWORD      "12345678"     // AP 模式密码
 #define UPLINK_TCP_PORT         8888           // TCP 服务端口

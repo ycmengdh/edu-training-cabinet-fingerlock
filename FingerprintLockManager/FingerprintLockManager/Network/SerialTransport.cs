@@ -5,13 +5,13 @@ namespace FingerprintLockManager
 {
     /// <summary>
     /// USB 串口传输实现
-    /// 通过 USB 串口直连 Mesh 根节点，默认波特率 921600。
+    /// 通过 USB 串口直连 Mesh 根节点，默认波特率 2000000（2Mbps）。
     /// DataReceived 事件按行读取（\n 分隔），触发 LineReceived 事件。
     /// </summary>
     public class SerialTransport : ITransport
     {
-        /// <summary>默认波特率（921600，满足 Mesh 控制消息带宽需求）</summary>
-        public const int DefaultBaudRate = 921600;
+        /// <summary>默认波特率（2Mbps，满足 Mesh 控制消息 + 指纹模板传输带宽需求）</summary>
+        public const int DefaultBaudRate = 2000000;
 
         private SerialPort? _port;
         private readonly object _sendLock = new object();

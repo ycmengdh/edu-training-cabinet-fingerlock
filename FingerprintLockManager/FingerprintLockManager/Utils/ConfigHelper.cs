@@ -26,8 +26,8 @@ namespace FingerprintLockManager
         /// <summary>USB 串口名（UsbSerial 用，留空则自动选择首个串口）</summary>
         public string SerialPortName { get; set; } = "";
 
-        /// <summary>USB 串口波特率（默认 921600）</summary>
-        public int SerialBaudRate { get; set; } = 921600;
+        /// <summary>USB 串口波特率（默认 2000000，2Mbps）</summary>
+        public int SerialBaudRate { get; set; } = 2000000;
 
         /// <summary>TCP 客户端目标主机（TcpClient 用，根节点 AP IP，默认 192.168.4.1）</summary>
         public string TcpClientHost { get; set; } = "192.168.4.1";
@@ -51,7 +51,7 @@ namespace FingerprintLockManager
             {
                 Type = type,
                 PortName = SerialPortName ?? "",
-                BaudRate = SerialBaudRate > 0 ? SerialBaudRate : 921600,
+                BaudRate = SerialBaudRate > 0 ? SerialBaudRate : 2000000,
                 Host = TcpClientHost ?? "192.168.4.1",
                 Port = type == global::FingerprintLockManager.TransportType.TcpServer ? TcpServerPort : TcpClientPort
             };
