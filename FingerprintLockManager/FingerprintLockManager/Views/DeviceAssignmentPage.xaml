@@ -1,0 +1,161 @@
+<Page x:Class="FingerprintLockManager.DeviceAssignmentPage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      Title="柜子分配"
+      Background="{StaticResource BackgroundBrush}">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- 页面标题 -->
+        <TextBlock Grid.Row="0" Text="柜子分配与权限下发" Style="{StaticResource TitleText}" Margin="0,0,0,4"/>
+        <TextBlock Grid.Row="0" Text="学生分配柜子并勾选锁权限后，才把指纹+权限+学生信息下发到该柜子（按需下发）。老师只能管理自己班级的学生。"
+                   Foreground="{StaticResource SubTextBrush}" FontSize="11" Margin="0,28,0,12"
+                   TextWrapping="Wrap"/>
+
+        <!-- 主体：左学生列表 + 右权限矩阵 -->
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="320"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- 左侧：学生列表 -->
+            <Border Grid.Column="0" Style="{StaticResource Card}" Padding="0" Margin="0,0,12,0">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+
+                    <!-- 班级筛选 -->
+                    <Border Grid.Row="0" Padding="12,10" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="班级筛选：" Style="{StaticResource LabelText}" Margin="0,0,8,0"/>
+                            <ComboBox x:Name="ClassFilterBox" Width="180" SelectionChanged="ClassFilterBox_SelectionChanged"/>
+                        </StackPanel>
+                    </Border>
+
+                    <Border Grid.Row="1" Padding="12,8" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1">
+                        <TextBlock Text="学生列表（需已录入指纹）" FontWeight="Bold" Foreground="{StaticResource TextBrush}"/>
+                    </Border>
+
+                    <ListBox x:Name="StudentListBox" Grid.Row="2" BorderThickness="0"
+                             SelectionChanged="StudentListBox_SelectionChanged">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel Margin="2,0">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="{Binding Name}" FontWeight="Bold"/>
+                                        <TextBlock Text="{Binding FingerprintId, StringFormat=  FP:{0}}" FontSize="11"
+                                                   Margin="6,0,0,0" Foreground="{StaticResource SubTextBrush}"/>
+                                    </StackPanel>
+                                    <TextBlock Text="{Binding UserId}" FontSize="11"
+                                               Foreground="{StaticResource SubTextBrush}"/>
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </Grid>
+            </Border>
+
+            <!-- 右侧：权限矩阵 -->
+            <Border Grid.Column="1" Style="{StaticResource Card}">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <!-- 选中学生信息 -->
+                    <StackPanel Grid.Row="0" Margin="0,0,0,16">
+                        <TextBlock Text="当前学生" Foreground="{StaticResource SubTextBrush}" FontSize="12"/>
+                        <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                            <TextBlock x:Name="SelectedStudentName" Text="请选择左侧学生" FontWeight="Bold" FontSize="16"
+                                       Foreground="{StaticResource TextBrush}"/>
+                            <Border Background="{StaticResource PrimaryLightBrush}" CornerRadius="3"
+                                    Padding="8,2" Margin="12,0,0,0" VerticalAlignment="Center">
+                                <TextBlock x:Name="SelectedStudentFp" Text="未录指纹" FontSize="12"
+                                           Foreground="{StaticResource PrimaryBrush}"/>
+                            </Border>
+                        </StackPanel>
+                    </StackPanel>
+
+                    <!-- 选择柜子 -->
+                    <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,16">
+                        <TextBlock Text="分配柜子：" Style="{StaticResource LabelText}" Margin="0,0,8,0"/>
+                        <ComboBox x:Name="DeviceCombo" Width="220">
+                            <ComboBox.ItemTemplate>
+                                <DataTemplate>
+                                    <StackPanel>
+                                        <TextBlock Text="{Binding DeviceName}" FontWeight="Bold"/>
+                                        <TextBlock Text="{Binding DeviceId}" FontSize="11"
+                                                   Foreground="{StaticResource SubTextBrush}"/>
+                                    </StackPanel>
+                                </DataTemplate>
+                            </ComboBox.ItemTemplate>
+                        </ComboBox>
+                    </StackPanel>
+
+                    <!-- 4 把锁权限勾选 -->
+                    <StackPanel Grid.Row="2" Margin="0,0,0,12">
+                        <TextBlock Text="锁权限（仅勾选的锁会下发到柜子，验证后灯亮可开）" FontWeight="Bold" Margin="0,0,0,8"
+                                   Foreground="{StaticResource TextBrush}"/>
+                        <Border Style="{StaticResource Card}" Padding="12" Margin="0,0,0,8">
+                            <StackPanel Orientation="Horizontal">
+                                <CheckBox x:Name="Lock0CheckBox" Content="Lock0 - 系统锁" VerticalContentAlignment="Center"/>
+                                <TextBlock Text="（一般仅管理员）" Margin="12,0,0,0" FontSize="11"
+                                           Foreground="{StaticResource SubTextBrush}" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </Border>
+                        <Border Style="{StaticResource Card}" Padding="12" Margin="0,0,0,8">
+                            <CheckBox x:Name="Lock1CheckBox" Content="Lock1 - 实训柜1" VerticalContentAlignment="Center"/>
+                        </Border>
+                        <Border Style="{StaticResource Card}" Padding="12" Margin="0,0,0,8">
+                            <CheckBox x:Name="Lock2CheckBox" Content="Lock2 - 实训柜2" VerticalContentAlignment="Center"/>
+                        </Border>
+                        <Border Style="{StaticResource Card}" Padding="12">
+                            <CheckBox x:Name="Lock3CheckBox" Content="Lock3 - 实训柜3" VerticalContentAlignment="Center"/>
+                        </Border>
+                    </StackPanel>
+
+                    <!-- 已授权列表 -->
+                    <Border Grid.Row="3" Style="{StaticResource Card}" Padding="0" Margin="0,0,0,12">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <Border Grid.Row="0" Padding="12,8" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1">
+                                <TextBlock Text="该学生已分配的柜子" FontWeight="Bold" Foreground="{StaticResource TextBrush}"/>
+                            </Border>
+                            <DataGrid x:Name="AuthDataGrid" Grid.Row="1" AutoGenerateColumns="False"
+                                      IsReadOnly="True" SelectionMode="Single" Height="160">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="柜子ID" Binding="{Binding DeviceId}" Width="140"/>
+                                    <DataGridTextColumn Header="锁权限" Binding="{Binding LockSummary}" Width="*"/>
+                                    <DataGridTextColumn Header="指纹下发" Binding="{Binding FingerprintDeployed}" Width="100"/>
+                                    <DataGridTextColumn Header="下发时间" Binding="{Binding DeployTime, StringFormat=yyyy-MM-dd HH:mm}" Width="160"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </Grid>
+                    </Border>
+
+                    <!-- 操作按钮 -->
+                    <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right">
+                        <Button x:Name="RemoveButton" Content="移除该柜子授权" Style="{StaticResource DangerButton}"
+                                Click="RemoveButton_Click"/>
+                        <Button x:Name="DeployButton" Content="下发到柜子" Margin="12,0,0,0" Click="DeployButton_Click"/>
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </Grid>
+    </Grid>
+</Page>

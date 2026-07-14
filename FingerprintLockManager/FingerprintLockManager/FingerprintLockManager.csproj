@@ -28,6 +28,8 @@
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
     <!-- USB 串口通讯（与 Mesh 根节点 USB 双链路） -->
     <PackageReference Include="System.IO.Ports" Version="8.0.0" />
+    <!-- SQLite（仅用于开锁日志 + 下发状态 + 备份记录，需求 9/11） -->
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.0" />
   </ItemGroup>
 
 </Project>

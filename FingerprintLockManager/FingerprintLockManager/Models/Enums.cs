@@ -146,6 +146,45 @@ namespace FingerprintLockManager
         DeleteFpTemplate,
 
         /// <summary>删除指纹模板响应（根节点 -> 上位机）</summary>
-        FpTemplateDeleteResponse
+        FpTemplateDeleteResponse,
+
+        // ====== 按需下发与容量管理命令（上位机 <-> 柜子，需求 6/7/8/10） ======
+
+        /// <summary>下发单用户权限+指纹到指定柜子（上位机 -> 柜子，需求 6/8）</summary>
+        DeployUser,
+
+        /// <summary>下发用户响应（柜子 -> 上位机，含成功/失败）</summary>
+        DeployUserResponse,
+
+        /// <summary>从指定柜子删除某用户及其指纹（上位机 -> 柜子，需求 10 清理空间）</summary>
+        RemoveUser,
+
+        /// <summary>删除用户响应（柜子 -> 上位机）</summary>
+        RemoveUserResponse,
+
+        /// <summary>按班级批量删除柜子上的用户（上位机 -> 柜子，需求 10 学生毕业全班删）</summary>
+        DeleteClassUsers,
+
+        /// <summary>按班级删除响应（柜子 -> 上位机）</summary>
+        DeleteClassUsersResponse,
+
+        /// <summary>查询柜子本地容量/已用空间（上位机 -> 柜子，需求 10 预警）</summary>
+        ReadCapacity,
+
+        /// <summary>容量查询响应（柜子 -> 上位机，返回 used/max）</summary>
+        CapacityResponse,
+
+        // ====== 指纹 4+2 录入流程命令（需求 5） ======
+
+        /// <summary>指纹录入分步命令（上位机 -> 柜子：触发某次采集/验证/存储）</summary>
+        EnrollFpStage,
+
+        /// <summary>指纹录入分步响应（柜子 -> 上位机：返回该步结果）</summary>
+        FpEnrollStageResponse,
+
+        // ====== 10 秒开锁窗口控制（需求 2） ======
+
+        /// <summary>取消指纹验证/退出 10 秒开锁窗口（上位机 -> 柜子，或柜子本地按键触发）</summary>
+        CancelVerify
     }
 }

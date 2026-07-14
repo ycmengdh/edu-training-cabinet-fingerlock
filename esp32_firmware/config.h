@@ -32,6 +32,14 @@
 // LED 指示灯引脚
 #define LED_PIN             27
 
+// 权限指示灯引脚（LED_PERM_PIN 系列）
+// 验证通过进入开锁窗口后，有权限的锁对应灯亮，引导用户按对应按键开锁
+// 注：每把锁独占一个权限指示灯 GPIO
+#define LED_PERM0_PIN       32   // Lock0 权限指示灯
+#define LED_PERM1_PIN       33   // Lock1 权限指示灯
+#define LED_PERM2_PIN       2    // Lock2 权限指示灯
+#define LED_PERM3_PIN       4    // Lock3 权限指示灯
+
 // ===================== SD 卡 SPI 引脚（仅根节点使用） =====================
 // 使用 SPI 模式，占用 4 个 GPIO（避开已用引脚 5/16/17/18/19/21/22/23/25/26/27）
 #define SD_SPI_MOSI_PIN     15
@@ -45,6 +53,9 @@
 
 // ===================== 锁控制参数 =====================
 #define LOCK_OPEN_DURATION_MS   3000   // 开锁持续时间 3 秒
+
+// 10 秒开锁窗口（需求 2）：鉴权通过后进入该窗口，期间可多次开有权限的锁
+#define UNLOCK_WINDOW_SECONDS   10
 
 // ===================== 按键参数 =====================
 #define KEY_DEBOUNCE_MS         20     // 按键消抖时间
@@ -82,6 +93,9 @@
 #define UPLINK_TCP_RECONNECT_MS 5000           // TCP 重连间隔
 
 // ===================== Flash 分区偏移常量（4.2.3分区方案） =====================
+// 容量规划说明：虽然当前编译目标为 ESP32-WROOM（platformio.ini board=esp32dev），
+// 但本固件的存储容量参数按 ESP32-S3 N16R8（16MB Flash, 8MB PSRAM）规划，
+// 分区偏移与最大用户数等参数均预留充足余量，便于后续平滑迁移到 N16R8 硬件。
 #define PERM_STORE_OFFSET       0x314000   // 权限数据分区起始偏移 128KB
 #define LOG_STORE_OFFSET        0x334000   // 离线日志分区起始偏移 128KB
 #define CONFIG_OFFSET           0x354000   // 设备配置分区偏移 16KB
@@ -104,7 +118,9 @@
 #define PERM_MAGIC              0xA5A55A5A  // 权限数据魔数
 #define PERM_RECORD_SIZE        12          // 单条用户权限记录 12B
 #define PERM_HEADER_SIZE        16          // 权限文件头 16B
-#define PERM_MAX_USERS          200         // 最大用户数
+#define PERM_MAX_USERS          200         // 最大用户数（需求 10：最多 200 个用户）
+// 容量预警阈值（需求 10）：已用用户数达到 190 时预警，提示清理或扩容
+#define CAPACITY_WARN_THRESHOLD 190
 
 // ===================== 离线日志格式常量（4.2.3节） =====================
 #define LOG_RECORD_SIZE         32          // 单条日志记录 32B

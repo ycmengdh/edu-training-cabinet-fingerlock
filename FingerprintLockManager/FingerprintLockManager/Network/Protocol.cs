@@ -115,6 +115,56 @@ namespace FingerprintLockManager
         /// <summary>删除指纹模板响应（根节点 -> 上位机）</summary>
         public const string CmdFpTemplateDeleteResponse = "FP_TEMPLATE_DELETE_RESPONSE";
 
+        // ===== 按需下发与容量管理命令（上位机 <-> 柜子，需求 6/7/8/10） =====
+
+        /// <summary>下发单用户权限+指纹到指定柜子（上位机 -> 柜子）</summary>
+        public const string CmdDeployUser = "DEPLOY_USER";
+
+        /// <summary>下发用户响应（柜子 -> 上位机）</summary>
+        public const string CmdDeployUserResponse = "DEPLOY_USER_RESPONSE";
+
+        /// <summary>从指定柜子删除某用户及其指纹（上位机 -> 柜子）</summary>
+        public const string CmdRemoveUser = "REMOVE_USER";
+
+        /// <summary>删除用户响应（柜子 -> 上位机）</summary>
+        public const string CmdRemoveUserResponse = "REMOVE_USER_RESPONSE";
+
+        /// <summary>按班级批量删除柜子上的用户（上位机 -> 柜子）</summary>
+        public const string CmdDeleteClassUsers = "DELETE_CLASS_USERS";
+
+        /// <summary>按班级删除响应（柜子 -> 上位机）</summary>
+        public const string CmdDeleteClassUsersResponse = "DELETE_CLASS_USERS_RESPONSE";
+
+        /// <summary>查询柜子本地容量/已用空间（上位机 -> 柜子）</summary>
+        public const string CmdReadCapacity = "READ_CAPACITY";
+
+        /// <summary>容量查询响应（柜子 -> 上位机）</summary>
+        public const string CmdCapacityResponse = "CAPACITY_RESPONSE";
+
+        // ===== 指纹 4+2 录入流程命令（需求 5） =====
+
+        /// <summary>指纹录入分步命令（上位机 -> 柜子）</summary>
+        public const string CmdEnrollFpStage = "ENROLL_FP_STAGE";
+
+        /// <summary>指纹录入分步响应（柜子 -> 上位机）</summary>
+        public const string CmdFpEnrollStageResponse = "FP_ENROLL_STAGE_RESPONSE";
+
+        // ===== 10 秒开锁窗口控制（需求 2） =====
+
+        /// <summary>取消指纹验证/退出开锁窗口（上位机 -> 柜子）</summary>
+        public const string CmdCancelVerify = "CANCEL_VERIFY";
+
+        // ===== 协议字段常量 =====
+
+        /// <summary>柜子本地用户存储上限（需求 10：ESP32-S3 N16R8 Flash，最多 200）</summary>
+        public const int DeviceMaxUsers = 200;
+
+        /// <summary>容量预警阈值（到 190 提示清理）</summary>
+        public const int CapacityWarnThreshold = 190;
+
+        /// <summary>默认开锁窗口时长（秒，需求 2：验证后 10 秒内可开锁）</summary>
+        public const int DefaultUnlockWindowSeconds = 10;
+
         // ===== 错误码常量（ACK 中 result 字段使用） =====
 
         /// <summary>成功</summary>
@@ -186,6 +236,17 @@ namespace FingerprintLockManager
                 case CommandType.FpTemplateDownloadResponse: return CmdFpTemplateDownloadResponse;
                 case CommandType.DeleteFpTemplate: return CmdDeleteFpTemplate;
                 case CommandType.FpTemplateDeleteResponse: return CmdFpTemplateDeleteResponse;
+                case CommandType.DeployUser: return CmdDeployUser;
+                case CommandType.DeployUserResponse: return CmdDeployUserResponse;
+                case CommandType.RemoveUser: return CmdRemoveUser;
+                case CommandType.RemoveUserResponse: return CmdRemoveUserResponse;
+                case CommandType.DeleteClassUsers: return CmdDeleteClassUsers;
+                case CommandType.DeleteClassUsersResponse: return CmdDeleteClassUsersResponse;
+                case CommandType.ReadCapacity: return CmdReadCapacity;
+                case CommandType.CapacityResponse: return CmdCapacityResponse;
+                case CommandType.EnrollFpStage: return CmdEnrollFpStage;
+                case CommandType.FpEnrollStageResponse: return CmdFpEnrollStageResponse;
+                case CommandType.CancelVerify: return CmdCancelVerify;
                 default: return null;
             }
         }
@@ -233,6 +294,17 @@ namespace FingerprintLockManager
                 case CmdFpTemplateDownloadResponse: return CommandType.FpTemplateDownloadResponse;
                 case CmdDeleteFpTemplate: return CommandType.DeleteFpTemplate;
                 case CmdFpTemplateDeleteResponse: return CommandType.FpTemplateDeleteResponse;
+                case CmdDeployUser: return CommandType.DeployUser;
+                case CmdDeployUserResponse: return CommandType.DeployUserResponse;
+                case CmdRemoveUser: return CommandType.RemoveUser;
+                case CmdRemoveUserResponse: return CommandType.RemoveUserResponse;
+                case CmdDeleteClassUsers: return CommandType.DeleteClassUsers;
+                case CmdDeleteClassUsersResponse: return CommandType.DeleteClassUsersResponse;
+                case CmdReadCapacity: return CommandType.ReadCapacity;
+                case CmdCapacityResponse: return CommandType.CapacityResponse;
+                case CmdEnrollFpStage: return CommandType.EnrollFpStage;
+                case CmdFpEnrollStageResponse: return CommandType.FpEnrollStageResponse;
+                case CmdCancelVerify: return CommandType.CancelVerify;
                 default: return null;
             }
         }

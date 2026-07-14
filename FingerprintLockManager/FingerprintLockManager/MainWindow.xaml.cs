@@ -7,7 +7,11 @@ namespace FingerprintLockManager
     /// <summary>
     /// 主窗口
     /// 左侧导航栏切换右侧页面，底部状态栏显示 Mesh 链路状态、在线设备数、传输类型与当前时间。
-    /// 菜单按角色控制可见性：admin 全可见，teacher 隐藏角色权限和用户管理，student 仅见日志。
+    /// 菜单按角色控制可见性（需求 3）：
+    ///   admin：全部可见
+    ///   teacher：可管理自己班级的数据（用户/班级/指纹/柜子分配/权限/设备/容量/下发状态/日志/设备配置）
+    ///           隐藏角色权限和备份还原（涉及全局数据）
+    ///   student：不能登录上位机（由 AuthService 拦截，本窗口不会显示给学生）
     /// </summary>
     public partial class MainWindow : Window
     {
@@ -65,6 +69,27 @@ namespace FingerprintLockManager
             NavigateToPage(new UserManagePage());
         }
 
+        /// <summary>班级管理（需求 4）</summary>
+        private void NavClassManage_Click(object sender, RoutedEventArgs e)
+        {
+            SelectNavButton(sender);
+            NavigateToPage(new ClassManagePage());
+        }
+
+        /// <summary>指纹录入（需求 5）</summary>
+        private void NavFpEnroll_Click(object sender, RoutedEventArgs e)
+        {
+            SelectNavButton(sender);
+            NavigateToPage(new FingerprintEnrollPage());
+        }
+
+        /// <summary>柜子分配（需求 6/8）</summary>
+        private void NavAssignment_Click(object sender, RoutedEventArgs e)
+        {
+            SelectNavButton(sender);
+            NavigateToPage(new DeviceAssignmentPage());
+        }
+
         private void NavPermission_Click(object sender, RoutedEventArgs e)
         {
             SelectNavButton(sender);
@@ -84,6 +109,27 @@ namespace FingerprintLockManager
             NavigateToPage(new DevicePage());
         }
 
+        /// <summary>设备容量监控（需求 10）</summary>
+        private void NavCapacity_Click(object sender, RoutedEventArgs e)
+        {
+            SelectNavButton(sender);
+            NavigateToPage(new DeviceCapacityPage());
+        }
+
+        /// <summary>下发状态监控（需求 7）</summary>
+        private void NavDeployStatus_Click(object sender, RoutedEventArgs e)
+        {
+            SelectNavButton(sender);
+            NavigateToPage(new DeployStatusPage());
+        }
+
+        /// <summary>备份还原（需求 11，仅 admin）</summary>
+        private void NavBackup_Click(object sender, RoutedEventArgs e)
+        {
+            SelectNavButton(sender);
+            NavigateToPage(new BackupRestorePage());
+        }
+
         private void NavLog_Click(object sender, RoutedEventArgs e)
         {
             SelectNavButton(sender);
@@ -99,10 +145,10 @@ namespace FingerprintLockManager
         }
 
         /// <summary>
-        /// 根据当前用户角色控制导航菜单可见性
+        /// 根据当前用户角色控制导航菜单可见性（需求 3）
         /// admin：全部可见
-        /// teacher：隐藏角色权限和用户管理
-        /// student：仅见日志
+        /// teacher：可管理自己班级的数据，隐藏角色权限和备份还原（涉及全局数据）
+        /// student：不能登录上位机（由 AuthService 拦截，理论上不会进入此分支）
         /// </summary>
         private void ApplyRoleVisibility()
         {
@@ -110,29 +156,42 @@ namespace FingerprintLockManager
 
             // 默认全部可见
             NavUserManage.Visibility = Visibility.Visible;
+            NavClassManage.Visibility = Visibility.Visible;
+            NavFpEnroll.Visibility = Visibility.Visible;
+            NavAssignment.Visibility = Visibility.Visible;
             NavPermission.Visibility = Visibility.Visible;
             NavRolePermission.Visibility = Visibility.Visible;
             NavDevice.Visibility = Visibility.Visible;
+            NavCapacity.Visibility = Visibility.Visible;
+            NavDeployStatus.Visibility = Visibility.Visible;
+            NavBackup.Visibility = Visibility.Visible;
             NavLog.Visibility = Visibility.Visible;
             NavDeviceConfig.Visibility = Visibility.Visible;
 
             switch (role)
             {
                 case "admin":
-                    // 全部可见，角色权限仅 admin 可见
+                    // 全部可见
                     break;
                 case "teacher":
-                    // 隐藏角色权限和用户管理
+                    // 老师隐藏角色权限（全局策略）和备份还原（涉及全局数据覆盖）
                     NavRolePermission.Visibility = Visibility.Collapsed;
-                    NavUserManage.Visibility = Visibility.Collapsed;
+                    NavBackup.Visibility = Visibility.Collapsed;
                     break;
                 case "student":
                 default:
-                    // 学生仅见日志
+                    // 学生不能登录上位机，理论上不会进入此分支；
+                    // 兜底处理：仅显示日志查看
                     NavUserManage.Visibility = Visibility.Collapsed;
+                    NavClassManage.Visibility = Visibility.Collapsed;
+                    NavFpEnroll.Visibility = Visibility.Collapsed;
+                    NavAssignment.Visibility = Visibility.Collapsed;
                     NavPermission.Visibility = Visibility.Collapsed;
                     NavRolePermission.Visibility = Visibility.Collapsed;
                     NavDevice.Visibility = Visibility.Collapsed;
+                    NavCapacity.Visibility = Visibility.Collapsed;
+                    NavDeployStatus.Visibility = Visibility.Collapsed;
+                    NavBackup.Visibility = Visibility.Collapsed;
                     NavDeviceConfig.Visibility = Visibility.Collapsed;
                     break;
             }
@@ -143,9 +202,15 @@ namespace FingerprintLockManager
         {
             // 按顺序返回首个可见的导航按钮
             if (NavUserManage.Visibility == Visibility.Visible) return NavUserManage;
+            if (NavClassManage.Visibility == Visibility.Visible) return NavClassManage;
+            if (NavFpEnroll.Visibility == Visibility.Visible) return NavFpEnroll;
+            if (NavAssignment.Visibility == Visibility.Visible) return NavAssignment;
             if (NavPermission.Visibility == Visibility.Visible) return NavPermission;
             if (NavRolePermission.Visibility == Visibility.Visible) return NavRolePermission;
             if (NavDevice.Visibility == Visibility.Visible) return NavDevice;
+            if (NavCapacity.Visibility == Visibility.Visible) return NavCapacity;
+            if (NavDeployStatus.Visibility == Visibility.Visible) return NavDeployStatus;
+            if (NavBackup.Visibility == Visibility.Visible) return NavBackup;
             if (NavLog.Visibility == Visibility.Visible) return NavLog;
             if (NavDeviceConfig.Visibility == Visibility.Visible) return NavDeviceConfig;
             return null;
@@ -155,9 +220,15 @@ namespace FingerprintLockManager
         private void NavigateByButton(Button btn)
         {
             if (btn == NavUserManage) NavigateToPage(new UserManagePage());
+            else if (btn == NavClassManage) NavigateToPage(new ClassManagePage());
+            else if (btn == NavFpEnroll) NavigateToPage(new FingerprintEnrollPage());
+            else if (btn == NavAssignment) NavigateToPage(new DeviceAssignmentPage());
             else if (btn == NavPermission) NavigateToPage(new PermissionPage());
             else if (btn == NavRolePermission) NavigateToPage(new RolePermissionPage());
             else if (btn == NavDevice) NavigateToPage(new DevicePage());
+            else if (btn == NavCapacity) NavigateToPage(new DeviceCapacityPage());
+            else if (btn == NavDeployStatus) NavigateToPage(new DeployStatusPage());
+            else if (btn == NavBackup) NavigateToPage(new BackupRestorePage());
             else if (btn == NavLog) NavigateToPage(new LogPage());
         }
 

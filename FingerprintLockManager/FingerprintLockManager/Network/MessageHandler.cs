@@ -49,6 +49,12 @@ namespace FingerprintLockManager
         /// <summary>ACK 应答事件：参数为 msgId（原命令消息 ID）, result（结果/错误码）</summary>
         public event Action<string, string> OnAckReceived;
 
+        /// <summary>指纹录入分步响应事件：参数为 deviceId, stage, success, errorMsg（需求 5）</summary>
+        public event Action<string, string, bool, string> OnFpEnrollStageResponse;
+
+        /// <summary>容量查询响应事件：参数为 deviceId, usedCount, maxCount（需求 10）</summary>
+        public event Action<string, int, int> OnCapacityResponse;
+
         /// <summary>
         /// 处理收到的消息，根据 cmd 字段分发到对应处理方法
         /// </summary>
@@ -111,6 +117,24 @@ namespace FingerprintLockManager
                 case CommandType.FpTemplateDownloadResponse:
                 case CommandType.FpTemplateDeleteResponse:
                     App.SdStorageService.HandleResponse(msg);
+                    break;
+
+                // 指纹录入分步响应（需求 5）
+                case CommandType.FpEnrollStageResponse:
+                    HandleFpEnrollStageResponse(device, msg);
+                    break;
+
+                // 容量查询响应（需求 10）
+                case CommandType.CapacityResponse:
+                    HandleCapacityResponse(device, msg);
+                    break;
+
+                // 下发相关响应：统一走 ACK 通道（柜子用 ACK 命令返回 result）
+                case CommandType.DeployUserResponse:
+                case CommandType.RemoveUserResponse:
+                case CommandType.DeleteClassUsersResponse:
+                    // 转 ACK 语义：以 result 字段触发 OnAckReceived
+                    HandleDeployResponseAsAck(device, msg);
                     break;
             }
         }
@@ -296,6 +320,59 @@ namespace FingerprintLockManager
             if (string.IsNullOrEmpty(val)) return false;
             return val.Equals("true", StringComparison.OrdinalIgnoreCase)
                 || val == "1";
+        }
+
+        /// <summary>
+        /// 尝试从消息 data 中读取整数字段
+        /// </summary>
+        private int TryGetIntData(Message msg, string fieldName, int defaultValue = 0)
+        {
+            string? val = TryGetStringData(msg, fieldName);
+            if (string.IsNullOrEmpty(val)) return defaultValue;
+            return int.TryParse(val, out int n) ? n : defaultValue;
+        }
+
+        /// <summary>
+        /// 处理指纹录入分步响应（需求 5）
+        /// 触发 OnFpEnrollStageResponse 事件让 FingerprintEnrollService 推进状态机
+        /// </summary>
+        private void HandleFpEnrollStageResponse(DeviceClient? device, Message msg)
+        {
+            var deviceId = device?.DeviceId ?? msg.DeviceId;
+            if (string.IsNullOrEmpty(deviceId)) return;
+
+            string stage = TryGetStringData(msg, "stage") ?? "";
+            bool success = TryGetBoolData(msg, "success");
+            string errorMsg = TryGetStringData(msg, "error") ?? TryGetStringData(msg, "error_msg") ?? "";
+
+            OnFpEnrollStageResponse?.Invoke(deviceId, stage, success, errorMsg);
+        }
+
+        /// <summary>
+        /// 处理容量查询响应（需求 10）
+        /// 触发 OnCapacityResponse 事件让 UI 更新容量显示
+        /// </summary>
+        private void HandleCapacityResponse(DeviceClient? device, Message msg)
+        {
+            var deviceId = device?.DeviceId ?? msg.DeviceId;
+            if (string.IsNullOrEmpty(deviceId)) return;
+
+            int used = TryGetIntData(msg, "used_count", 0);
+            int max = TryGetIntData(msg, "max_count", Protocol.DeviceMaxUsers);
+
+            OnCapacityResponse?.Invoke(deviceId, used, max);
+        }
+
+        /// <summary>
+        /// 将下发相关响应转为 ACK 语义触发（兼容柜子用 RESPONSE 命令而非 ACK 命令回复的情况）
+        /// </summary>
+        private void HandleDeployResponseAsAck(DeviceClient? device, Message msg)
+        {
+            string msgId = msg.MsgId ?? "";
+            if (string.IsNullOrEmpty(msgId)) return;
+
+            string result = TryGetStringData(msg, "result") ?? TryGetStringData(msg, "code") ?? Protocol.ErrOk;
+            OnAckReceived?.Invoke(msgId, result);
         }
     }
 }

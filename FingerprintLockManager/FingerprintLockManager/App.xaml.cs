@@ -22,6 +22,12 @@ namespace FingerprintLockManager
         public static RolePermissionService RolePermissionService { get; } = new RolePermissionService();
         public static DeviceService DeviceService { get; } = new DeviceService();
         public static LogService LogService { get; } = new LogService();
+        // 需求 4/5/6/7/8/10/11 新增服务
+        public static ClassService ClassService { get; } = new ClassService();
+        public static DeployService DeployService { get; } = new DeployService();
+        public static CapacityService CapacityService { get; } = new CapacityService();
+        public static BackupService BackupService { get; } = new BackupService();
+        public static FingerprintEnrollService FingerprintEnrollService { get; } = new FingerprintEnrollService();
 
         /// <summary>SD 卡集中存储服务（通过 Mesh 与根节点 SD 卡通信）</summary>
         public static SdStorageService SdStorageService { get; } = new SdStorageService();
@@ -34,8 +40,9 @@ namespace FingerprintLockManager
         /// </summary>
         private void Application_Startup(object sender, StartupEventArgs e)
         {
-            // 1. 数据源为根节点 SD 卡，无需本地数据库初始化
-            //    DataStore 在根节点注册成功后自动从 SD 卡加载（见 OnRootDeviceRegistered）
+            // 1. 初始化本地 SQLite（日志 + 下发状态 + 备份记录，需求 9/11）
+            //    业务主数据走根节点 SD 卡，DataStore 在根节点注册后自动加载
+            LogDbService.Current.Init();
 
             // 2. 绑定消息处理器业务事件
             WireUpMessageHandler();
@@ -89,6 +96,21 @@ namespace FingerprintLockManager
             MessageHandler.OnLogReport += OnLogReport;
             MessageHandler.OnAckReceived += OnAckReceived;
             MessageHandler.OnConfigSaved += OnConfigSavedHandler;
+            // 需求 5：指纹录入分步响应路由到 FingerprintEnrollService
+            MessageHandler.OnFpEnrollStageResponse += OnFpEnrollStageResponse;
+        }
+
+        /// <summary>指纹录入分步响应：路由到 FingerprintEnrollService 推进状态机</summary>
+        private void OnFpEnrollStageResponse(string deviceId, string stage, bool success, string errorMsg)
+        {
+            try
+            {
+                FingerprintEnrollService.HandleStageResponse(deviceId, stage, success, errorMsg);
+            }
+            catch
+            {
+                // 忽略
+            }
         }
 
         /// <summary>设备连接回调（来自后台线程）</summary>
@@ -192,12 +214,14 @@ namespace FingerprintLockManager
                     return;
                 }
 
-                // 验证成功：回复 AUTH_OK 并携带最终权限数组
+                // 验证成功：回复 AUTH_OK 并携带最终权限数组 + 10 秒开锁窗口（需求 2）
                 var data = new Dictionary<string, object>
                 {
                     ["user_id"] = user.UserId,
                     ["user_name"] = user.Name,
-                    ["permissions"] = permissions
+                    ["permissions"] = permissions,
+                    ["window_seconds"] = Protocol.DefaultUnlockWindowSeconds,
+                    ["allowed_locks"] = permissions  // bool[4]：true 表示该锁有权限，灯亮可开
                 };
                 var okMsg = Message.Create(Protocol.CmdAuthOk, deviceId, data);
                 MeshBridge.SendToDevice(deviceId, okMsg);
@@ -237,12 +261,15 @@ namespace FingerprintLockManager
             }
         }
 
-        /// <summary>ACK 应答：当前仅记录日志，可用于命令确认匹配</summary>
+        /// <summary>ACK 应答：路由到 DeployService 匹配下发任务状态</summary>
         private void OnAckReceived(string msgId, string result)
         {
-            // 可在此根据 msgId 匹配待确认命令并更新 UI；当前仅占位
             try
             {
+                // 优先交给 DeployService 处理下发任务 ACK
+                App.DeployService.HandleAck(msgId, result);
+
+                // 同时记录日志
                 LogService.AddLog(new LogEntry
                 {
                     DeviceId = "",

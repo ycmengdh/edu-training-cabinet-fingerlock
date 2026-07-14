@@ -70,7 +70,10 @@ namespace FingerprintLockManager
             var user = App.AuthService.Login(userId, password);
             if (user == null)
             {
-                HintText.Text = "用户ID或密码错误";
+                // 显示具体的失败原因（如"学生账号无权登录上位机后台"、"用户不存在"、"密码错误"）
+                HintText.Text = string.IsNullOrEmpty(App.AuthService.LastLoginError)
+                    ? "用户ID或密码错误"
+                    : App.AuthService.LastLoginError;
                 HintText.Foreground = FindResource("DangerBrush") as System.Windows.Media.Brush;
                 PasswordBox.Clear();
                 return;

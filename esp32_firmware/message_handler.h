@@ -32,7 +32,8 @@ public:
         STATE_IDLE = 0,         // 空闲
         STATE_WAIT_FINGER,      // 等待指纹（已按键）
         STATE_WAIT_AUTH,        // 已发送验证请求，等待上位机回复
-        STATE_ENROLLING         // 正在录入指纹
+        STATE_ENROLLING,        // 正在录入指纹
+        STATE_UNLOCK_WINDOW     // 需求 2：10 秒开锁窗口（AUTH_OK 后进入，期间可多次开有权限的锁）
     };
 
     static VerifyState getState();
@@ -40,6 +41,12 @@ public:
 
     // 触发录入指纹（由 ADD_FINGERPRINT 命令调用）
     static void startEnroll(int fingerprintId, const String &userId);
+
+    // 需求 2：进入 10 秒开锁窗口（点亮有权限锁的指示灯，启用窗口期权限校验）
+    static void enterUnlockWindow(const bool allowed[LOCK_COUNT], int windowSeconds,
+                                  const String &userId, int fingerprintId);
+    // 需求 2：退出开锁窗口（关灯、清除权限校验、回到 IDLE）
+    static void exitUnlockWindow();
 
     // 发送带 msg_id 的消息（ACK 机制：msg_id 原样回传）
     static bool sendMessage(const String &cmd, const String &dataJson = "",
@@ -74,6 +81,20 @@ private:
     static void cmdReadPermissions(const String &msgId);
     static void cmdDeleteAllFingerprints(const String &msgId);
 
+    // ====== 需求 2/5/6/8/10 新增命令处理 ======
+    // 需求 6/8：下发用户（含权限与可选指纹模板，base64）
+    static void cmdDeployUser(const JsonObject &data, const String &msgId);
+    // 需求 10：删除单个用户（本地权限 + AS608 指纹）
+    static void cmdRemoveUser(const JsonObject &data, const String &msgId);
+    // 需求 10：按班级批量删除用户
+    static void cmdDeleteClassUsers(const JsonObject &data, const String &msgId);
+    // 需求 5：分步录入指纹（驱动 fingerprint.cpp 的 enrollFingerprintStage）
+    static void cmdEnrollFpStage(const JsonObject &data, const String &msgId);
+    // 需求 10：读取指纹/用户容量
+    static void cmdReadCapacity(const String &msgId);
+    // 需求 2：取消验证 / 退出 10 秒开锁窗口
+    static void cmdCancelVerify(const String &msgId);
+
     // ====== SD 卡集中存储命令（仅根节点响应） ======
     // SD_QUERY：读取整张表 {table:"users"} → 返回表 JSON
     static void cmdSdQuery(const JsonObject &data, const String &msgId);
@@ -105,6 +126,10 @@ private:
     // hex 字符转数值（SD 卡指纹模板 hex 编解码用）
     static uint8_t hexCharToVal(char c);
 
+    // 需求 6/8：base64 解码（用于 DEPLOY_USER 的 fp_template 字段）
+    // 返回解码后的字节数（写入 outBuf），失败返回 0
+    static size_t base64Decode(const String &in, uint8_t *outBuf, size_t outBufSize);
+
     // 待开锁 ID
     static int pendingLockId;
     // 待验证指纹 ID
@@ -122,6 +147,13 @@ private:
     static bool permLostPending;
     // 上次 PERM_LOST 上报时刻
     static unsigned long lastPermLostReport;
+
+    // ====== 需求 2：10 秒开锁窗口状态 ======
+    static bool windowAllowedLocks[LOCK_COUNT];  // 窗口期允许开锁的锁列表
+    static int  windowSeconds;                   // 窗口持续秒数
+    static unsigned long windowEnterTime;        // 窗口进入时刻
+    static String windowUserId;                  // 窗口期内开锁日志用的 user_id
+    static int  windowFingerprintId;             // 窗口期内开锁日志用的 fingerprint_id
 };
 
 #endif // MESSAGE_HANDLER_H

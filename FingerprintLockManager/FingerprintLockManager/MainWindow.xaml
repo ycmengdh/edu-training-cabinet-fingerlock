@@ -42,12 +42,24 @@
                     <StackPanel Grid.Row="1" Margin="0,10">
                         <Button x:Name="NavUserManage" Content="👤  用户管理" Style="{StaticResource NavButton}"
                                 Tag="Active" Click="NavUserManage_Click"/>
+                        <Button x:Name="NavClassManage" Content="🏫  班级管理" Style="{StaticResource NavButton}"
+                                Click="NavClassManage_Click"/>
+                        <Button x:Name="NavFpEnroll" Content="🖐  指纹录入" Style="{StaticResource NavButton}"
+                                Click="NavFpEnroll_Click"/>
+                        <Button x:Name="NavAssignment" Content="📦  柜子分配" Style="{StaticResource NavButton}"
+                                Click="NavAssignment_Click"/>
                         <Button x:Name="NavPermission" Content="🔑  权限管理" Style="{StaticResource NavButton}"
                                 Click="NavPermission_Click"/>
                         <Button x:Name="NavRolePermission" Content="🛡  角色权限" Style="{StaticResource NavButton}"
                                 Click="NavRolePermission_Click"/>
                         <Button x:Name="NavDevice" Content="📡  设备管理" Style="{StaticResource NavButton}"
                                 Click="NavDevice_Click"/>
+                        <Button x:Name="NavCapacity" Content="💾  设备容量" Style="{StaticResource NavButton}"
+                                Click="NavCapacity_Click"/>
+                        <Button x:Name="NavDeployStatus" Content="📤  下发状态" Style="{StaticResource NavButton}"
+                                Click="NavDeployStatus_Click"/>
+                        <Button x:Name="NavBackup" Content="🗄  备份还原" Style="{StaticResource NavButton}"
+                                Click="NavBackup_Click"/>
                         <Button x:Name="NavLog" Content="📋  日志查看" Style="{StaticResource NavButton}"
                                 Click="NavLog_Click"/>
                         <Button x:Name="NavDeviceConfig" Content="⚙  设备配置(AP模式)" Style="{StaticResource NavButton}"

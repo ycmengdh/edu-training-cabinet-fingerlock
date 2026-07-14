@@ -8,6 +8,10 @@ Adafruit_Fingerprint Fingerprint::finger(&serial2);
 bool Fingerprint::ready = false;
 String Fingerprint::errorMsg = "";
 
+// 分步录入跨阶段状态初始化
+bool Fingerprint::stageVerify1Passed = false;
+int  Fingerprint::stageCurrentId     = -1;
+
 bool Fingerprint::init() {
     // 初始化 UART2：ESP32 TX=GPIO17, RX=GPIO16
     serial2.begin(FINGER_UART_BAUD, SERIAL_8N1, FINGER_RX_PIN, FINGER_TX_PIN);
@@ -65,6 +69,36 @@ uint8_t Fingerprint::waitForFinger(int stage) {
     return FINGERPRINT_NOFINGER;
 }
 
+// 采集一次图像并生成特征，存入 AS608 指定特征缓冲槽 slot(1~4)
+// 阻塞等待手指按下，最多约 60 秒
+uint8_t Fingerprint::acquireFeature(int slot) {
+    uint8_t result = 0;
+    int retry = 0;
+    while (retry < 600) {  // 最多等待约 60 秒
+        result = finger.getImage();
+        if (result == FINGERPRINT_OK) {
+            // 检测到手指图像，将图像转为特征并存入指定缓冲槽
+            uint8_t conv = finger.image2Tz(slot);
+            if (conv == FINGERPRINT_OK) {
+                Serial.printf("[FINGER] 特征 %d 采集成功（slot=%d）\n", slot, slot);
+                return FINGERPRINT_OK;
+            } else {
+                errorMsg = "图像转特征失败";
+                return conv;
+            }
+        } else if (result == FINGERPRINT_NOFINGER) {
+            // 等待手指
+            retry++;
+            delay(100);
+        } else {
+            errorMsg = "读取图像失败";
+            return result;
+        }
+    }
+    errorMsg = "等待超时";
+    return FINGERPRINT_NOFINGER;
+}
+
 bool Fingerprint::enrollFingerprint(int id) {
     if (!ready) {
         errorMsg = "指纹模块未就绪";
@@ -75,35 +109,55 @@ bool Fingerprint::enrollFingerprint(int id) {
         return false;
     }
 
-    Serial.printf("[FINGER] 开始录入指纹 ID=%d\n", id);
-    Serial.println(F("[FINGER] 请将手指放上..."));
+    Serial.printf("[FINGER] 开始录入指纹 ID=%d（4 次录入 + 2 次验证）\n", id);
 
-    // 第一次采集
-    uint8_t r = waitForFinger(0);
-    if (r != FINGERPRINT_OK) {
-        Serial.printf("[FINGER] 第一次采集失败: %s\n", errorMsg.c_str());
-        return false;
+    // ===== 步骤 1-4：采集 4 次指纹图像，每次生成特征，存入 AS608 缓冲 1-4 =====
+    for (int slot = 1; slot <= 4; slot++) {
+        Serial.printf("[FINGER] 请将手指放上（第 %d 次采集）...\n", slot);
+        uint8_t r = acquireFeature(slot);
+        if (r != FINGERPRINT_OK) {
+            Serial.printf("[FINGER] 第 %d 次采集失败: %s\n", slot, errorMsg.c_str());
+            return false;
+        }
+        Serial.println(F("[FINGER] 请移开手指..."));
+        delay(2000);
     }
 
-    Serial.println(F("[FINGER] 请移开手指..."));
-    delay(2000);
-
-    // 第二次采集
-    Serial.println(F("[FINGER] 请再次放上同一手指..."));
-    r = waitForFinger(1);
+    // ===== 步骤 5：合并 4 个特征为模板，进行第 1 次验证比对 =====
+    uint8_t r = finger.createModel();  // 合并特征生成模板
     if (r != FINGERPRINT_OK) {
-        Serial.printf("[FINGER] 第二次采集失败: %s\n", errorMsg.c_str());
+        errorMsg = (r == FINGERPRINT_ENROLLMISMATCH) ? "多次指纹不匹配" : "合并特征失败";
+        Serial.printf("[FINGER] 第 1 次验证-合并失败: %s\n", errorMsg.c_str());
         return false;
     }
-
-    // 合并特征并存储
-    r = finger.createModel();
-    if (r != FINGERPRINT_OK) {
-        errorMsg = (r == FINGERPRINT_ENROLLMISMATCH) ? "两次指纹不匹配" : "合并特征失败";
-        Serial.printf("[FINGER] %s\n", errorMsg.c_str());
+    // 第 1 次验证比对（fingerFastSearch）：新录入指纹应不在库中（去重）
+    // 返回 NOTFOUND 视为通过（非重复指纹），返回 OK 视为重复指纹失败
+    r = finger.fingerFastSearch();
+    if (r == FINGERPRINT_OK) {
+        errorMsg = "第 1 次验证失败：指纹已存在（重复录入）";
+        Serial.printf("[FINGER] %s, 已存在 ID=%d\n", errorMsg.c_str(), finger.fingerID);
+        return false;
+    } else if (r != FINGERPRINT_NOTFOUND) {
+        errorMsg = "第 1 次验证搜索失败";
+        Serial.printf("[FINGER] 第 1 次验证搜索失败, code=%d\n", r);
         return false;
     }
+    Serial.println(F("[FINGER] 第 1 次验证通过（非重复指纹）"));
 
+    // ===== 步骤 6：第 2 次验证比对，通过后 storeModel 保存 =====
+    r = finger.fingerFastSearch();
+    if (r == FINGERPRINT_OK) {
+        errorMsg = "第 2 次验证失败：指纹已存在（重复录入）";
+        Serial.println(F("[FINGER] 第 2 次验证失败：指纹已存在"));
+        return false;
+    } else if (r != FINGERPRINT_NOTFOUND) {
+        errorMsg = "第 2 次验证搜索失败";
+        Serial.printf("[FINGER] 第 2 次验证搜索失败, code=%d\n", r);
+        return false;
+    }
+    Serial.println(F("[FINGER] 第 2 次验证通过"));
+
+    // 两次验证均通过，保存模板到指定 ID
     r = finger.storeModel(id);
     if (r != FINGERPRINT_OK) {
         errorMsg = "存储指纹失败";
@@ -111,8 +165,100 @@ bool Fingerprint::enrollFingerprint(int id) {
         return false;
     }
 
-    Serial.printf("[FINGER] 指纹 ID=%d 录入成功\n", id);
+    Serial.printf("[FINGER] 指纹 ID=%d 录入成功（4+2 流程完成）\n", id);
     return true;
+}
+
+// 分步录入指纹：上位机通过 ENROLL_FP_STAGE 命令逐步驱动
+// 返回 JSON 字符串 {"stage":"...","success":true/false,"error":"..."}
+String Fingerprint::enrollFingerprintStage(const String &stage, int id) {
+    // 构造 JSON 响应的辅助 lambda
+    auto makeResp = [&](bool ok, const String &err) -> String {
+        String s = "{\"stage\":\"" + stage + "\",\"success\":";
+        s += ok ? "true" : "false";
+        s += ",\"error\":\"" + err + "\"}";
+        return s;
+    };
+
+    // 校验指纹模块就绪与 ID 范围（verify2 允许 id 沿用 stageCurrentId）
+    if (!ready) {
+        return makeResp(false, "指纹模块未就绪");
+    }
+    if (id < 0 || id >= FINGER_MAX_USERS) {
+        return makeResp(false, "指纹 ID 超出范围");
+    }
+
+    // ===== acquire1~acquire4：采集图像 + 生成特征 =====
+    if (stage == "acquire1" || stage == "acquire2" ||
+        stage == "acquire3" || stage == "acquire4") {
+        int slot = stage.substring(7).toInt();  // 提取槽位号 1~4
+        // 进入新一轮录入时重置跨阶段状态
+        if (slot == 1) {
+            stageVerify1Passed = false;
+            stageCurrentId     = id;
+        }
+        Serial.printf("[FINGER][STAGE] %s: 请放手指（slot=%d）\n", stage.c_str(), slot);
+        uint8_t r = acquireFeature(slot);
+        if (r != FINGERPRINT_OK) {
+            return makeResp(false, errorMsg);
+        }
+        return makeResp(true, "");
+    }
+
+    // ===== verify1：合并 4 个特征为模板 + 第 1 次验证比对 =====
+    if (stage == "verify1") {
+        stageCurrentId = id;
+        uint8_t r = finger.createModel();  // 合并特征生成模板
+        if (r != FINGERPRINT_OK) {
+            errorMsg = (r == FINGERPRINT_ENROLLMISMATCH) ? "多次指纹不匹配" : "合并特征失败";
+            stageVerify1Passed = false;
+            return makeResp(false, errorMsg);
+        }
+        // 第 1 次验证比对：新指纹应不在库中
+        r = finger.fingerFastSearch();
+        if (r == FINGERPRINT_OK) {
+            errorMsg = "指纹已存在（重复录入）";
+            stageVerify1Passed = false;
+            return makeResp(false, errorMsg);
+        } else if (r != FINGERPRINT_NOTFOUND) {
+            errorMsg = "第 1 次验证搜索失败";
+            stageVerify1Passed = false;
+            return makeResp(false, errorMsg);
+        }
+        stageVerify1Passed = true;  // 标记 verify1 已通过，作为 verify2 前置条件
+        return makeResp(true, "");
+    }
+
+    // ===== verify2：第 2 次验证比对 + storeModel 保存 =====
+    if (stage == "verify2") {
+        // 前置条件：verify1 必须已通过
+        if (!stageVerify1Passed) {
+            return makeResp(false, "verify1 未通过，禁止执行 verify2");
+        }
+        uint8_t r = finger.fingerFastSearch();
+        if (r == FINGERPRINT_OK) {
+            errorMsg = "第 2 次验证失败：指纹已存在";
+            stageVerify1Passed = false;
+            return makeResp(false, errorMsg);
+        } else if (r != FINGERPRINT_NOTFOUND) {
+            errorMsg = "第 2 次验证搜索失败";
+            stageVerify1Passed = false;
+            return makeResp(false, errorMsg);
+        }
+        // 两次验证均通过，保存模板
+        r = finger.storeModel(id);
+        if (r != FINGERPRINT_OK) {
+            errorMsg = "存储指纹失败";
+            stageVerify1Passed = false;
+            return makeResp(false, errorMsg);
+        }
+        stageVerify1Passed = false;  // 流程结束，重置状态
+        Serial.printf("[FINGER][STAGE] verify2 完成，指纹 ID=%d 已保存\n", id);
+        return makeResp(true, "");
+    }
+
+    // 未知 stage
+    return makeResp(false, "未知 stage: " + stage);
 }
 
 int Fingerprint::verifyFingerprint() {

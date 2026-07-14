@@ -240,7 +240,9 @@ void reportStatus() {
     data += "\"log_pending\":" + String(Logger::getPendingCount()) + ",";
     data += "\"mesh_layer\":" + String(MeshComm::getMeshLayer()) + ",";
     data += "\"child_count\":" + String(MeshComm::getChildCount()) + ",";
-    data += "\"time_synced\":" + String(Storage::isTimeSynced() ? "true" : "false");
+    data += "\"time_synced\":" + String(Storage::isTimeSynced() ? "true" : "false") + ",";
+    // 需求 3c：STATUS_REPORT 增加 perm_max 字段（值=200）
+    data += "\"perm_max\":" + String(PERM_MAX_USERS);
     data += "}";
 
     MeshComm::sendMessage("STATUS_REPORT", data);

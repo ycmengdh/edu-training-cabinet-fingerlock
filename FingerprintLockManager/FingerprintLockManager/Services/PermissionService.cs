@@ -151,7 +151,7 @@ namespace FingerprintLockManager
         }
 
         /// <summary>通过指纹验证用户并返回最终权限（合并双层权限）</summary>
-        public (User user, bool[] permissions) VerifyByFingerprint(int fingerprintId)
+        public (User? user, bool[] permissions) VerifyByFingerprint(int fingerprintId)
         {
             bool[] empty = new bool[LockCount];
             try
@@ -169,5 +169,132 @@ namespace FingerprintLockManager
                 return (null, empty);
             }
         }
+
+        // ====== 设备维度授权（需求 6/8：学生×柜子×锁权限）======
+
+        /// <summary>获取学生在所有柜子的授权列表</summary>
+        public List<DeviceAuthorization> GetDeviceAuthorizations(string userId)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(userId)) return new List<DeviceAuthorization>();
+                return DataStore.Current.GetDeviceAuthorizations()
+                    .Where(a => a.UserId == userId)
+                    .ToList();
+            }
+            catch
+            {
+                return new List<DeviceAuthorization>();
+            }
+        }
+
+        /// <summary>获取学生在某台柜子的授权</summary>
+        public DeviceAuthorization? GetDeviceAuthorization(string userId, string deviceId)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(deviceId)) return null;
+                return DataStore.Current.GetDeviceAuthorizations()
+                    .FirstOrDefault(a => a.UserId == userId && a.DeviceId == deviceId);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// 设置学生到某柜子的授权（upsert，需求 6/8）
+        /// 注意：此方法仅更新根节点 SD 卡的授权记录。
+        /// 实际下发到柜子由 DeployService.DeployStudentAsync 完成。
+        /// </summary>
+        public bool SetDeviceAuthorization(string userId, string deviceId, bool[] permissions)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(deviceId)) return false;
+                if (permissions == null || permissions.Length != LockCount) return false;
+
+                bool ok = false;
+                DataStore.Current.MutateDeviceAuthorizations(list =>
+                {
+                    int idx = list.FindIndex(a => a.UserId == userId && a.DeviceId == deviceId);
+                    if (idx >= 0)
+                    {
+                        list[idx].FromLockArray(permissions);
+                        list[idx].UpdateTime = DateTime.Now;
+                    }
+                    else
+                    {
+                        list.Add(new DeviceAuthorization
+                        {
+                            Id = DataStore.Current.NextDeviceAuthorizationId(),
+                            UserId = userId,
+                            DeviceId = deviceId,
+                            CreateTime = DateTime.Now,
+                            UpdateTime = DateTime.Now,
+                            FingerprintDeployed = false
+                        });
+                        list[^1].FromLockArray(permissions);
+                    }
+                    ok = true;
+                });
+                return ok;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>删除学生到某柜子的授权</summary>
+        public bool RemoveDeviceAuthorization(string userId, string deviceId)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(deviceId)) return false;
+                DataStore.Current.MutateDeviceAuthorizations(list =>
+                {
+                    list.RemoveAll(a => a.UserId == userId && a.DeviceId == deviceId);
+                });
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>获取某台柜子已授权的所有学生</summary>
+        public List<DeviceAuthorization> GetAuthorizationsByDevice(string deviceId)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(deviceId)) return new List<DeviceAuthorization>();
+                return DataStore.Current.GetDeviceAuthorizations()
+                    .Where(a => a.DeviceId == deviceId)
+                    .ToList();
+            }
+            catch
+            {
+                return new List<DeviceAuthorization>();
+            }
+        }
+
+        /// <summary>标记授权记录的指纹已下发（下发成功后由 DeployService 调用）</summary>
+        public void MarkFingerprintDeployed(string userId, string deviceId)
+        {
+            DataStore.Current.MutateDeviceAuthorizations(list =>
+            {
+                int idx = list.FindIndex(a => a.UserId == userId && a.DeviceId == deviceId);
+                if (idx >= 0)
+                {
+                    list[idx].FingerprintDeployed = true;
+                    list[idx].DeployTime = DateTime.Now;
+                    list[idx].UpdateTime = DateTime.Now;
+                }
+            });
+        }
     }
 }
+

@@ -1,21 +1,23 @@
 using Newtonsoft.Json;
-using System.Threading;
 
 namespace FingerprintLockManager
 {
     /// <summary>
-    /// 内存数据仓库（替代原 SQLite 数据库）
+    /// 内存数据仓库（根节点 SD 卡为唯一持久化源）
     ///
-    /// 根节点 SD 卡是唯一持久化数据源。上位机启动时从 SD 卡全量加载到内存，
-    /// 各 Service 操作内存副本（线程安全快照），写操作异步回写 SD 卡。
-    /// 上位机不再持有任何本地数据库文件。
+    /// 业务主数据（users/classes/permissions/devices/authorizations/fp_templates）走 SD 卡：
+    ///   启动时全量加载到内存，各 Service 操作内存副本（线程安全快照），写操作异步回写 SD 卡。
+    ///
+    /// 日志与下发状态走上位机本地 SQLite（见 LogDbService），不经过本类。
     ///
     /// SD 卡表映射：
-    ///   users.json             - 用户表
-    ///   role_permissions.json  - 角色默认权限表
-    ///   user_permissions.json  - 个人权限覆盖表
-    ///   devices.json           - 设备注册表
-    ///   logs.json              - 操作日志表
+    ///   users.json                  - 用户表
+    ///   classes.json                 - 班级表
+    ///   role_permissions.json        - 角色默认权限表
+    ///   user_permissions.json        - 个人权限覆盖表
+    ///   device_authorizations.json   - 设备授权关系表（学生×柜子×锁权限）
+    ///   devices.json                 - 设备注册表
+    ///   fingerprint_templates.json   - 指纹模板元数据表
     /// </summary>
     public class DataStore
     {
@@ -25,18 +27,16 @@ namespace FingerprintLockManager
         // ====== 内存表（线程安全，所有访问经 _lock）======
         private readonly object _lock = new();
         private List<User> _users = new();
+        private List<ClassInfo> _classes = new();
         private List<RolePermission> _rolePerms = new();
         private List<UserPermission> _userPerms = new();
+        private List<DeviceAuthorization> _deviceAuths = new();
         private List<Device> _devices = new();
-        private List<LogEntry> _logs = new();
+        private List<FingerprintTemplate> _fpTemplates = new();
 
         // 自增 ID 序列（从已加载数据恢复）
         private int _userPermIdSeq = 1;
-        private long _logIdSeq = 1;
-
-        // 日志脏标记 + 延迟批量保存（避免每条日志都写 SD 卡）
-        private bool _logsDirty = false;
-        private readonly Timer _logFlushTimer;
+        private long _deviceAuthIdSeq = 1;
 
         /// <summary>数据是否已从 SD 卡加载完成</summary>
         public bool IsLoaded { get; private set; }
@@ -44,16 +44,10 @@ namespace FingerprintLockManager
         /// <summary>数据加载完成事件（UI 据此启用登录）</summary>
         public event Action? Loaded;
 
-        private DataStore()
-        {
-            // 每 5 秒检查一次日志脏标记，脏则批量刷盘
-            _logFlushTimer = new Timer(_ => FlushLogsIfNeeded(), null, 5000, 5000);
-        }
-
         // ====== 加载 ======
 
         /// <summary>
-        /// 从根节点 SD 卡全量加载所有表。
+        /// 从根节点 SD 卡全量加载所有业务表。
         /// 根节点注册成功后由 App 调用。加载完成后触发 Loaded 事件。
         /// 首次使用（SD 卡为空）时自动初始化默认管理员与角色权限。
         /// </summary>
@@ -64,29 +58,32 @@ namespace FingerprintLockManager
                 var sd = App.SdStorageService;
                 if (!sd.IsAvailable)
                 {
-                    // SD 卡不可用，保持空数据，等待根节点连上后重试
                     System.Diagnostics.Debug.WriteLine("[DataStore] SD 卡不可用，稍后重试");
                     return;
                 }
 
                 // 逐表加载（SD 卡命令是串行的，无需并行）
                 var usersJson = await sd.QueryTableAsync(TableUsers);
+                var classesJson = await sd.QueryTableAsync(TableClasses);
                 var rolePermsJson = await sd.QueryTableAsync(TableRolePermissions);
                 var userPermsJson = await sd.QueryTableAsync(TableUserPermissions);
+                var deviceAuthsJson = await sd.QueryTableAsync(TableDeviceAuthorizations);
                 var devicesJson = await sd.QueryTableAsync(TableDevices);
-                var logsJson = await sd.QueryTableAsync(TableLogs);
+                var fpTemplatesJson = await sd.QueryTableAsync(TableFpTemplates);
 
                 lock (_lock)
                 {
                     _users = DeserializeList<User>(usersJson);
+                    _classes = DeserializeList<ClassInfo>(classesJson);
                     _rolePerms = DeserializeList<RolePermission>(rolePermsJson);
                     _userPerms = DeserializeList<UserPermission>(userPermsJson);
+                    _deviceAuths = DeserializeList<DeviceAuthorization>(deviceAuthsJson);
                     _devices = DeserializeList<Device>(devicesJson);
-                    _logs = DeserializeList<LogEntry>(logsJson);
+                    _fpTemplates = DeserializeList<FingerprintTemplate>(fpTemplatesJson);
 
                     // 恢复自增 ID 序列
                     _userPermIdSeq = _userPerms.Count > 0 ? _userPerms.Max(p => p.Id) + 1 : 1;
-                    _logIdSeq = _logs.Count > 0 ? _logs.Max(l => l.Id) + 1 : 1;
+                    _deviceAuthIdSeq = _deviceAuths.Count > 0 ? _deviceAuths.Max(a => a.Id) + 1 : 1;
                 }
 
                 // 首次使用：初始化默认数据并回写 SD 卡
@@ -94,8 +91,8 @@ namespace FingerprintLockManager
 
                 IsLoaded = true;
                 System.Diagnostics.Debug.WriteLine($"[DataStore] 加载完成：用户 {_users.Count}，" +
-                    $"角色权限 {_rolePerms.Count}，个人权限 {_userPerms.Count}，" +
-                    $"设备 {_devices.Count}，日志 {_logs.Count}");
+                    $"班级 {_classes.Count}，设备授权 {_deviceAuths.Count}，" +
+                    $"指纹模板 {_fpTemplates.Count}，设备 {_devices.Count}");
                 Loaded?.Invoke();
             }
             catch (Exception ex)
@@ -137,6 +134,7 @@ namespace FingerprintLockManager
                         UserId = "admin",
                         Name = "系统管理员",
                         Role = "admin",
+                        ClassId = null,
                         FingerprintId = null,
                         PasswordSalt = salt,
                         PasswordHash = PasswordHelper.HashPassword("admin123", salt),
@@ -154,10 +152,12 @@ namespace FingerprintLockManager
         // ====== 快照读取（线程安全，返回副本）======
 
         public List<User> GetUsers() { lock (_lock) return _users.ToList(); }
+        public List<ClassInfo> GetClasses() { lock (_lock) return _classes.ToList(); }
         public List<RolePermission> GetRolePermissions() { lock (_lock) return _rolePerms.ToList(); }
         public List<UserPermission> GetUserPermissions() { lock (_lock) return _userPerms.ToList(); }
+        public List<DeviceAuthorization> GetDeviceAuthorizations() { lock (_lock) return _deviceAuths.ToList(); }
         public List<Device> GetDevices() { lock (_lock) return _devices.ToList(); }
-        public List<LogEntry> GetLogs() { lock (_lock) return _logs.ToList(); }
+        public List<FingerprintTemplate> GetFingerprintTemplates() { lock (_lock) return _fpTemplates.ToList(); }
 
         // ====== 自增 ID ======
 
@@ -166,15 +166,25 @@ namespace FingerprintLockManager
             lock (_lock) { return _userPermIdSeq++; }
         }
 
+        public long NextDeviceAuthorizationId()
+        {
+            lock (_lock) { return _deviceAuthIdSeq++; }
+        }
+
         // ====== 写操作（更新内存 + 异步回写 SD 卡）======
-        // 每次写操作在锁内修改内存列表后，立即触发异步整表保存。
-        // 保存失败（根节点离线）时静默忽略，内存数据仍有效；根节点恢复后可手动 FlushAll。
 
         /// <summary>在锁内修改用户表，并触发异步回写</summary>
         public void MutateUsers(Action<List<User>> action)
         {
             lock (_lock) action(_users);
             _ = SaveUsersAsync();
+        }
+
+        /// <summary>在锁内修改班级表，并触发异步回写</summary>
+        public void MutateClasses(Action<List<ClassInfo>> action)
+        {
+            lock (_lock) action(_classes);
+            _ = SaveClassesAsync();
         }
 
         /// <summary>在锁内修改角色权限表，并触发异步回写</summary>
@@ -191,6 +201,13 @@ namespace FingerprintLockManager
             _ = SaveUserPermissionsAsync();
         }
 
+        /// <summary>在锁内修改设备授权表，并触发异步回写</summary>
+        public void MutateDeviceAuthorizations(Action<List<DeviceAuthorization>> action)
+        {
+            lock (_lock) action(_deviceAuths);
+            _ = SaveDeviceAuthorizationsAsync();
+        }
+
         /// <summary>在锁内修改设备表，并触发异步回写</summary>
         public void MutateDevices(Action<List<Device>> action)
         {
@@ -198,80 +215,23 @@ namespace FingerprintLockManager
             _ = SaveDevicesAsync();
         }
 
-        // ====== 日志（脏标记 + 延迟批量保存）======
-
-        /// <summary>
-        /// 追加一条日志到内存（仅标记脏，不立即写 SD 卡）。
-        /// 由后台 Timer 每 5 秒批量刷盘，避免频繁写。
-        /// </summary>
-        public void AddLog(LogEntry log)
+        /// <summary>在锁内修改指纹模板表，并触发异步回写</summary>
+        public void MutateFingerprintTemplates(Action<List<FingerprintTemplate>> action)
         {
-            if (log == null) return;
-            lock (_lock)
-            {
-                log.Id = _logIdSeq++;
-                if (log.CreateTime == default(DateTime))
-                {
-                    log.CreateTime = DateTime.Now;
-                }
-                _logs.Add(log);
-                _logsDirty = true;
-            }
+            lock (_lock) action(_fpTemplates);
+            _ = SaveFingerprintTemplatesAsync();
         }
 
-        /// <summary>批量追加日志</summary>
-        public void AddLogs(List<LogEntry> logs)
-        {
-            if (logs == null || logs.Count == 0) return;
-            lock (_lock)
-            {
-                DateTime now = DateTime.Now;
-                foreach (var log in logs)
-                {
-                    log.Id = _logIdSeq++;
-                    if (log.CreateTime == default(DateTime)) log.CreateTime = now;
-                    _logs.Add(log);
-                }
-                _logsDirty = true;
-            }
-        }
-
-        /// <summary>清除所有日志</summary>
-        public void ClearLogs()
-        {
-            lock (_lock)
-            {
-                _logs.Clear();
-                _logIdSeq = 1;
-                _logsDirty = true;
-            }
-        }
-
-        /// <summary>Timer 回调：日志脏则批量刷盘</summary>
-        private void FlushLogsIfNeeded()
-        {
-            if (!_logsDirty) return;
-            List<LogEntry> snapshot;
-            lock (_lock)
-            {
-                if (!_logsDirty) return;
-                _logsDirty = false;
-                snapshot = _logs.ToList();
-            }
-            _ = SaveTableAsync(TableLogs, snapshot);
-        }
-
-        /// <summary>强制保存所有脏数据（根节点重连或程序退出时调用）</summary>
+        /// <summary>强制保存所有表到 SD 卡（根节点重连或程序退出时调用）</summary>
         public async Task FlushAllAsync()
         {
             await SaveUsersAsync();
+            await SaveClassesAsync();
             await SaveRolePermissionsAsync();
             await SaveUserPermissionsAsync();
+            await SaveDeviceAuthorizationsAsync();
             await SaveDevicesAsync();
-            // 日志立即刷盘
-            List<LogEntry> logSnapshot;
-            lock (_lock) { _logsDirty = false; logSnapshot = _logs.ToList(); }
-            await SaveTableAsync(TableLogs, logSnapshot);
+            await SaveFingerprintTemplatesAsync();
         }
 
         // ====== 单表保存（私有，异步）======
@@ -281,6 +241,13 @@ namespace FingerprintLockManager
             List<User> snapshot;
             lock (_lock) snapshot = _users.ToList();
             await SaveTableAsync(TableUsers, snapshot);
+        }
+
+        private async Task SaveClassesAsync()
+        {
+            List<ClassInfo> snapshot;
+            lock (_lock) snapshot = _classes.ToList();
+            await SaveTableAsync(TableClasses, snapshot);
         }
 
         private async Task SaveRolePermissionsAsync()
@@ -297,11 +264,25 @@ namespace FingerprintLockManager
             await SaveTableAsync(TableUserPermissions, snapshot);
         }
 
+        private async Task SaveDeviceAuthorizationsAsync()
+        {
+            List<DeviceAuthorization> snapshot;
+            lock (_lock) snapshot = _deviceAuths.ToList();
+            await SaveTableAsync(TableDeviceAuthorizations, snapshot);
+        }
+
         private async Task SaveDevicesAsync()
         {
             List<Device> snapshot;
             lock (_lock) snapshot = _devices.ToList();
             await SaveTableAsync(TableDevices, snapshot);
+        }
+
+        private async Task SaveFingerprintTemplatesAsync()
+        {
+            List<FingerprintTemplate> snapshot;
+            lock (_lock) snapshot = _fpTemplates.ToList();
+            await SaveTableAsync(TableFpTemplates, snapshot);
         }
 
         /// <summary>序列化列表为 JSON 并写入 SD 卡</summary>
@@ -338,9 +319,11 @@ namespace FingerprintLockManager
 
         // ====== 表名常量 ======
         private const string TableUsers = "users";
+        private const string TableClasses = "classes";
         private const string TableRolePermissions = "role_permissions";
         private const string TableUserPermissions = "user_permissions";
+        private const string TableDeviceAuthorizations = "device_authorizations";
         private const string TableDevices = "devices";
-        private const string TableLogs = "logs";
+        private const string TableFpTemplates = "fingerprint_templates";
     }
 }

@@ -32,6 +32,13 @@ int  MessageHandler::verifyFailCount     = 0;
 bool MessageHandler::permLostPending     = false;
 unsigned long MessageHandler::lastPermLostReport = 0;
 
+// 需求 2：10 秒开锁窗口状态初始化
+bool MessageHandler::windowAllowedLocks[LOCK_COUNT] = {false, false, false, false};
+int  MessageHandler::windowSeconds        = UNLOCK_WINDOW_SECONDS;
+unsigned long MessageHandler::windowEnterTime   = 0;
+String MessageHandler::windowUserId       = "";
+int  MessageHandler::windowFingerprintId  = -1;
+
 void MessageHandler::init() {
     state = STATE_IDLE;
     pendingLockId = -1;
@@ -60,6 +67,26 @@ void MessageHandler::setState(VerifyState s) {
 }
 
 void MessageHandler::onKeyPressed(int lockId) {
+    // 需求 2：开锁窗口期内按按钮直接开对应锁（可多次开锁），无需再次验证指纹
+    if (state == STATE_UNLOCK_WINDOW) {
+        if (lockId < 0 || lockId >= LOCK_COUNT) {
+            return;
+        }
+        // 开锁前检查该锁是否有权限（allowed_locks）
+        if (windowAllowedLocks[lockId]) {
+            LockControl::openLock(lockId);  // 窗口期已启用权限校验，有权限才会真正开锁
+            Logger::log(windowUserId, windowFingerprintId, lockId,
+                        "open", "success", "unlock_window");
+            Serial.printf("[MSG] 窗口期内开锁 %d（用户 %s）\n",
+                          lockId, windowUserId.c_str());
+        } else {
+            Logger::log(windowUserId, windowFingerprintId, lockId,
+                        "open", "fail", "no_permission_window");
+            Serial.printf("[MSG] 窗口期内开锁 %d 被拒（无权限）\n", lockId);
+        }
+        return;  // 不切换状态，继续留在开锁窗口期
+    }
+
     if (state != STATE_IDLE) {
         Serial.printf("[MSG] 忽略按键 %d（当前状态 %d 忙）\n", lockId, state);
         return;
@@ -67,6 +94,46 @@ void MessageHandler::onKeyPressed(int lockId) {
     pendingLockId = lockId;
     setState(STATE_WAIT_FINGER);
     Serial.printf("[MSG] 按键 %d 触发，等待指纹...\n", lockId);
+}
+
+// 需求 2：进入 10 秒开锁窗口
+void MessageHandler::enterUnlockWindow(const bool allowed[LOCK_COUNT], int windowSec,
+                                       const String &userId, int fingerprintId) {
+    for (int i = 0; i < LOCK_COUNT; i++) {
+        windowAllowedLocks[i] = allowed[i];
+    }
+    windowSeconds       = (windowSec > 0) ? windowSec : UNLOCK_WINDOW_SECONDS;
+    windowEnterTime     = millis();
+    windowUserId        = userId;
+    windowFingerprintId = fingerprintId;
+
+    // 启用 LockControl 窗口期权限校验
+    LockControl::setAllowedLocks(windowAllowedLocks);
+    // 点亮有权限的锁对应指示灯
+    for (int i = 0; i < LOCK_COUNT; i++) {
+        LockControl::setPermissionLed(i, windowAllowedLocks[i]);
+    }
+
+    setState(STATE_UNLOCK_WINDOW);
+    Serial.printf("[MSG] 进入开锁窗口 %d 秒，用户=%s allowed=[%d,%d,%d,%d]\n",
+                  windowSeconds, userId.c_str(),
+                  windowAllowedLocks[0], windowAllowedLocks[1],
+                  windowAllowedLocks[2], windowAllowedLocks[3]);
+}
+
+// 需求 2：退出 10 秒开锁窗口
+void MessageHandler::exitUnlockWindow() {
+    // 关闭全部权限指示灯
+    LockControl::clearAllPermissionLeds();
+    // 清除窗口期权限校验
+    LockControl::clearAllowedLocks();
+    for (int i = 0; i < LOCK_COUNT; i++) {
+        windowAllowedLocks[i] = false;
+    }
+    windowUserId       = "";
+    windowFingerprintId = -1;
+    Serial.println(F("[MSG] 退出开锁窗口"));
+    setState(STATE_IDLE);
 }
 
 // ====== 消息发送（通过 MeshComm） ======
@@ -152,6 +219,11 @@ void MessageHandler::checkTimeout() {
         state = STATE_IDLE;
         pendingLockId = -1;
         pendingFingerprintId = -1;
+    } else if (state == STATE_UNLOCK_WINDOW &&
+               (now - windowEnterTime > (unsigned long)windowSeconds * 1000UL)) {
+        // 需求 2：开锁窗口超时，关灯并退出
+        Serial.println(F("[MSG] 开锁窗口超时，退出"));
+        exitUnlockWindow();
     }
 }
 
@@ -205,6 +277,11 @@ void MessageHandler::update() {
 
         case STATE_WAIT_AUTH:
             // 等待上位机 AUTH_OK / AUTH_FAIL，由 handleIncoming 处理
+            checkTimeout();
+            break;
+
+        case STATE_UNLOCK_WINDOW:
+            // 需求 2：开锁窗口期，等待按键开锁或超时退出
             checkTimeout();
             break;
 
@@ -302,6 +379,24 @@ void MessageHandler::handleIncoming(const String &message) {
         cmdTimeSync(data, msgId);
     } else if (strcmp(cmd, "REGISTER") == 0) {
         cmdRegister(msgId);
+    } else if (strcmp(cmd, "DEPLOY_USER") == 0) {
+        // 需求 6/8：下发用户（权限 + 可选指纹模板）
+        cmdDeployUser(data, msgId);
+    } else if (strcmp(cmd, "REMOVE_USER") == 0) {
+        // 需求 10：删除单个用户
+        cmdRemoveUser(data, msgId);
+    } else if (strcmp(cmd, "DELETE_CLASS_USERS") == 0) {
+        // 需求 10：按班级批量删除用户
+        cmdDeleteClassUsers(data, msgId);
+    } else if (strcmp(cmd, "ENROLL_FP_STAGE") == 0) {
+        // 需求 5：分步录入指纹
+        cmdEnrollFpStage(data, msgId);
+    } else if (strcmp(cmd, "READ_CAPACITY") == 0) {
+        // 需求 10：读取容量
+        cmdReadCapacity(msgId);
+    } else if (strcmp(cmd, "CANCEL_VERIFY") == 0) {
+        // 需求 2：取消验证 / 退出开锁窗口
+        cmdCancelVerify(msgId);
     } else if (strcmp(cmd, "SD_QUERY") == 0) {
         cmdSdQuery(data, msgId);
     } else if (strcmp(cmd, "SD_SAVE") == 0) {
@@ -359,14 +454,39 @@ void MessageHandler::cmdAuthOk(const JsonObject &data, const String &msgId) {
                   perm.lock_perm[0], perm.lock_perm[1],
                   perm.lock_perm[2], perm.lock_perm[3]);
 
-    // 检查权限过期
+    // ====== 需求 2：解析 window_seconds 与 allowed_locks，进入 10 秒开锁窗口 ======
+    int windowSec = data["window_seconds"] | UNLOCK_WINDOW_SECONDS;
+
+    bool allowed[LOCK_COUNT];
+    // 优先使用 allowed_locks 数组字段；缺省时由 permissions 推导
+    JsonArray allowedArr = data["allowed_locks"].as<JsonArray>();
+    if (allowedArr.isNull()) {
+        for (int i = 0; i < LOCK_COUNT; i++) {
+            allowed[i] = perm.lock_perm[i];
+        }
+    } else {
+        for (int i = 0; i < LOCK_COUNT; i++) {
+            allowed[i] = (i < (int)allowedArr.size()) ? (bool)allowedArr[i] : false;
+        }
+    }
+
+    // 检查权限过期：过期则不开窗口，直接记录失败
     if (isPermissionExpired(perm)) {
         Logger::log(perm.user_id, pendingFingerprintId, pendingLockId,
                     "open", "fail", "permission_expired");
-        Serial.println(F("[MSG] 权限已过期"));
-    } else if (pendingLockId >= 0 && pendingLockId < LOCK_COUNT) {
-        // 根据按键请求开锁
-        if (perm.lock_perm[pendingLockId]) {
+        Serial.println(F("[MSG] 权限已过期，不进入开锁窗口"));
+        state = STATE_IDLE;
+        pendingLockId = -1;
+        pendingFingerprintId = -1;
+        return;
+    }
+
+    // 进入开锁窗口（点亮有权限锁的指示灯，启用窗口期权限校验）
+    enterUnlockWindow(allowed, windowSec, perm.user_id, pendingFingerprintId);
+
+    // 立即开用户最初请求的锁（若该锁有权限），提供即时反馈
+    if (pendingLockId >= 0 && pendingLockId < LOCK_COUNT) {
+        if (allowed[pendingLockId]) {
             LockControl::openLock(pendingLockId);
             Logger::log(perm.user_id, pendingFingerprintId, pendingLockId,
                         "open", "success", "");
@@ -378,7 +498,7 @@ void MessageHandler::cmdAuthOk(const JsonObject &data, const String &msgId) {
         }
     }
 
-    state = STATE_IDLE;
+    // 注意：不返回 IDLE，保持在 STATE_UNLOCK_WINDOW，等待窗口期内按键或超时
     pendingLockId = -1;
     pendingFingerprintId = -1;
     verifyFailCount = 0;
@@ -596,7 +716,9 @@ void MessageHandler::cmdReadStatus(const String &msgId) {
     data += "\"mesh_layer\":" + String(MeshComm::getMeshLayer()) + ",";
     data += "\"child_count\":" + String(MeshComm::getChildCount()) + ",";
     data += "\"work_mode\":\"" + String(Storage::loadWorkMode() == MODE_MESH ? "mesh" : "debug") + "\",";
-    data += "\"time_synced\":" + String(Storage::isTimeSynced() ? "true" : "false");
+    data += "\"time_synced\":" + String(Storage::isTimeSynced() ? "true" : "false") + ",";
+    // 需求 3c：STATUS_RESPONSE 增加 perm_max 字段（值=200）
+    data += "\"perm_max\":" + String(PERM_MAX_USERS);
     data += "}";
     sendMessage("STATUS_RESPONSE", data, msgId);
 }
@@ -659,6 +781,192 @@ void MessageHandler::cmdRegister(const String &msgId) {
     data += "}";
     sendMessage("REGISTER_RESPONSE", data, msgId);
     Serial.println(F("[MSG] 已响应 REGISTER 查询"));
+}
+
+// ============================================================
+// ====== 需求 2/5/6/8/10 新增命令实现 ======
+// ============================================================
+
+// 需求 6/8：下发用户 —— 写入本地权限表，若有 fp_template(base64) 则下发到 AS608
+void MessageHandler::cmdDeployUser(const JsonObject &data, const String &msgId) {
+    String userId = data["user_id"] | "";
+    int fpId = data["fingerprint_id"] | -1;
+    if (userId.length() == 0 || fpId < 0 || fpId >= FINGER_MAX_USERS) {
+        sendError(ERR_BAD_REQUEST, "invalid user_id or fingerprint_id", msgId);
+        return;
+    }
+
+    // 解析 permissions[4]
+    bool lockPerm[LOCK_COUNT] = {false, false, false, false};
+    JsonArray perms = data["permissions"].as<JsonArray>();
+    if (!perms.isNull()) {
+        for (int i = 0; i < LOCK_COUNT && i < (int)perms.size(); i++) {
+            lockPerm[i] = (bool)perms[i];
+        }
+    } else {
+        // 兼容 permissions 对象形式 {lock_0..lock_3}
+        JsonObject po = data["permissions"].as<JsonObject>();
+        if (!po.isNull()) {
+            lockPerm[0] = po["lock_0"] | false;
+            lockPerm[1] = po["lock_1"] | false;
+            lockPerm[2] = po["lock_2"] | false;
+            lockPerm[3] = po["lock_3"] | false;
+        }
+    }
+
+    // 构造权限记录并写入本地权限表
+    UserPermission perm;
+    perm.fingerprint_id = fpId;
+    perm.user_id    = userId;
+    perm.user_id_num = Storage::userIdToNum(userId);
+    perm.name       = data["name"] | "";
+    perm.role       = (UserRole)(data["role"] | (int)ROLE_STUDENT);
+    for (int i = 0; i < LOCK_COUNT; i++) perm.lock_perm[i] = lockPerm[i];
+    const char *expireDate = data["expire_date"] | "";
+    perm.expire_days = strlen(expireDate) > 0 ? Storage::dateToDays(String(expireDate))
+                                              : 0xFFFFFFFF;
+    perm.valid = true;
+    bool permOk = Storage::savePermission(perm);
+
+    // 若附带 fp_template（base64），解码后写入 AS608
+    bool fpOk = true;
+    const char *tplB64 = data["fp_template"] | "";
+    if (strlen(tplB64) > 0) {
+        uint8_t *buf = (uint8_t *)malloc(FP_TEMPLATE_BUF_SIZE);
+        if (!buf) {
+            sendError(ERR_INTERNAL, "memory alloc failed", msgId);
+            return;
+        }
+        size_t decLen = base64Decode(String(tplB64), buf, FP_TEMPLATE_BUF_SIZE);
+        if (decLen == 0) {
+            fpOk = false;
+            Serial.println(F("[MSG] DEPLOY_USER: fp_template base64 解码失败"));
+        } else {
+            fpOk = Fingerprint::writeTemplate(fpId, buf, decLen);
+            Serial.printf("[MSG] DEPLOY_USER: 写入 AS608 模板 id=%d, %u 字节, %s\n",
+                          fpId, (unsigned)decLen, fpOk ? "成功" : "失败");
+        }
+        free(buf);
+    }
+
+    bool success = permOk && fpOk;
+    String resp = "{\"user_id\":\"" + userId + "\",\"fingerprint_id\":" + String(fpId) +
+                  ",\"success\":" + String(success ? "true" : "false") + "}";
+    sendMessage("DEPLOY_USER_RESPONSE", resp, msgId);
+    Serial.printf("[MSG] DEPLOY_USER %s(fp=%d): perm=%s fp=%s\n",
+                  userId.c_str(), fpId, permOk ? "ok" : "fail", fpOk ? "ok" : "skip/fail");
+}
+
+// 需求 10：删除单个用户 —— 删除本地权限 + AS608 指纹
+void MessageHandler::cmdRemoveUser(const JsonObject &data, const String &msgId) {
+    String userId = data["user_id"] | "";
+    int fpId = data["fingerprint_id"] | -1;
+    if (userId.length() == 0 && fpId < 0) {
+        sendError(ERR_BAD_REQUEST, "missing user_id or fingerprint_id", msgId);
+        return;
+    }
+
+    bool permOk = true;
+    if (fpId >= 0) {
+        permOk = Storage::deletePermission(fpId);
+    }
+    bool fpOk = (fpId >= 0) ? Fingerprint::deleteFingerprint(fpId) : true;
+
+    bool success = permOk && fpOk;
+    String resp = "{\"user_id\":\"" + userId + "\",\"fingerprint_id\":" + String(fpId) +
+                  ",\"success\":" + String(success ? "true" : "false") + "}";
+    sendMessage("REMOVE_USER_RESPONSE", resp, msgId);
+    Serial.printf("[MSG] REMOVE_USER %s(fp=%d): perm=%s fp=%s\n",
+                  userId.c_str(), fpId, permOk ? "ok" : "fail", fpOk ? "ok" : "fail");
+
+    // 更新指纹计数
+    DeviceConfig cfg;
+    Storage::loadDeviceConfig(cfg);
+    cfg.fingerprint_count = Fingerprint::getFingerprintCount();
+    Storage::saveDeviceConfig(cfg);
+}
+
+// 需求 10：按班级批量删除用户 —— 批量删除本地权限 + AS608 指纹
+void MessageHandler::cmdDeleteClassUsers(const JsonObject &data, const String &msgId) {
+    JsonArray fpIds = data["fingerprint_ids"].as<JsonArray>();
+    if (fpIds.isNull() || fpIds.size() == 0) {
+        sendError(ERR_BAD_REQUEST, "missing fingerprint_ids", msgId);
+        return;
+    }
+
+    int deletedCount = 0;
+    for (int id : fpIds) {
+        if (id < 0) continue;
+        bool permOk = Storage::deletePermission(id);
+        bool fpOk = Fingerprint::deleteFingerprint(id);
+        if (permOk || fpOk) {
+            deletedCount++;
+        }
+    }
+
+    String resp = "{\"class_id\":\"" + String(data["class_id"] | "") +
+                  "\",\"deleted_count\":" + String(deletedCount) +
+                  ",\"success\":true}";
+    sendMessage("DELETE_CLASS_USERS_RESPONSE", resp, msgId);
+    Serial.printf("[MSG] DELETE_CLASS_USERS: 删除 %d 个用户\n", deletedCount);
+
+    // 更新指纹计数
+    DeviceConfig cfg;
+    Storage::loadDeviceConfig(cfg);
+    cfg.fingerprint_count = Fingerprint::getFingerprintCount();
+    Storage::saveDeviceConfig(cfg);
+}
+
+// 需求 5：分步录入指纹 —— 调用 fingerprint.cpp 的 enrollFingerprintStage()
+void MessageHandler::cmdEnrollFpStage(const JsonObject &data, const String &msgId) {
+    String stage = data["stage"] | "";
+    int fpId = data["fingerprint_id"] | -1;
+    if (stage.length() == 0 || fpId < 0) {
+        sendError(ERR_BAD_REQUEST, "missing stage or fingerprint_id", msgId);
+        return;
+    }
+
+    // 调用分步录入，返回 JSON 响应
+    String stageResp = Fingerprint::enrollFingerprintStage(stage, fpId);
+    // 包装为 FP_ENROLL_STAGE_RESPONSE
+    String resp = "{\"fingerprint_id\":" + String(fpId) +
+                  ",\"stage_response\":" + stageResp + "}";
+    sendMessage("FP_ENROLL_STAGE_RESPONSE", resp, msgId);
+    Serial.printf("[MSG] ENROLL_FP_STAGE %s(fp=%d): %s\n",
+                  stage.c_str(), fpId, stageResp.c_str());
+
+    // 若 verify2 成功，更新指纹计数
+    if (stage == "verify2" && stageResp.indexOf("\"success\":true") >= 0) {
+        DeviceConfig cfg;
+        Storage::loadDeviceConfig(cfg);
+        cfg.fingerprint_count = Fingerprint::getFingerprintCount();
+        Storage::saveDeviceConfig(cfg);
+    }
+}
+
+// 需求 10：读取容量
+void MessageHandler::cmdReadCapacity(const String &msgId) {
+    int used = Fingerprint::getFingerprintCount();
+    String data = "{\"used\":" + String(used) +
+                  ",\"max\":" + String(PERM_MAX_USERS) +
+                  ",\"warn_threshold\":" + String(CAPACITY_WARN_THRESHOLD) + "}";
+    sendMessage("CAPACITY_RESPONSE", data, msgId);
+    Serial.printf("[MSG] READ_CAPACITY: used=%d max=%d warn=%d\n",
+                  used, PERM_MAX_USERS, CAPACITY_WARN_THRESHOLD);
+}
+
+// 需求 2：取消验证 / 退出 10 秒开锁窗口
+void MessageHandler::cmdCancelVerify(const String &msgId) {
+    if (state == STATE_UNLOCK_WINDOW) {
+        exitUnlockWindow();
+        Serial.println(F("[MSG] CANCEL_VERIFY：退出开锁窗口"));
+    } else if (state == STATE_WAIT_FINGER || state == STATE_WAIT_AUTH) {
+        state = STATE_IDLE;
+        pendingLockId = -1;
+        pendingFingerprintId = -1;
+        Serial.println(F("[MSG] CANCEL_VERIFY：取消验证流程"));
+    }
+    sendAck(msgId, "cancelled");
 }
 
 // ============================================================
@@ -979,4 +1287,40 @@ uint8_t MessageHandler::hexCharToVal(char c) {
     if (c >= 'A' && c <= 'F') return c - 'A' + 10;
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
     return 0;
+}
+
+// 需求 6/8：base64 解码（自包含实现，用于 DEPLOY_USER 的 fp_template 字段）
+// 返回解码后的字节数（写入 outBuf），失败返回 0
+size_t MessageHandler::base64Decode(const String &in, uint8_t *outBuf, size_t outBufSize) {
+    // base64 解码表
+    static const int8_t dec[128] = {
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,  // '+'=62, '/'=63
+        52,53,54,55,56,57,58,59,60,61,-1,-1,-1,-1,-1,-1,  // '0'-'9'
+        -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,  // 'A'-'O'
+        15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,-1,  // 'P'-'Z'
+        -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,  // 'a'-'o'
+        41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1   // 'p'-'z'
+    };
+
+    size_t outLen = 0;
+    int val = 0, valb = -8;
+    for (size_t i = 0; i < in.length(); i++) {
+        char c = in[i];
+        if (c == '=') break;  // 填充符结束
+        if (c < 0 || c >= 128) continue;
+        int d = dec[(uint8_t)c];
+        if (d < 0) continue;  // 跳过非 base64 字符（含换行/空格）
+        val = (val << 6) | d;
+        valb += 6;
+        if (valb >= 0) {
+            if (outLen >= outBufSize) {
+                return outLen;  // 缓冲已满
+            }
+            outBuf[outLen++] = (uint8_t)((val >> valb) & 0xFF);
+            valb -= 8;
+        }
+    }
+    return outLen;
 }

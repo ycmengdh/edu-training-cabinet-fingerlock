@@ -1,23 +1,25 @@
 /**
- * logger.cpp - 离线日志系统实现（V2.0 适配 Flash 环形缓冲）
- * 日志持久化于 Flash 环形缓冲，断电不丢失
- * 网络恢复后批量上报：每 10 秒最多 20 条，通过 MeshComm 发送
+ * logger.cpp - 日志系统实现（V2.x 改造版，需求 9）
+ * 需求 9：柜子不保存日志，只发出。
+ * 改造点：
+ *   - 删除 Flash 环形缓冲写入逻辑（不再调用 Storage::appendLog）
+ *   - log() 改为构造 LOG_REPORT 消息直接通过 Mesh 发送给根节点/上位机
+ *   - 网络不可用时丢弃日志（不强求能真正被记录）
+ *   - 保留日志构造逻辑与对外接口以维持兼容
  */
 #include "logger.h"
 #include "storage.h"
 #include "mesh_comm.h"
 
 // 静态成员初始化
-bool Logger::networkReady = false;
-unsigned long Logger::lastReportTime = 0;
+bool     Logger::networkReady  = false;
+uint32_t Logger::logSeqCounter = 0;
 
 void Logger::init() {
-    networkReady = false;
-    lastReportTime = 0;
-    // Flash 日志指针已在 Storage::begin() 中加载
-    int stored = Storage::getLogCount();
-    Serial.printf("[LOG] 初始化完成，Flash 中待上报日志 %d 条（容量 %d）\n",
-                  stored, Storage::getLogCapacity());
+    networkReady  = false;
+    logSeqCounter = 0;
+    // 需求 9：不再加载 Flash 日志指针，本地不持久化任何日志
+    Serial.println(F("[LOG] 初始化完成（仅网络上报模式，不写本地 Flash）"));
 }
 
 void Logger::log(const LogEntry &entry) {
@@ -26,12 +28,16 @@ void Logger::log(const LogEntry &entry) {
     if (e.timestamp == 0) {
         e.timestamp = Storage::getUnixTime();
     }
-    // 写入 Flash 环形缓冲（自动分配 log_seq）
-    Storage::appendLog(e);
+    // 分配日志序号（仅内存自增，不持久化）
+    logSeqCounter++;
+    e.log_seq = logSeqCounter;
 
     Serial.printf("[LOG] 记录: seq=%u user=%s fp=%d lock=%d action=%s result=%s\n",
                   e.log_seq, e.user_id.c_str(), e.fingerprint_id, e.lock_id,
                   e.action.c_str(), e.result.c_str());
+
+    // 需求 9：直接通过网络上报，不写本地 Flash
+    reportOne(e);
 }
 
 void Logger::log(const String &userId, int fingerprintId, int lockId,
@@ -45,86 +51,68 @@ void Logger::log(const String &userId, int fingerprintId, int lockId,
     e.result         = result;
     e.reason         = reason;
     e.timestamp      = timestamp;
-    e.log_seq        = 0;  // 由 Storage::appendLog 自动分配
+    e.log_seq        = 0;  // 由 log(LogEntry) 自动分配
     log(e);
 }
 
+// 即时上报一条日志：构造 LOG_REPORT 消息（保持原批量格式 {"logs":[...]}，单条入数组）
+// 网络不可用则丢弃
+void Logger::reportOne(const LogEntry &entry) {
+    if (!MeshComm::isConnected()) {
+        // 需求 9：网络不可用直接丢弃，不强求能真正被记录
+        Serial.println(F("[LOG] 网络不可用，日志丢弃"));
+        return;
+    }
+
+    // 构造单条日志 JSON，沿用原 LOG_REPORT 的批量格式以便上位机兼容解析
+    String data = "{\"logs\":[{";
+    data += "\"log_seq\":" + String(entry.log_seq) + ",";
+    data += "\"user_id\":\"" + entry.user_id + "\",";
+    data += "\"fingerprint_id\":" + String(entry.fingerprint_id) + ",";
+    data += "\"lock_id\":" + String(entry.lock_id) + ",";
+    data += "\"action\":\"" + entry.action + "\",";
+    data += "\"result\":\"" + entry.result + "\",";
+    data += "\"reason\":\"" + entry.reason + "\",";
+    data += "\"time\":" + String(entry.timestamp) + "}]}";
+
+    if (MeshComm::sendMessage("LOG_REPORT", data)) {
+        Serial.printf("[LOG] 已上报 seq=%u\n", entry.log_seq);
+    } else {
+        // 发送失败也丢弃（不写本地 Flash）
+        Serial.println(F("[LOG] LOG_REPORT 发送失败，日志丢弃"));
+    }
+}
+
 int Logger::getPendingCount() {
-    return Storage::getLogCount();
+    // 需求 9 改造后不再缓存，无待上报日志
+    return 0;
 }
 
 bool Logger::getLog(int index, LogEntry &entry) {
-    return Storage::readLog(index, entry);
+    // 不再持久化，无历史日志可读
+    (void)index;
+    (void)entry;
+    return false;
 }
 
 void Logger::markReported(int count) {
-    // 委托给 Storage 移动 start 指针并立即保存到 NVS（已修复原版 bug）
-    Storage::markLogsReported(count);
-    Serial.printf("[LOG] 标记 %d 条已上报，剩余 %d 条\n", count, Storage::getLogCount());
+    // 不再持久化，空操作（保留接口兼容）
+    (void)count;
 }
 
 void Logger::clearAll() {
-    Storage::clearLogs();
-    Serial.println(F("[LOG] 已清空所有日志"));
+    // 需求 9：不再写本地 Flash，无缓存可清，仅打印日志
+    Serial.println(F("[LOG] clearAll（仅网络模式，无本地缓存可清）"));
 }
 
 void Logger::setNetworkReady(bool ready) {
     networkReady = ready;
     if (ready) {
-        Serial.println(F("[LOG] 网络就绪，准备批量上报日志"));
-    }
-}
-
-void Logger::reportBatch() {
-    if (!networkReady || !MeshComm::isConnected()) {
-        return;
-    }
-    int pending = Storage::getLogCount();
-    if (pending == 0) return;
-
-    // 每批最多上报 LOG_REPORT_BATCH_MAX 条
-    int batch = (pending > LOG_REPORT_BATCH_MAX) ? LOG_REPORT_BATCH_MAX : pending;
-
-    // 构造批量日志上报 JSON
-    String data = "{\"logs\":[";
-    int actualReported = 0;
-    for (int i = 0; i < batch; i++) {
-        LogEntry e;
-        if (!Storage::readLog(i, e)) break;
-        if (i > 0) data += ",";
-        data += "{\"log_seq\":" + String(e.log_seq) + ",";
-        data += "\"user_id\":\"" + e.user_id + "\",";
-        data += "\"fingerprint_id\":" + String(e.fingerprint_id) + ",";
-        data += "\"lock_id\":" + String(e.lock_id) + ",";
-        data += "\"action\":\"" + e.action + "\",";
-        data += "\"result\":\"" + e.result + "\",";
-        data += "\"reason\":\"" + e.reason + "\",";
-        data += "\"time\":" + String(e.timestamp) + "}";
-        actualReported++;
-    }
-    data += "]}";
-
-    if (actualReported == 0) return;
-
-    Serial.printf("[LOG] 上报 %d 条日志...\n", actualReported);
-    if (MeshComm::sendMessage("LOG_REPORT", data)) {
-        // 上报成功，标记已上报（移动 Flash start 指针并保存 NVS）
-        markReported(actualReported);
-        Serial.printf("[LOG] 上报成功，已标记 %d 条\n", actualReported);
-    } else {
-        Serial.println(F("[LOG] 上报失败，下次重试"));
+        Serial.println(F("[LOG] 网络就绪（即时上报模式）"));
     }
 }
 
 void Logger::update() {
-    if (!networkReady) return;
-    if (!MeshComm::isConnected()) return;
-    if (Storage::getLogCount() == 0) return;
-
-    unsigned long now = millis();
-    // 每 LOG_REPORT_INTERVAL_MS（10秒）上报一批
-    if (now - lastReportTime >= LOG_REPORT_INTERVAL_MS || lastReportTime == 0) {
-        lastReportTime = now;
-        reportBatch();
-    }
+    // 需求 9 改造后日志在 log() 中即时发出，无需批量上报调度。
+    // 保留空实现以兼容主循环调用。
 }

@@ -5,9 +5,14 @@ using System.Windows.Media;
 namespace FingerprintLockManager
 {
     /// <summary>
-    /// 权限管理页面（双层权限模型）
+    /// 权限管理页面（双层权限模型 + 设备维度授权适配）
+    ///
     /// 左侧用户列表，右侧 4 把锁（Lock0-3）权限勾选，每把锁显示权限来源标记（默认/覆盖）。
     /// 保存时写入个人覆盖项（SetUserPermission）；"重置为角色默认"按钮删除个人覆盖回退到角色默认。
+    ///
+    /// 适配需求 6/8：学生权限改为按设备维度下发（DeviceAuthorization）。
+    /// 本页面只负责"角色默认 + 个人覆盖"全局策略，不再广播 SYNC_PERMISSIONS。
+    /// 实际下发到柜子由「柜子分配」页面 + DeployService 完成。
     /// </summary>
     public partial class PermissionPage : Page
     {
@@ -20,10 +25,23 @@ namespace FingerprintLockManager
             Loaded += (s, e) => LoadUsers();
         }
 
-        /// <summary>加载用户列表</summary>
+        /// <summary>加载用户列表（老师按班级限制）</summary>
         private void LoadUsers()
         {
             var users = App.UserService.GetAllUsers();
+
+            // 老师只能看自己班级的学生 + 自己
+            if (App.CurrentUser?.Role == "teacher")
+            {
+                var myClassIds = App.ClassService.GetClassesByTeacher(App.CurrentUser.UserId)
+                    .Select(c => c.ClassId)
+                    .ToHashSet();
+                users = users.Where(u =>
+                    u.UserId == App.CurrentUser.UserId ||
+                    (u.Role == "student" && myClassIds.Contains(u.ClassId ?? "")))
+                    .ToList();
+            }
+
             UserListBox.ItemsSource = users;
         }
 
@@ -123,15 +141,28 @@ namespace FingerprintLockManager
                 [3] = Lock3CheckBox.IsChecked == true
             };
 
+            // 操作前自动备份（需求 11）
+            App.BackupService.BackupBeforeAction($"修改用户权限 {userId}", App.CurrentUser?.UserId);
+
             if (App.PermissionService.SetUserPermissions(userId, dict))
             {
-                MessageBox.Show("权限保存成功（已写入个人覆盖项）", "成功", MessageBoxButton.OK, MessageBoxImage.Information);
-
                 // 重新加载以刷新来源标记
                 LoadUserPermissions(_selectedUser);
 
-                // 同步权限到该用户所在的所有在线设备
-                SyncPermissionsToDevice(userId);
+                // 需求 6/8：学生权限按设备维度下发，不再广播 SYNC_PERMISSIONS
+                // 提示用户去「柜子分配」页面重新下发
+                if (_selectedUser.Role == "student")
+                {
+                    MessageBox.Show(
+                        "权限保存成功（已写入个人覆盖项）。\n\n" +
+                        "注意：学生权限按设备维度下发。如需让柜子生效，请到「柜子分配」页面重新下发。",
+                        "成功", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+                else
+                {
+                    MessageBox.Show("权限保存成功（已写入个人覆盖项）", "成功",
+                        MessageBoxButton.OK, MessageBoxImage.Information);
+                }
             }
             else
             {
@@ -152,42 +183,17 @@ namespace FingerprintLockManager
                 "确认重置", MessageBoxButton.YesNo, MessageBoxImage.Question);
             if (result != MessageBoxResult.Yes) return;
 
+            // 操作前自动备份（需求 11）
+            App.BackupService.BackupBeforeAction($"重置用户权限为默认 {_selectedUser.UserId}", App.CurrentUser?.UserId);
+
             if (App.PermissionService.DeleteAllUserPermissions(_selectedUser.UserId))
             {
                 MessageBox.Show("已重置为角色默认权限", "成功", MessageBoxButton.OK, MessageBoxImage.Information);
                 LoadUserPermissions(_selectedUser);
-                SyncPermissionsToDevice(_selectedUser.UserId);
             }
             else
             {
                 MessageBox.Show("重置失败", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
-            }
-        }
-
-        /// <summary>同步权限到在线设备（按指纹查询最终权限后广播下发）</summary>
-        private void SyncPermissionsToDevice(string userId)
-        {
-            try
-            {
-                var user = App.UserService.GetUser(userId);
-                if (user == null || !user.FingerprintId.HasValue) return;
-
-                bool[] permissions = App.PermissionService.GetFinalPermissions(user.UserId);
-
-                var data = new Dictionary<string, object>
-                {
-                    ["fingerprint_id"] = user.FingerprintId.Value,
-                    ["user_id"] = user.UserId,
-                    ["permissions"] = permissions
-                };
-
-                // 广播同步权限到所有在线设备（经 Root 转发）
-                var msg = Message.Create(Protocol.CmdSyncPermissions, "", data);
-                App.MeshBridge.Broadcast(msg);
-            }
-            catch
-            {
-                // 同步失败时忽略，不影响本地保存
             }
         }
     }

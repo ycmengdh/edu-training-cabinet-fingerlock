@@ -24,9 +24,10 @@
                     <ComboBoxItem Content="学生" Tag="student"/>
                 </ComboBox>
 
+                <TextBlock Text="班级筛选：" Style="{StaticResource LabelText}" Margin="24,0,8,0"/>
+                <ComboBox x:Name="ClassFilterBox" Width="180" SelectionChanged="ClassFilterBox_SelectionChanged"/>
+
                 <Button Content="+ 添加用户" Margin="24,0,0,0" Click="AddUserButton_Click"/>
-                <Button Content="分配指纹" Style="{StaticResource SecondaryButton}" Margin="12,0,0,0"
-                        Click="AssignFingerprintButton_Click"/>
                 <Button Content="删除用户" Style="{StaticResource DangerButton}" Margin="12,0,0,0"
                         Click="DeleteUserButton_Click"/>
                 <Button Content="刷新" Style="{StaticResource SecondaryButton}" Margin="12,0,0,0"
@@ -41,9 +42,10 @@
                       IsReadOnly="True"
                       SelectionMode="Single">
                 <DataGrid.Columns>
-                    <DataGridTextColumn Header="用户ID" Binding="{Binding UserId}" Width="140"/>
+                    <DataGridTextColumn Header="用户ID" Binding="{Binding UserId}" Width="160"/>
                     <DataGridTextColumn Header="姓名" Binding="{Binding Name}" Width="120"/>
-                    <DataGridTextColumn Header="角色" Binding="{Binding Role}" Width="100"/>
+                    <DataGridTextColumn Header="角色" Binding="{Binding Role}" Width="80"/>
+                    <DataGridTextColumn Header="所属班级" Binding="{Binding ClassId}" Width="160"/>
                     <DataGridTextColumn Header="指纹ID" Binding="{Binding FingerprintId}" Width="100"/>
                     <DataGridTextColumn Header="创建时间" Binding="{Binding CreateTime, StringFormat=yyyy-MM-dd HH:mm}" Width="*"/>
                 </DataGrid.Columns>

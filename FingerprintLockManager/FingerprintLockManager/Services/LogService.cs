@@ -1,23 +1,26 @@
 namespace FingerprintLockManager
 {
     /// <summary>
-    /// 日志服务
-    /// 负责开锁/关锁等操作日志的记录、查询与清理。
-    /// 数据持久化于根节点 SD 卡 logs.json。
-    /// 日志写入采用脏标记 + 延迟批量刷盘（每 5 秒），避免频繁写 SD 卡。
+    /// 日志服务（需求 9）
+    ///
+    /// 需求 9：开关柜子的信息，柜子不需要保存，根节点也不需要保存，只需要发出来。
+    /// 正常情况下，上位机在线的话就记录日志，用 SQLite 数据库记录。
+    /// 上位机不在线则不管，数据发了就发了，不强求能真正被记录。
+    ///
+    /// 本服务委托 LogDbService（SQLite）进行日志持久化。
     /// </summary>
     public class LogService
     {
-        /// <summary>添加日志</summary>
+        /// <summary>添加日志（上位机在线时记录到 SQLite）</summary>
         public void AddLog(LogEntry log)
         {
             try
             {
-                DataStore.Current.AddLog(log);
+                LogDbService.Current.AddLog(log);
             }
             catch
             {
-                // 写入日志失败时忽略
+                // 写入日志失败时忽略（需求 9：不强求能真正被记录）
             }
         }
 
@@ -26,7 +29,7 @@ namespace FingerprintLockManager
         {
             try
             {
-                DataStore.Current.AddLogs(logs);
+                LogDbService.Current.AddLogs(logs);
             }
             catch
             {
@@ -37,36 +40,12 @@ namespace FingerprintLockManager
         /// <summary>
         /// 查询日志（支持按设备、用户、时间范围筛选）
         /// </summary>
-        public List<LogEntry> QueryLogs(string deviceId = null, string userId = null,
+        public List<LogEntry> QueryLogs(string? deviceId = null, string? userId = null,
             DateTime? startTime = null, DateTime? endTime = null, int limit = 1000)
         {
             try
             {
-                var query = DataStore.Current.GetLogs().AsQueryable();
-
-                if (!string.IsNullOrEmpty(deviceId))
-                {
-                    query = query.Where(l => l.DeviceId == deviceId);
-                }
-                if (!string.IsNullOrEmpty(userId))
-                {
-                    query = query.Where(l => l.UserId == userId);
-                }
-                if (startTime.HasValue)
-                {
-                    query = query.Where(l => l.CreateTime >= startTime.Value);
-                }
-                if (endTime.HasValue)
-                {
-                    query = query.Where(l => l.CreateTime <= endTime.Value);
-                }
-
-                if (limit <= 0) limit = 1000;
-
-                return query
-                    .OrderByDescending(l => l.CreateTime)
-                    .Take(limit)
-                    .ToList();
+                return LogDbService.Current.QueryLogs(deviceId, userId, startTime, endTime, limit);
             }
             catch
             {
@@ -79,7 +58,7 @@ namespace FingerprintLockManager
         {
             try
             {
-                return DataStore.Current.GetLogs().Count;
+                return LogDbService.Current.GetLogCount();
             }
             catch
             {
@@ -92,7 +71,7 @@ namespace FingerprintLockManager
         {
             try
             {
-                DataStore.Current.ClearLogs();
+                LogDbService.Current.ClearLogs();
             }
             catch
             {
