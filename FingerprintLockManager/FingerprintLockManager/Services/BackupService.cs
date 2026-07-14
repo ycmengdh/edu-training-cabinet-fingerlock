@@ -12,7 +12,9 @@ namespace FingerprintLockManager
     ///
     /// 备份内容：业务表 JSON + 指纹模板二进制文件（全量备份）
     ///
-    /// 串口波特率 2Mbps + 并行下载（10 并发），200 枚指纹模板全量备份约 1-2 秒完成。
+    /// 模板下载为串行（USB 串口是单条物理链路，无法真正并发；
+    /// 根节点固件单线程顺序处理请求，并发只会让响应交织、增加风险无收益）。
+    /// 2Mbps 波特率下，单次往返约 15-20ms，200 枚模板串行下载约 3-4 秒。
     /// 根节点不在线时跳过模板下载，仅备份业务表（从内存快照，&lt;100ms）。
     /// </summary>
     public class BackupService
@@ -26,9 +28,6 @@ namespace FingerprintLockManager
             "users", "classes", "role_permissions", "user_permissions",
             "device_authorizations", "devices", "fingerprint_templates"
         };
-
-        /// <summary>模板下载并发数</summary>
-        private const int TemplateDownloadConcurrency = 10;
 
         /// <summary>单枚模板下载超时（毫秒，配合 2Mbps 波特率）</summary>
         private const int TemplateDownloadTimeoutMs = 3000;
@@ -44,7 +43,7 @@ namespace FingerprintLockManager
         ///
         /// 同步方法，供各业务操作前调用。
         /// 内部在 ThreadPool 线程执行异步全量备份，避免 UI 死锁。
-        /// 2Mbps 波特率 + 10 并发下载，200 枚模板约 1-2 秒完成。
+        /// 模板串行下载（USB 串口单链路，无法并发），200 枚约 3-4 秒。
         /// 根节点不在线时跳过模板下载，仅备份业务表（&lt;100ms）。
         /// </summary>
         /// <param name="triggerAction">触发备份的操作描述</param>
@@ -101,9 +100,11 @@ namespace FingerprintLockManager
             // 拉取 DataStore 业务表全量快照
             var snapshot = TakeSnapshot();
 
-            // 并行下载指纹模板二进制文件
+            // 串行下载指纹模板二进制文件
+            // USB 串口是单条物理链路，无法真正并发；
+            // 根节点固件单线程顺序处理请求，并发只会让响应交织、增加风险无收益。
             var templates = snapshot["fingerprint_templates"] as List<FingerprintTemplate> ?? new List<FingerprintTemplate>();
-            var templateData = await DownloadTemplatesParallelAsync(templates);
+            var templateData = await DownloadTemplatesSerialAsync(templates);
             int templateCount = templateData.Count;
 
             // 打包为 zip
@@ -310,15 +311,23 @@ namespace FingerprintLockManager
         }
 
         /// <summary>
-        /// 并行下载所有指纹模板二进制文件（并发 TemplateDownloadConcurrency，单个超时 TemplateDownloadTimeoutMs）
+        /// 串行下载所有指纹模板二进制文件
         ///
-        /// 2Mbps 波特率下，单枚 512B 模板传输 + 往返约 30-50ms。
-        /// 200 枚 × 10 并发 = 20 批 × 50ms ≈ 1 秒。
+        /// 为什么不能并发：
+        ///   - USB 串口是单条物理链路，所有数据必须按位串行传输，无法真正并行
+        ///   - 根节点固件单线程顺序处理请求，并发请求会在串口缓冲区排队，总耗时不变
+        ///   - 多个请求的响应可能交织，虽然 msg_id 匹配能处理，但增加复杂度无收益
+        ///
+        /// 2Mbps 波特率下，单次往返约 15-20ms：
+        ///   - 请求 ~100B JSON → 0.4ms
+        ///   - 根节点读 SD 卡 → 5-10ms
+        ///   - 响应 512B 模板 hex 编码 ~1.2KB → 5ms
+        /// 200 枚 × 20ms ≈ 3-4 秒。
         /// 单枚失败不影响其他，最终返回成功下载的列表。
         /// </summary>
         /// <param name="templates">指纹模板元数据列表</param>
         /// <returns>成功下载的 (userId, bytes) 列表</returns>
-        private static async Task<List<(string userId, byte[] bytes)>> DownloadTemplatesParallelAsync(
+        private static async Task<List<(string userId, byte[] bytes)>> DownloadTemplatesSerialAsync(
             List<FingerprintTemplate> templates)
         {
             if (!App.SdStorageService.IsAvailable || templates.Count == 0)
@@ -326,34 +335,26 @@ namespace FingerprintLockManager
                 return new List<(string, byte[])>();
             }
 
-            var semaphore = new SemaphoreSlim(TemplateDownloadConcurrency);
-            var tasks = templates.Select(async t =>
+            var result = new List<(string userId, byte[] bytes)>();
+
+            foreach (var t in templates)
             {
-                await semaphore.WaitAsync();
                 try
                 {
                     var bytes = await App.SdStorageService.DownloadTemplateAsync(
                         t.UserId, 1, TemplateDownloadTimeoutMs);
-                    return (t.UserId, bytes);
+                    if (bytes != null && bytes.Length > 0)
+                    {
+                        result.Add((t.UserId, bytes));
+                    }
                 }
                 catch
                 {
                     // 单个模板下载失败忽略，不影响整体备份
-                    return (t.UserId, (byte[]?)null);
                 }
-                finally
-                {
-                    semaphore.Release();
-                }
-            }).ToList();
+            }
 
-            var results = await Task.WhenAll(tasks);
-
-            // 过滤掉失败的
-            return results
-                .Where(r => r.Item2 != null && r.Item2.Length > 0)
-                .Select(r => (r.UserId, r.Item2!))
-                .ToList();
+            return result;
         }
 
         /// <summary>保存备份记录到 SQLite</summary>

@@ -12,7 +12,7 @@
 
         <!-- 页面标题 -->
         <TextBlock Grid.Row="0" Text="备份与还原" Style="{StaticResource TitleText}" Margin="0,0,0,4"/>
-        <TextBlock Grid.Row="0" Text="每次系统操作前自动全量备份（业务表 JSON + 指纹模板二进制文件，2Mbps 并行下载约 1-2 秒）。根节点不在线时仅备份业务表。备份仅用于还原，数据以根节点为准。还原前会自动备份当前状态。"
+        <TextBlock Grid.Row="0" Text="每次系统操作前自动全量备份（业务表 JSON + 指纹模板二进制文件，2Mbps 串行下载约 3-4 秒）。根节点不在线时仅备份业务表。备份仅用于还原，数据以根节点为准。还原前会自动备份当前状态。"
                    Foreground="{StaticResource SubTextBrush}" FontSize="11" Margin="0,28,0,12"
                    TextWrapping="Wrap"/>
 
