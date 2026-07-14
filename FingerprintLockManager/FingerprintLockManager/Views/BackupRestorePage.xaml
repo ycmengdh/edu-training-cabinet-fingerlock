@@ -12,7 +12,7 @@
 
         <!-- 页面标题 -->
         <TextBlock Grid.Row="0" Text="备份与还原" Style="{StaticResource TitleText}" Margin="0,0,0,4"/>
-        <TextBlock Grid.Row="0" Text="每次系统操作前会自动备份根节点数据。备份仅用于还原，数据以根节点为准。还原前会自动备份当前状态。"
+        <TextBlock Grid.Row="0" Text="自动备份：每次系统操作前自动触发，仅含业务表 JSON（快速）。手动备份：点击下方按钮，含业务表 + 指纹模板二进制文件（完整恢复点）。备份仅用于还原，数据以根节点为准。还原前会自动备份当前状态。"
                    Foreground="{StaticResource SubTextBrush}" FontSize="11" Margin="0,28,0,12"
                    TextWrapping="Wrap"/>
 
@@ -41,6 +41,7 @@
                           AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single">
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="备份ID" Binding="{Binding BackupId}" Width="160"/>
+                        <DataGridTextColumn Header="类型" Binding="{Binding BackupType}" Width="60"/>
                         <DataGridTextColumn Header="触发操作" Binding="{Binding TriggerAction}" Width="*"/>
                         <DataGridTextColumn Header="操作人" Binding="{Binding OperatorUserId}" Width="120"/>
                         <DataGridTextColumn Header="文件大小" Binding="{Binding FileSizeText}" Width="100"/>
