@@ -2,30 +2,23 @@ namespace FingerprintLockManager
 {
     /// <summary>
     /// 登录认证服务
-    /// 负责用户登录验证（所有角色）与密码修改（加盐哈希）
+    /// 负责用户登录验证与密码修改（加盐哈希）。
+    /// 数据来源为 DataStore 内存副本（从根节点 SD 卡加载）。
     /// </summary>
     public class AuthService
     {
-        /// <summary>
-        /// 用户登录验证（所有角色均可登录）
-        /// </summary>
-        /// <param name="userId">用户 ID</param>
-        /// <param name="password">明文密码</param>
-        /// <returns>验证通过返回 User 对象；失败或异常返回 null</returns>
+        /// <summary>用户登录验证</summary>
         public User Login(string userId, string password)
         {
             try
             {
                 if (string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(password)) return null;
 
-                // 根据用户 ID 查询用户
-                var user = DatabaseService.Fsql.Select<User>()
-                    .Where(u => u.UserId == userId)
-                    .First();
+                var user = DataStore.Current.GetUsers()
+                    .FirstOrDefault(u => u.UserId == userId);
 
                 if (user == null) return null;
 
-                // 校验密码（加盐哈希）
                 if (!PasswordHelper.VerifyPassword(password, user.PasswordSalt, user.PasswordHash))
                 {
                     return null;
@@ -39,13 +32,7 @@ namespace FingerprintLockManager
             }
         }
 
-        /// <summary>
-        /// 修改密码（重新生成盐值并哈希）
-        /// </summary>
-        /// <param name="userId">用户 ID</param>
-        /// <param name="oldPassword">原明文密码</param>
-        /// <param name="newPassword">新明文密码</param>
-        /// <returns>修改成功返回 true；原密码错误或异常返回 false</returns>
+        /// <summary>修改密码</summary>
         public bool ChangePassword(string userId, string oldPassword, string newPassword)
         {
             try
@@ -57,30 +44,32 @@ namespace FingerprintLockManager
                     return false;
                 }
 
-                // 查询用户
-                var user = DatabaseService.Fsql.Select<User>()
-                    .Where(u => u.UserId == userId)
-                    .First();
+                var user = DataStore.Current.GetUsers()
+                    .FirstOrDefault(u => u.UserId == userId);
 
                 if (user == null) return false;
 
-                // 校验原密码（加盐哈希）
                 if (!PasswordHelper.VerifyPassword(oldPassword, user.PasswordSalt, user.PasswordHash))
                 {
                     return false;
                 }
 
-                // 生成新盐值并重新哈希
                 string newSalt = PasswordHelper.GenerateSalt();
-                user.PasswordSalt = newSalt;
-                user.PasswordHash = PasswordHelper.HashPassword(newPassword, newSalt);
-                user.UpdateTime = DateTime.Now;
+                string newHash = PasswordHelper.HashPassword(newPassword, newSalt);
 
-                int rows = DatabaseService.Fsql.Update<User>()
-                    .SetSource(user)
-                    .ExecuteAffrows();
-
-                return rows > 0;
+                bool found = false;
+                DataStore.Current.MutateUsers(list =>
+                {
+                    int idx = list.FindIndex(u => u.UserId == userId);
+                    if (idx >= 0)
+                    {
+                        list[idx].PasswordSalt = newSalt;
+                        list[idx].PasswordHash = newHash;
+                        list[idx].UpdateTime = DateTime.Now;
+                        found = true;
+                    }
+                });
+                return found;
             }
             catch
             {

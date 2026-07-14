@@ -34,15 +34,8 @@ namespace FingerprintLockManager
         /// </summary>
         private void Application_Startup(object sender, StartupEventArgs e)
         {
-            // 1. 初始化数据库（自动建表、创建默认管理员 admin/admin123、初始化角色默认权限）
-            try
-            {
-                new DatabaseService().Init(ConfigHelper.Current.DatabasePath);
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"数据库初始化失败：{ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
-            }
+            // 1. 数据源为根节点 SD 卡，无需本地数据库初始化
+            //    DataStore 在根节点注册成功后自动从 SD 卡加载（见 OnRootDeviceRegistered）
 
             // 2. 绑定消息处理器业务事件
             WireUpMessageHandler();
@@ -75,6 +68,8 @@ namespace FingerprintLockManager
         {
             try
             {
+                // 退出前将内存中未刷盘的数据写回 SD 卡
+                _ = DataStore.Current.FlushAllAsync();
                 MeshBridge.Stop();
             }
             catch
@@ -147,13 +142,15 @@ namespace FingerprintLockManager
             }
         }
 
-        /// <summary>根节点注册：记录根节点 ID，供 SD 卡集中存储服务定位</summary>
+        /// <summary>根节点注册：记录根节点 ID，并触发从 SD 卡全量加载数据到内存</summary>
         private void OnRootDeviceRegistered(string rootDeviceId)
         {
             try
             {
                 SdStorageService.RootDeviceId = rootDeviceId;
-                System.Diagnostics.Debug.WriteLine($"[APP] 根节点已注册: {rootDeviceId}，SD 卡存储服务可用");
+                System.Diagnostics.Debug.WriteLine($"[APP] 根节点已注册: {rootDeviceId}，开始从 SD 卡加载数据");
+                // 根节点就绪后，从 SD 卡全量加载数据到 DataStore 内存
+                _ = DataStore.Current.LoadFromSdCardAsync();
             }
             catch
             {

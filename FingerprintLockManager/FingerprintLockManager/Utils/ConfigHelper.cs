@@ -11,9 +11,6 @@ namespace FingerprintLockManager
         /// <summary>TCP 监听端口（STA 模式下上位机作为 TCP 服务端的监听端口）</summary>
         public int TcpPort { get; set; } = 8888;
 
-        /// <summary>SQLite 数据库文件路径</summary>
-        public string DatabasePath { get; set; } = "./Data/fingerprint_lock.db";
-
         /// <summary>默认 AP 模式下 ESP32 设备的 IP 地址</summary>
         public string ApDeviceIp { get; set; } = "192.168.4.1";
 

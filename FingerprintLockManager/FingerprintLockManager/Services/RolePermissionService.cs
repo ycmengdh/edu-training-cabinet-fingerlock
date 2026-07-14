@@ -4,6 +4,7 @@ namespace FingerprintLockManager
     /// 角色默认权限服务
     /// 管理角色（admin/teacher/student）的默认权限模板，作为双层权限模型的第一层。
     /// 核心方法 GetFinalPermissions：COALESCE 合并角色默认 + 个人覆盖，返回最终权限 bool[4]。
+    /// 数据持久化于根节点 SD 卡 role_permissions.json。
     /// </summary>
     public class RolePermissionService
     {
@@ -15,10 +16,9 @@ namespace FingerprintLockManager
         {
             try
             {
-                var list = DatabaseService.Fsql.Select<RolePermission>()
+                return DataStore.Current.GetRolePermissions()
                     .OrderBy(r => r.Role)
                     .ToList();
-                return list;
             }
             catch
             {
@@ -26,19 +26,14 @@ namespace FingerprintLockManager
             }
         }
 
-        /// <summary>
-        /// 获取指定角色的默认权限
-        /// </summary>
-        /// <param name="role">角色名：admin/teacher/student</param>
-        /// <returns>角色权限对象；不存在或异常返回该角色的内置默认值</returns>
+        /// <summary>获取指定角色的默认权限；不存在返回内置默认值</summary>
         public RolePermission GetRolePermission(string role)
         {
             try
             {
                 if (string.IsNullOrEmpty(role)) return BuildDefault(role);
-                var rp = DatabaseService.Fsql.Select<RolePermission>()
-                    .Where(r => r.Role == role)
-                    .First();
+                var rp = DataStore.Current.GetRolePermissions()
+                    .FirstOrDefault(r => r.Role == role);
                 return rp ?? BuildDefault(role);
             }
             catch
@@ -47,11 +42,7 @@ namespace FingerprintLockManager
             }
         }
 
-        /// <summary>
-        /// 更新或创建角色默认权限
-        /// </summary>
-        /// <param name="rolePermission">角色权限对象</param>
-        /// <returns>成功返回 true；失败返回 false</returns>
+        /// <summary>更新或创建角色默认权限</summary>
         public bool SetRolePermission(RolePermission rolePermission)
         {
             try
@@ -59,22 +50,22 @@ namespace FingerprintLockManager
                 if (rolePermission == null || string.IsNullOrEmpty(rolePermission.Role)) return false;
                 rolePermission.UpdateTime = DateTime.Now;
 
-                var existing = DatabaseService.Fsql.Select<RolePermission>()
-                    .Where(r => r.Role == rolePermission.Role)
-                    .First();
-
-                if (existing != null)
+                bool found = false;
+                DataStore.Current.MutateRolePermissions(list =>
                 {
-                    int rows = DatabaseService.Fsql.Update<RolePermission>()
-                        .SetSource(rolePermission)
-                        .ExecuteAffrows();
-                    return rows > 0;
-                }
-                else
-                {
-                    int rows = DatabaseService.Fsql.Insert(rolePermission).ExecuteAffrows();
-                    return rows > 0;
-                }
+                    int idx = list.FindIndex(r => r.Role == rolePermission.Role);
+                    if (idx >= 0)
+                    {
+                        list[idx] = rolePermission;
+                        found = true;
+                    }
+                    else
+                    {
+                        list.Add(rolePermission);
+                        found = true;
+                    }
+                });
+                return found;
             }
             catch
             {
@@ -83,40 +74,42 @@ namespace FingerprintLockManager
         }
 
         /// <summary>
-        /// 初始化 3 条默认角色权限记录（admin/teacher/student）
+        /// 初始化 3 条默认角色权限记录（admin/teacher/student）。
         /// 仅在表为空时插入，避免覆盖已有配置。
+        /// DataStore 加载时已自动调用，此方法保留供手动初始化。
         /// </summary>
         public void InitDefaultRolePermissions()
         {
             try
             {
-                bool hasAny = DatabaseService.Fsql.Select<RolePermission>().Any();
-                if (hasAny) return;
+                if (DataStore.Current.GetRolePermissions().Count > 0) return;
 
                 var now = DateTime.Now;
                 var defaults = new List<RolePermission>
                 {
-                    new RolePermission { Role = "admin", Lock0 = true, Lock1 = true, Lock2 = true, Lock3 = true, UpdateTime = now },
-                    new RolePermission { Role = "teacher", Lock0 = false, Lock1 = true, Lock2 = true, Lock3 = true, UpdateTime = now },
-                    new RolePermission { Role = "student", Lock0 = false, Lock1 = false, Lock2 = false, Lock3 = false, UpdateTime = now }
+                    new() { Role = "admin", Lock0 = true, Lock1 = true, Lock2 = true, Lock3 = true, UpdateTime = now },
+                    new() { Role = "teacher", Lock0 = false, Lock1 = true, Lock2 = true, Lock3 = true, UpdateTime = now },
+                    new() { Role = "student", Lock0 = false, Lock1 = false, Lock2 = false, Lock3 = false, UpdateTime = now }
                 };
 
-                DatabaseService.Fsql.Insert<RolePermission>()
-                    .AppendData(defaults)
-                    .ExecuteAffrows();
+                DataStore.Current.MutateRolePermissions(list =>
+                {
+                    if (list.Count == 0)
+                    {
+                        list.AddRange(defaults);
+                    }
+                });
             }
             catch
             {
-                // 初始化失败忽略，避免影响启动
+                // 初始化失败忽略
             }
         }
 
         /// <summary>
         /// 核心方法：获取用户最终权限（双层 COALESCE 合并）
-        /// 算法：以角色默认权限为基础，若存在个人覆盖项则用覆盖值替换对应锁。
+        /// 以角色默认权限为基础，若存在个人覆盖项则用覆盖值替换对应锁。
         /// </summary>
-        /// <param name="userId">用户 ID</param>
-        /// <returns>4 把锁的最终权限 bool[4]；用户不存在返回全 false</returns>
         public bool[] GetFinalPermissions(string userId)
         {
             bool[] result = new bool[LockCount];
@@ -125,9 +118,8 @@ namespace FingerprintLockManager
                 if (string.IsNullOrEmpty(userId)) return result;
 
                 // 查询用户以获取角色
-                var user = DatabaseService.Fsql.Select<User>()
-                    .Where(u => u.UserId == userId)
-                    .First();
+                var user = DataStore.Current.GetUsers()
+                    .FirstOrDefault(u => u.UserId == userId);
                 if (user == null) return result;
 
                 // 第一层：角色默认权限
@@ -138,7 +130,7 @@ namespace FingerprintLockManager
                 result[3] = rolePerm.Lock3;
 
                 // 第二层：个人覆盖项（COALESCE，存在覆盖则替换）
-                var overrides = DatabaseService.Fsql.Select<UserPermission>()
+                var overrides = DataStore.Current.GetUserPermissions()
                     .Where(p => p.UserId == userId)
                     .ToList();
                 foreach (var p in overrides)

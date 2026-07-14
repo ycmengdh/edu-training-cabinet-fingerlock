@@ -3,8 +3,9 @@ namespace FingerprintLockManager
     /// <summary>
     /// 权限管理服务（双层权限模型）
     /// 第一层：角色默认权限（由 RolePermissionService 管理）
-    /// 第二层：个人权限覆盖项（UserPermission 表，优先级高于角色默认）
+    /// 第二层：个人权限覆盖项（user_permissions 表，优先级高于角色默认）
     /// 本服务负责个人覆盖项的增删查，以及指纹验证时合并两层得到最终权限。
+    /// 数据持久化于根节点 SD 卡 user_permissions.json。
     /// </summary>
     public class PermissionService
     {
@@ -14,18 +15,13 @@ namespace FingerprintLockManager
         /// <summary>角色权限服务（用于合并两层权限）</summary>
         private readonly RolePermissionService _rolePermService = new RolePermissionService();
 
-        /// <summary>
-        /// 获取用户的个人权限覆盖项
-        /// </summary>
-        /// <param name="userId">用户 ID</param>
-        /// <returns>个人覆盖项列表；异常时返回空列表</returns>
+        /// <summary>获取用户的个人权限覆盖项</summary>
         public List<UserPermission> GetUserPermissions(string userId)
         {
             try
             {
                 if (string.IsNullOrEmpty(userId)) return new List<UserPermission>();
-
-                return DatabaseService.Fsql.Select<UserPermission>()
+                return DataStore.Current.GetUserPermissions()
                     .Where(p => p.UserId == userId)
                     .OrderBy(p => p.LockId)
                     .ToList();
@@ -36,21 +32,14 @@ namespace FingerprintLockManager
             }
         }
 
-        /// <summary>
-        /// 获取用户对某把锁的个人覆盖权限
-        /// </summary>
-        /// <param name="userId">用户 ID</param>
-        /// <param name="lockId">锁编号 0-3</param>
-        /// <returns>存在覆盖返回 (true, HasAccess)；无覆盖返回 (false, false)</returns>
+        /// <summary>获取用户对某把锁的个人覆盖权限</summary>
         public (bool hasOverride, bool hasAccess) GetUserPermission(string userId, int lockId)
         {
             try
             {
                 if (string.IsNullOrEmpty(userId)) return (false, false);
-
-                var p = DatabaseService.Fsql.Select<UserPermission>()
-                    .Where(x => x.UserId == userId && x.LockId == lockId)
-                    .First();
+                var p = DataStore.Current.GetUserPermissions()
+                    .FirstOrDefault(x => x.UserId == userId && x.LockId == lockId);
                 if (p == null) return (false, false);
                 return (true, p.HasAccess);
             }
@@ -60,23 +49,13 @@ namespace FingerprintLockManager
             }
         }
 
-        /// <summary>
-        /// 获取用户最终权限（合并角色默认 + 个人覆盖）
-        /// </summary>
-        /// <param name="userId">用户 ID</param>
-        /// <returns>4 把锁的最终权限 bool[4]</returns>
+        /// <summary>获取用户最终权限（合并角色默认 + 个人覆盖）</summary>
         public bool[] GetFinalPermissions(string userId)
         {
             return _rolePermService.GetFinalPermissions(userId);
         }
 
-        /// <summary>
-        /// 设置用户个人权限覆盖项（upsert）
-        /// </summary>
-        /// <param name="userId">用户 ID</param>
-        /// <param name="lockId">锁编号 0-3</param>
-        /// <param name="hasAccess">是否有访问权限</param>
-        /// <returns>成功返回 true；失败或异常返回 false</returns>
+        /// <summary>设置用户个人权限覆盖项（upsert）</summary>
         public bool SetUserPermission(string userId, int lockId, bool hasAccess)
         {
             try
@@ -84,31 +63,29 @@ namespace FingerprintLockManager
                 if (string.IsNullOrEmpty(userId)) return false;
                 if (lockId < 0 || lockId >= LockCount) return false;
 
-                var existing = DatabaseService.Fsql.Select<UserPermission>()
-                    .Where(p => p.UserId == userId && p.LockId == lockId)
-                    .First();
-
-                if (existing != null)
+                bool ok = false;
+                DataStore.Current.MutateUserPermissions(list =>
                 {
-                    existing.HasAccess = hasAccess;
-                    existing.UpdateTime = DateTime.Now;
-                    int rows = DatabaseService.Fsql.Update<UserPermission>()
-                        .SetSource(existing)
-                        .ExecuteAffrows();
-                    return rows > 0;
-                }
-                else
-                {
-                    var perm = new UserPermission
+                    int idx = list.FindIndex(p => p.UserId == userId && p.LockId == lockId);
+                    if (idx >= 0)
                     {
-                        UserId = userId,
-                        LockId = lockId,
-                        HasAccess = hasAccess,
-                        UpdateTime = DateTime.Now
-                    };
-                    int rows = DatabaseService.Fsql.Insert(perm).ExecuteAffrows();
-                    return rows > 0;
-                }
+                        list[idx].HasAccess = hasAccess;
+                        list[idx].UpdateTime = DateTime.Now;
+                    }
+                    else
+                    {
+                        list.Add(new UserPermission
+                        {
+                            Id = DataStore.Current.NextUserPermissionId(),
+                            UserId = userId,
+                            LockId = lockId,
+                            HasAccess = hasAccess,
+                            UpdateTime = DateTime.Now
+                        });
+                    }
+                    ok = true;
+                });
+                return ok;
             }
             catch
             {
@@ -116,18 +93,12 @@ namespace FingerprintLockManager
             }
         }
 
-        /// <summary>
-        /// 批量设置用户个人权限覆盖项
-        /// </summary>
-        /// <param name="userId">用户 ID</param>
-        /// <param name="permissions">锁编号与权限的字典</param>
-        /// <returns>全部成功返回 true；任意一项失败或异常返回 false</returns>
+        /// <summary>批量设置用户个人权限覆盖项</summary>
         public bool SetUserPermissions(string userId, Dictionary<int, bool> permissions)
         {
             try
             {
                 if (string.IsNullOrEmpty(userId) || permissions == null) return false;
-
                 foreach (var kv in permissions)
                 {
                     if (!SetUserPermission(userId, kv.Key, kv.Value))
@@ -143,41 +114,16 @@ namespace FingerprintLockManager
             }
         }
 
-        /// <summary>
-        /// 删除用户对某把锁的个人覆盖项（回退到角色默认权限）
-        /// </summary>
-        /// <param name="userId">用户 ID</param>
-        /// <param name="lockId">锁编号 0-3</param>
-        /// <returns>成功返回 true；失败或异常返回 false</returns>
+        /// <summary>删除用户对某把锁的个人覆盖项（回退到角色默认权限）</summary>
         public bool DeleteUserPermission(string userId, int lockId)
         {
             try
             {
                 if (string.IsNullOrEmpty(userId)) return false;
-                int rows = DatabaseService.Fsql.Delete<UserPermission>()
-                    .Where(p => p.UserId == userId && p.LockId == lockId)
-                    .ExecuteAffrows();
-                return rows >= 0;
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
-        /// <summary>
-        /// 删除用户所有个人覆盖项（完全回退到角色默认权限）
-        /// </summary>
-        /// <param name="userId">用户 ID</param>
-        /// <returns>成功返回 true；失败或异常返回 false</returns>
-        public bool DeleteAllUserPermissions(string userId)
-        {
-            try
-            {
-                if (string.IsNullOrEmpty(userId)) return false;
-                DatabaseService.Fsql.Delete<UserPermission>()
-                    .Where(p => p.UserId == userId)
-                    .ExecuteAffrows();
+                DataStore.Current.MutateUserPermissions(list =>
+                {
+                    list.RemoveAll(p => p.UserId == userId && p.LockId == lockId);
+                });
                 return true;
             }
             catch
@@ -186,19 +132,32 @@ namespace FingerprintLockManager
             }
         }
 
-        /// <summary>
-        /// 通过指纹验证用户并返回最终权限（合并双层权限）
-        /// </summary>
-        /// <param name="fingerprintId">指纹 ID</param>
-        /// <returns>用户对象与 4 把锁的最终权限数组；指纹未注册返回 (null, 全 false)</returns>
+        /// <summary>删除用户所有个人覆盖项（完全回退到角色默认权限）</summary>
+        public bool DeleteAllUserPermissions(string userId)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(userId)) return false;
+                DataStore.Current.MutateUserPermissions(list =>
+                {
+                    list.RemoveAll(p => p.UserId == userId);
+                });
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>通过指纹验证用户并返回最终权限（合并双层权限）</summary>
         public (User user, bool[] permissions) VerifyByFingerprint(int fingerprintId)
         {
             bool[] empty = new bool[LockCount];
             try
             {
-                var user = DatabaseService.Fsql.Select<User>()
-                    .Where(u => u.FingerprintId == fingerprintId)
-                    .First();
+                var user = DataStore.Current.GetUsers()
+                    .FirstOrDefault(u => u.FingerprintId == fingerprintId);
 
                 if (user == null) return (null, empty);
 

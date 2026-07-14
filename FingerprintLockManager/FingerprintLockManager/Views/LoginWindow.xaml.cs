@@ -14,6 +14,25 @@ namespace FingerprintLockManager
             InitializeComponent();
             // 默认焦点在用户ID输入框
             Loaded += (s, e) => UserIdBox.Focus();
+
+            // 数据未从根节点 SD 卡加载完成时，禁用登录并提示等待
+            if (!DataStore.Current.IsLoaded)
+            {
+                LoginButton.IsEnabled = false;
+                HintText.Text = "正在连接根节点并加载数据，请稍候...";
+                DataStore.Current.Loaded += OnDataLoaded;
+            }
+        }
+
+        /// <summary>数据加载完成后启用登录（由后台线程触发，需切回 UI 线程）</summary>
+        private void OnDataLoaded()
+        {
+            Dispatcher.Invoke(() =>
+            {
+                LoginButton.IsEnabled = true;
+                HintText.Text = "请输入用户ID和密码登录";
+                UserIdBox.Focus();
+            });
         }
 
         /// <summary>登录按钮点击：验证账号密码</summary>
