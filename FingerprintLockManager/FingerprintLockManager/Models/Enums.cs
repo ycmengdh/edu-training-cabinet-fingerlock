@@ -105,6 +105,47 @@ namespace FingerprintLockManager
         Heartbeat,
 
         /// <summary>应答（下位机 -> 上位机，对下发命令的确认）</summary>
-        Ack
+        Ack,
+
+        // ===== SD 卡集中存储命令（上位机 <-> 根节点） =====
+
+        /// <summary>查询 SD 卡表（上位机 -> 根节点）</summary>
+        SdQuery,
+
+        /// <summary>查询 SD 卡表响应（根节点 -> 上位机）</summary>
+        SdQueryResponse,
+
+        /// <summary>查询 SD 卡表分片（根节点 -> 上位机，大表分批）</summary>
+        SdQueryPart,
+
+        /// <summary>保存 SD 卡表（上位机 -> 根节点，带乐观锁）</summary>
+        SdSave,
+
+        /// <summary>保存 SD 卡表响应（根节点 -> 上位机）</summary>
+        SdSaveResponse,
+
+        /// <summary>查询 SD 卡版本号（上位机 -> 根节点）</summary>
+        SdQueryVersion,
+
+        /// <summary>查询 SD 卡版本号响应（根节点 -> 上位机）</summary>
+        SdVersionResponse,
+
+        /// <summary>上传指纹模板到 SD 卡（上位机 -> 根节点）</summary>
+        UploadFpTemplate,
+
+        /// <summary>上传指纹模板响应（根节点 -> 上位机）</summary>
+        FpTemplateUploadResponse,
+
+        /// <summary>从 SD 卡下载指纹模板（上位机 -> 根节点）</summary>
+        DownloadFpTemplate,
+
+        /// <summary>下载指纹模板响应（根节点 -> 上位机）</summary>
+        FpTemplateDownloadResponse,
+
+        /// <summary>删除 SD 卡指纹模板（上位机 -> 根节点）</summary>
+        DeleteFpTemplate,
+
+        /// <summary>删除指纹模板响应（根节点 -> 上位机）</summary>
+        FpTemplateDeleteResponse
     }
 }

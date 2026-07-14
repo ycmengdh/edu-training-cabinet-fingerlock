@@ -43,6 +43,9 @@ namespace FingerprintLockManager
         /// <summary>配置保存成功事件：参数为 deviceId</summary>
         public event Action<string> OnConfigSaved;
 
+        /// <summary>根节点注册事件：参数为 rootDeviceId（用于 SD 卡集中存储定位根节点）</summary>
+        public event Action<string> OnRootDeviceRegistered;
+
         /// <summary>ACK 应答事件：参数为 msgId（原命令消息 ID）, result（结果/错误码）</summary>
         public event Action<string, string> OnAckReceived;
 
@@ -99,6 +102,16 @@ namespace FingerprintLockManager
                 case CommandType.Heartbeat:
                     // 心跳包：仅维持连接，无需业务处理
                     break;
+                // SD 卡集中存储响应（交给 SdStorageService 处理请求-响应匹配）
+                case CommandType.SdQueryResponse:
+                case CommandType.SdQueryPart:
+                case CommandType.SdSaveResponse:
+                case CommandType.SdVersionResponse:
+                case CommandType.FpTemplateUploadResponse:
+                case CommandType.FpTemplateDownloadResponse:
+                case CommandType.FpTemplateDeleteResponse:
+                    App.SdStorageService.HandleResponse(msg);
+                    break;
             }
         }
 
@@ -154,6 +167,13 @@ namespace FingerprintLockManager
 
             var deviceId = device?.DeviceId ?? msg.DeviceId;
             OnDeviceRegistered?.Invoke(deviceId, deviceName);
+
+            // 检测根节点（is_root=true），通知 SdStorageService
+            bool isRoot = TryGetBoolData(msg, "is_root");
+            if (isRoot && !string.IsNullOrEmpty(deviceId))
+            {
+                OnRootDeviceRegistered?.Invoke(deviceId);
+            }
         }
 
         /// <summary>
@@ -265,6 +285,17 @@ namespace FingerprintLockManager
             {
                 return null;
             }
+        }
+
+        /// <summary>
+        /// 尝试从消息 data 中读取布尔字段（兼容 true/"true"/1）
+        /// </summary>
+        private bool TryGetBoolData(Message msg, string fieldName)
+        {
+            string? val = TryGetStringData(msg, fieldName);
+            if (string.IsNullOrEmpty(val)) return false;
+            return val.Equals("true", StringComparison.OrdinalIgnoreCase)
+                || val == "1";
         }
     }
 }

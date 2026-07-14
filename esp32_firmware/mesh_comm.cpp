@@ -10,6 +10,7 @@
 #include "protocol_frame.h"
 #include "mesh_bridge.h"
 #include "wifi_manager.h"
+#include "sd_storage.h"
 #include <WiFi.h>
 #include <esp_wifi.h>
 #include <esp_mesh.h>
@@ -147,6 +148,8 @@ bool MeshComm::initMesh() {
     // Root 节点初始化桥接模块
     if (isRootNode) {
         MeshBridge::init();
+        // 根节点初始化 SD 卡集中存储（失败不阻断启动，后续命令会返回 sd not ready）
+        SdStorage::init();
     }
     return true;
 }

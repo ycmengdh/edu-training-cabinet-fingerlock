@@ -74,6 +74,47 @@ namespace FingerprintLockManager
         /// <summary>应答（下位机 -> 上位机，对下发命令的确认）</summary>
         public const string CmdAck = "ACK";
 
+        // ===== SD 卡集中存储命令（上位机 <-> 根节点） =====
+
+        /// <summary>查询 SD 卡表（上位机 -> 根节点）</summary>
+        public const string CmdSdQuery = "SD_QUERY";
+
+        /// <summary>查询 SD 卡表响应（根节点 -> 上位机）</summary>
+        public const string CmdSdQueryResponse = "SD_QUERY_RESPONSE";
+
+        /// <summary>查询 SD 卡表分片（根节点 -> 上位机，大表分批）</summary>
+        public const string CmdSdQueryPart = "SD_QUERY_PART";
+
+        /// <summary>保存 SD 卡表（上位机 -> 根节点，带乐观锁）</summary>
+        public const string CmdSdSave = "SD_SAVE";
+
+        /// <summary>保存 SD 卡表响应（根节点 -> 上位机）</summary>
+        public const string CmdSdSaveResponse = "SD_SAVE_RESPONSE";
+
+        /// <summary>查询 SD 卡版本号（上位机 -> 根节点）</summary>
+        public const string CmdSdQueryVersion = "SD_QUERY_VERSION";
+
+        /// <summary>查询 SD 卡版本号响应（根节点 -> 上位机）</summary>
+        public const string CmdSdVersionResponse = "SD_VERSION_RESPONSE";
+
+        /// <summary>上传指纹模板到 SD 卡（上位机 -> 根节点）</summary>
+        public const string CmdUploadFpTemplate = "UPLOAD_FP_TEMPLATE";
+
+        /// <summary>上传指纹模板响应（根节点 -> 上位机）</summary>
+        public const string CmdFpTemplateUploadResponse = "FP_TEMPLATE_UPLOAD_RESPONSE";
+
+        /// <summary>从 SD 卡下载指纹模板（上位机 -> 根节点）</summary>
+        public const string CmdDownloadFpTemplate = "DOWNLOAD_FP_TEMPLATE";
+
+        /// <summary>下载指纹模板响应（根节点 -> 上位机）</summary>
+        public const string CmdFpTemplateDownloadResponse = "FP_TEMPLATE_DOWNLOAD_RESPONSE";
+
+        /// <summary>删除 SD 卡指纹模板（上位机 -> 根节点）</summary>
+        public const string CmdDeleteFpTemplate = "DELETE_FP_TEMPLATE";
+
+        /// <summary>删除指纹模板响应（根节点 -> 上位机）</summary>
+        public const string CmdFpTemplateDeleteResponse = "FP_TEMPLATE_DELETE_RESPONSE";
+
         // ===== 错误码常量（ACK 中 result 字段使用） =====
 
         /// <summary>成功</summary>
@@ -132,6 +173,19 @@ namespace FingerprintLockManager
                 case CommandType.ConfigSaved: return CmdConfigSaved;
                 case CommandType.Heartbeat: return CmdHeartbeat;
                 case CommandType.Ack: return CmdAck;
+                case CommandType.SdQuery: return CmdSdQuery;
+                case CommandType.SdQueryResponse: return CmdSdQueryResponse;
+                case CommandType.SdQueryPart: return CmdSdQueryPart;
+                case CommandType.SdSave: return CmdSdSave;
+                case CommandType.SdSaveResponse: return CmdSdSaveResponse;
+                case CommandType.SdQueryVersion: return CmdSdQueryVersion;
+                case CommandType.SdVersionResponse: return CmdSdVersionResponse;
+                case CommandType.UploadFpTemplate: return CmdUploadFpTemplate;
+                case CommandType.FpTemplateUploadResponse: return CmdFpTemplateUploadResponse;
+                case CommandType.DownloadFpTemplate: return CmdDownloadFpTemplate;
+                case CommandType.FpTemplateDownloadResponse: return CmdFpTemplateDownloadResponse;
+                case CommandType.DeleteFpTemplate: return CmdDeleteFpTemplate;
+                case CommandType.FpTemplateDeleteResponse: return CmdFpTemplateDeleteResponse;
                 default: return null;
             }
         }
@@ -166,6 +220,19 @@ namespace FingerprintLockManager
                 case CmdConfigSaved: return CommandType.ConfigSaved;
                 case CmdHeartbeat: return CommandType.Heartbeat;
                 case CmdAck: return CommandType.Ack;
+                case CmdSdQuery: return CommandType.SdQuery;
+                case CmdSdQueryResponse: return CommandType.SdQueryResponse;
+                case CmdSdQueryPart: return CommandType.SdQueryPart;
+                case CmdSdSave: return CommandType.SdSave;
+                case CmdSdSaveResponse: return CommandType.SdSaveResponse;
+                case CmdSdQueryVersion: return CommandType.SdQueryVersion;
+                case CmdSdVersionResponse: return CommandType.SdVersionResponse;
+                case CmdUploadFpTemplate: return CommandType.UploadFpTemplate;
+                case CmdFpTemplateUploadResponse: return CommandType.FpTemplateUploadResponse;
+                case CmdDownloadFpTemplate: return CommandType.DownloadFpTemplate;
+                case CmdFpTemplateDownloadResponse: return CommandType.FpTemplateDownloadResponse;
+                case CmdDeleteFpTemplate: return CommandType.DeleteFpTemplate;
+                case CmdFpTemplateDeleteResponse: return CommandType.FpTemplateDeleteResponse;
                 default: return null;
             }
         }

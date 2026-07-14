@@ -10,6 +10,7 @@
 #include "lock_control.h"
 #include "mesh_comm.h"
 #include "logger.h"
+#include "sd_storage.h"
 
 // 状态机超时时间
 #define WAIT_FINGER_TIMEOUT_MS  30000   // 等待指纹超时 30 秒
@@ -238,7 +239,9 @@ void MessageHandler::update() {
 // ====== 命令分发（解析一次，传 JsonObject 引用） ======
 void MessageHandler::handleIncoming(const String &message) {
     // 使用 ArduinoJson 解析（堆分配，避免 ESP32 栈溢出）
-    DynamicJsonDocument doc(4096);
+    // 缓冲区 8KB：足以容纳单条 SD_SAVE 记录、UPLOAD_FP_TEMPLATE（含 1024B hex）
+    // 注：全量大表（如全校 users.json）需通过增量记录方式更新，单帧不超 8KB
+    DynamicJsonDocument doc(8192);
     DeserializationError err = deserializeJson(doc, message);
     if (err) {
         Serial.printf("[MSG] JSON 解析失败: %s\n", err.c_str());
@@ -299,6 +302,18 @@ void MessageHandler::handleIncoming(const String &message) {
         cmdTimeSync(data, msgId);
     } else if (strcmp(cmd, "REGISTER") == 0) {
         cmdRegister(msgId);
+    } else if (strcmp(cmd, "SD_QUERY") == 0) {
+        cmdSdQuery(data, msgId);
+    } else if (strcmp(cmd, "SD_SAVE") == 0) {
+        cmdSdSave(data, msgId);
+    } else if (strcmp(cmd, "SD_QUERY_VERSION") == 0) {
+        cmdSdQueryVersion(msgId);
+    } else if (strcmp(cmd, "UPLOAD_FP_TEMPLATE") == 0) {
+        cmdUploadFpTemplate(data, msgId);
+    } else if (strcmp(cmd, "DOWNLOAD_FP_TEMPLATE") == 0) {
+        cmdDownloadFpTemplate(data, msgId);
+    } else if (strcmp(cmd, "DELETE_FP_TEMPLATE") == 0) {
+        cmdDeleteFpTemplate(data, msgId);
     } else if (strcmp(cmd, "HEARTBEAT_ACK") == 0) {
         // 心跳回应，无需处理
     } else if (strcmp(cmd, "LOG_REPORT_ACK") == 0) {
@@ -644,4 +659,324 @@ void MessageHandler::cmdRegister(const String &msgId) {
     data += "}";
     sendMessage("REGISTER_RESPONSE", data, msgId);
     Serial.println(F("[MSG] 已响应 REGISTER 查询"));
+}
+
+// ============================================================
+// ====== SD 卡集中存储命令实现（仅根节点响应） ======
+// ============================================================
+
+bool MessageHandler::sendLargeResponse(const String &cmd, const String &dataJson,
+                                       const String &msgId) {
+    // 单帧上限约 1400B，大表需分多条消息发送
+    // 简化：单条消息承载完整 JSON，依赖 ProtocolFrame 分片机制
+    // 若 JSON 超大（>8KB），分批发送 SD_QUERY_PART
+    const size_t MAX_PART = 6000;  // 单次负载上限（留余量给协议帧头）
+
+    if (dataJson.length() <= MAX_PART) {
+        // 单条返回
+        return sendMessage(cmd, dataJson, msgId);
+    }
+
+    // 分批返回：SD_QUERY_PART {part, total, data}
+    int totalParts = (dataJson.length() + MAX_PART - 1) / MAX_PART;
+    for (int i = 0; i < totalParts; i++) {
+        size_t start = i * MAX_PART;
+        size_t len = MAX_PART;
+        if (start + len > dataJson.length()) len = dataJson.length() - start;
+
+        String part = "{\"part\":";
+        part += String(i + 1);
+        part += ",\"total\":";
+        part += String(totalParts);
+        part += ",\"data\":\"";
+        // 转义 JSON 内部双引号
+        String chunk = dataJson.substring(start, start + len);
+        for (size_t j = 0; j < chunk.length(); j++) {
+            if (chunk[j] == '"' || chunk[j] == '\\') {
+                part += '\\';
+            }
+            part += chunk[j];
+        }
+        part += "\"}";
+
+        String partCmd = "SD_QUERY_PART";
+        sendMessage(partCmd, part, msgId);
+        delay(30);  // 避免 Mesh 拥堵
+    }
+    return true;
+}
+
+void MessageHandler::cmdSdQuery(const JsonObject &data, const String &msgId) {
+    // 仅根节点响应
+    DeviceConfig cfg;
+    Storage::loadDeviceConfig(cfg);
+    if (!cfg.is_root) {
+        sendError(ERR_PERMISSION_DENIED, "only root node has SD storage", msgId);
+        return;
+    }
+
+    if (!SdStorage::isReady()) {
+        sendError(ERR_INTERNAL, "sd card not ready", msgId);
+        return;
+    }
+
+    String table = data["table"] | "";
+    if (table.length() == 0) {
+        sendError(ERR_BAD_REQUEST, "missing table name", msgId);
+        return;
+    }
+
+    String outJson;
+    if (!SdStorage::readTable(table, outJson)) {
+        sendError(ERR_NOT_FOUND, "table not found or empty", msgId);
+        return;
+    }
+
+    // 用 data 包装返回
+    String response = "{\"table\":\"" + table + "\",\"json\":";
+    response += outJson;
+    response += "}";
+
+    Serial.printf("[MSG] SD_QUERY %s: %u 字节\n", table.c_str(), (unsigned)response.length());
+    sendLargeResponse("SD_QUERY_RESPONSE", response, msgId);
+}
+
+void MessageHandler::cmdSdSave(const JsonObject &data, const String &msgId) {
+    // 仅根节点响应
+    DeviceConfig cfg;
+    Storage::loadDeviceConfig(cfg);
+    if (!cfg.is_root) {
+        sendError(ERR_PERMISSION_DENIED, "only root node has SD storage", msgId);
+        return;
+    }
+
+    if (!SdStorage::isReady()) {
+        sendError(ERR_INTERNAL, "sd card not ready", msgId);
+        return;
+    }
+
+    String table = data["table"] | "";
+    String json = data["json"] | "";
+    uint32_t baseVersion = data["base_version"] | 0;
+
+    if (table.length() == 0 || json.length() == 0) {
+        sendError(ERR_BAD_REQUEST, "missing table or json", msgId);
+        return;
+    }
+
+    // 乐观锁冲突检测
+    if (baseVersion > 0) {
+        uint32_t g, u, c, p, d, fp;
+        SdStorage::readVersion(g, u, c, p, d, fp);
+        uint32_t currentVer = 0;
+        if (table == "users") currentVer = u;
+        else if (table == "classes") currentVer = c;
+        else if (table == "permissions") currentVer = p;
+        else if (table == "devices") currentVer = d;
+        else if (table == "fingerprints") currentVer = fp;
+
+        if (currentVer != baseVersion) {
+            String errData = "{\"error\":\"version_conflict\",\"current_version\":";
+            errData += String(currentVer);
+            errData += ",\"base_version\":";
+            errData += String(baseVersion);
+            errData += "}";
+            sendMessage("SD_SAVE_RESPONSE", errData, msgId);
+            Serial.printf("[MSG] SD_SAVE %s 版本冲突: base=%u current=%u\n",
+                          table.c_str(), baseVersion, currentVer);
+            return;
+        }
+    }
+
+    bool ok = SdStorage::writeTable(table, json);
+    String resp = "{\"table\":\"" + table + "\",\"result\":";
+    resp += ok ? "\"success\"" : "\"fail\"";
+    if (ok) {
+        resp += ",\"version\":";
+        resp += String(SdStorage::getGlobalVersion());
+    }
+    resp += "}";
+    sendMessage("SD_SAVE_RESPONSE", resp, msgId);
+    Serial.printf("[MSG] SD_SAVE %s: %s\n", table.c_str(), ok ? "成功" : "失败");
+}
+
+void MessageHandler::cmdSdQueryVersion(const String &msgId) {
+    DeviceConfig cfg;
+    Storage::loadDeviceConfig(cfg);
+    if (!cfg.is_root) {
+        sendError(ERR_PERMISSION_DENIED, "only root node has SD storage", msgId);
+        return;
+    }
+
+    uint32_t g, u, c, p, d, fp;
+    SdStorage::readVersion(g, u, c, p, d, fp);
+
+    String data = "{";
+    data += "\"global_version\":" + String(g) + ",";
+    data += "\"users_version\":" + String(u) + ",";
+    data += "\"classes_version\":" + String(c) + ",";
+    data += "\"permissions_version\":" + String(p) + ",";
+    data += "\"devices_version\":" + String(d) + ",";
+    data += "\"fp_version\":" + String(fp) + ",";
+    data += "\"sd_total_bytes\":" + String((unsigned long)SdStorage::getTotalBytes()) + ",";
+    data += "\"sd_used_bytes\":" + String((unsigned long)SdStorage::getUsedBytes());
+    data += "}";
+    sendMessage("SD_VERSION_RESPONSE", data, msgId);
+    Serial.printf("[MSG] SD 版本查询: global=%u\n", g);
+}
+
+void MessageHandler::cmdUploadFpTemplate(const JsonObject &data, const String &msgId) {
+    // 仅根节点响应
+    DeviceConfig cfg;
+    Storage::loadDeviceConfig(cfg);
+    if (!cfg.is_root) {
+        sendError(ERR_PERMISSION_DENIED, "only root node has SD storage", msgId);
+        return;
+    }
+
+    if (!SdStorage::isReady()) {
+        sendError(ERR_INTERNAL, "sd card not ready", msgId);
+        return;
+    }
+
+    String userId = data["user_id"] | "";
+    int fingerIndex = data["finger_index"] | 1;
+    String templateHex = data["template_hex"] | "";
+
+    if (userId.length() == 0 || templateHex.length() == 0) {
+        sendError(ERR_BAD_REQUEST, "missing user_id or template_hex", msgId);
+        return;
+    }
+    if (fingerIndex < 1 || fingerIndex > FP_MAX_TEMPLATES_PER_USER) {
+        sendError(ERR_BAD_REQUEST, "finger_index out of range", msgId);
+        return;
+    }
+
+    // hex 解码为二进制
+    size_t binLen = templateHex.length() / 2;
+    if (binLen == 0 || binLen > FP_TEMPLATE_BUF_SIZE) {
+        sendError(ERR_BAD_REQUEST, "template hex length invalid", msgId);
+        return;
+    }
+
+    uint8_t *buf = (uint8_t *)malloc(binLen);
+    if (!buf) {
+        sendError(ERR_INTERNAL, "memory alloc failed", msgId);
+        return;
+    }
+
+    // hex 字符串转二进制
+    for (size_t i = 0; i < binLen; i++) {
+        char hi = templateHex[i * 2];
+        char lo = templateHex[i * 2 + 1];
+        buf[i] = (hexCharToVal(hi) << 4) | hexCharToVal(lo);
+    }
+
+    bool ok = SdStorage::writeTemplate(userId, fingerIndex, buf, binLen);
+    free(buf);
+
+    String resp = "{\"user_id\":\"" + userId + "\",\"result\":";
+    resp += ok ? "\"success\"" : "\"fail\"";
+    resp += "}";
+    sendMessage("FP_TEMPLATE_UPLOAD_RESPONSE", resp, msgId);
+    Serial.printf("[MSG] 指纹模板上传 %s[%d]: %s\n",
+                  userId.c_str(), fingerIndex, ok ? "成功" : "失败");
+}
+
+void MessageHandler::cmdDownloadFpTemplate(const JsonObject &data, const String &msgId) {
+    DeviceConfig cfg;
+    Storage::loadDeviceConfig(cfg);
+    if (!cfg.is_root) {
+        sendError(ERR_PERMISSION_DENIED, "only root node has SD storage", msgId);
+        return;
+    }
+
+    if (!SdStorage::isReady()) {
+        sendError(ERR_INTERNAL, "sd card not ready", msgId);
+        return;
+    }
+
+    String userId = data["user_id"] | "";
+    int fingerIndex = data["finger_index"] | 1;
+
+    if (userId.length() == 0) {
+        sendError(ERR_BAD_REQUEST, "missing user_id", msgId);
+        return;
+    }
+
+    uint8_t *buf = (uint8_t *)malloc(FP_TEMPLATE_BUF_SIZE);
+    if (!buf) {
+        sendError(ERR_INTERNAL, "memory alloc failed", msgId);
+        return;
+    }
+
+    size_t outLen = 0;
+    bool ok = SdStorage::readTemplate(userId, fingerIndex, buf, FP_TEMPLATE_BUF_SIZE, outLen);
+
+    if (!ok) {
+        free(buf);
+        sendError(ERR_NOT_FOUND, "template not found", msgId);
+        return;
+    }
+
+    // 二进制转 hex 字符串
+    String hex = "";
+    hex.reserve(outLen * 2);
+    const char *hexChars = "0123456789ABCDEF";
+    for (size_t i = 0; i < outLen; i++) {
+        hex += hexChars[(buf[i] >> 4) & 0x0F];
+        hex += hexChars[buf[i] & 0x0F];
+    }
+    free(buf);
+
+    String resp = "{\"user_id\":\"" + userId + "\",\"finger_index\":";
+    resp += String(fingerIndex);
+    resp += ",\"len\":";
+    resp += String((unsigned)outLen);
+    resp += ",\"template_hex\":\"";
+    resp += hex;
+    resp += "\"}";
+
+    // 模板 512B → hex 1024B，单帧可承载
+    sendMessage("FP_TEMPLATE_DOWNLOAD_RESPONSE", resp, msgId);
+    Serial.printf("[MSG] 指纹模板下载 %s[%d]: %u 字节\n",
+                  userId.c_str(), fingerIndex, (unsigned)outLen);
+}
+
+void MessageHandler::cmdDeleteFpTemplate(const JsonObject &data, const String &msgId) {
+    DeviceConfig cfg;
+    Storage::loadDeviceConfig(cfg);
+    if (!cfg.is_root) {
+        sendError(ERR_PERMISSION_DENIED, "only root node has SD storage", msgId);
+        return;
+    }
+
+    if (!SdStorage::isReady()) {
+        sendError(ERR_INTERNAL, "sd card not ready", msgId);
+        return;
+    }
+
+    String userId = data["user_id"] | "";
+    if (userId.length() == 0) {
+        sendError(ERR_BAD_REQUEST, "missing user_id", msgId);
+        return;
+    }
+
+    bool ok = SdStorage::deleteTemplate(userId);
+    SdStorage::incrementVersion("fingerprints");
+
+    String resp = "{\"user_id\":\"" + userId + "\",\"result\":";
+    resp += ok ? "\"success\"" : "\"fail\"";
+    resp += "}";
+    sendMessage("FP_TEMPLATE_DELETE_RESPONSE", resp, msgId);
+    Serial.printf("[MSG] 指纹模板删除 %s: %s\n",
+                  userId.c_str(), ok ? "成功" : "无模板");
+}
+
+// hex 字符转数值
+uint8_t MessageHandler::hexCharToVal(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return 0;
 }

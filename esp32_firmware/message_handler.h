@@ -52,6 +52,10 @@ public:
     static void sendError(ErrorCode code, const String &message,
                           const String &msgId = "");
 
+    // 发送大体积 JSON 响应（自动分片，用于 SD_QUERY 返回大表）
+    static bool sendLargeResponse(const String &cmd, const String &dataJson,
+                                  const String &msgId = "");
+
 private:
     // ====== 命令处理函数（传 JsonObject 引用避免二次解析） ======
     static void cmdAuthOk(const JsonObject &data, const String &msgId);
@@ -70,6 +74,20 @@ private:
     static void cmdReadPermissions(const String &msgId);
     static void cmdDeleteAllFingerprints(const String &msgId);
 
+    // ====== SD 卡集中存储命令（仅根节点响应） ======
+    // SD_QUERY：读取整张表 {table:"users"} → 返回表 JSON
+    static void cmdSdQuery(const JsonObject &data, const String &msgId);
+    // SD_SAVE：保存整张表 {table:"users", json:"...", base_version:567} → 乐观锁写入
+    static void cmdSdSave(const JsonObject &data, const String &msgId);
+    // SD_QUERY_VERSION：查询版本号
+    static void cmdSdQueryVersion(const String &msgId);
+    // UPLOAD_FP_TEMPLATE：上传指纹模板 {user_id, finger_index, template_hex} → 存 SD 卡
+    static void cmdUploadFpTemplate(const JsonObject &data, const String &msgId);
+    // DOWNLOAD_FP_TEMPLATE：下载指纹模板 {user_id, finger_index} → 返回模板
+    static void cmdDownloadFpTemplate(const JsonObject &data, const String &msgId);
+    // DELETE_FP_TEMPLATE：删除用户所有指纹模板 {user_id}
+    static void cmdDeleteFpTemplate(const JsonObject &data, const String &msgId);
+
     // ====== 辅助方法 ======
     // 发送指纹验证请求到上位机
     static void sendFingerVerify(int fingerprintId);
@@ -83,6 +101,9 @@ private:
 
     // 检查权限过期
     static bool isPermissionExpired(const UserPermission &perm);
+
+    // hex 字符转数值（SD 卡指纹模板 hex 编解码用）
+    static uint8_t hexCharToVal(char c);
 
     // 待开锁 ID
     static int pendingLockId;

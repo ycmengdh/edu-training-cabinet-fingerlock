@@ -32,6 +32,16 @@ public:
     // 获取已存储指纹数量
     static int getFingerprintCount();
 
+    // 读取指定 ID 的模板数据（用于上传到 SD 卡备份）
+    // id: AS608 中的指纹 ID
+    // outBuf: 输出缓冲，至少 FP_TEMPLATE_SIZE 字节
+    // outLen: 返回实际读取长度
+    static bool readTemplate(int id, uint8_t *outBuf, size_t bufSize, size_t &outLen);
+
+    // 将模板数据写入 AS608 指定 ID（用于从 SD 卡恢复）
+    // data/len: 模板二进制数据（应为 512 字节）
+    static bool writeTemplate(int id, const uint8_t *data, size_t len);
+
     // 指纹模块是否就绪
     static bool isReady();
 

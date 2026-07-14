@@ -23,6 +23,9 @@ namespace FingerprintLockManager
         public static DeviceService DeviceService { get; } = new DeviceService();
         public static LogService LogService { get; } = new LogService();
 
+        /// <summary>SD 卡集中存储服务（通过 Mesh 与根节点 SD 卡通信）</summary>
+        public static SdStorageService SdStorageService { get; } = new SdStorageService();
+
         /// <summary>当前登录用户（登录成功后赋值）</summary>
         public static User? CurrentUser { get; set; }
 
@@ -86,6 +89,7 @@ namespace FingerprintLockManager
         private void WireUpMessageHandler()
         {
             MessageHandler.OnDeviceRegistered += OnDeviceRegistered;
+            MessageHandler.OnRootDeviceRegistered += OnRootDeviceRegistered;
             MessageHandler.OnFingerVerifyRequest += OnFingerVerifyRequest;
             MessageHandler.OnLogReport += OnLogReport;
             MessageHandler.OnAckReceived += OnAckReceived;
@@ -136,6 +140,20 @@ namespace FingerprintLockManager
                 {
                     DeviceService.RegisterDevice(deviceId, deviceName, "");
                 }
+            }
+            catch
+            {
+                // 忽略
+            }
+        }
+
+        /// <summary>根节点注册：记录根节点 ID，供 SD 卡集中存储服务定位</summary>
+        private void OnRootDeviceRegistered(string rootDeviceId)
+        {
+            try
+            {
+                SdStorageService.RootDeviceId = rootDeviceId;
+                System.Diagnostics.Debug.WriteLine($"[APP] 根节点已注册: {rootDeviceId}，SD 卡存储服务可用");
             }
             catch
             {

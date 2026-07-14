@@ -32,6 +32,17 @@
 // LED 指示灯引脚
 #define LED_PIN             27
 
+// ===================== SD 卡 SPI 引脚（仅根节点使用） =====================
+// 使用 SPI 模式，占用 4 个 GPIO（避开已用引脚 5/16/17/18/19/21/22/23/25/26/27）
+#define SD_SPI_MOSI_PIN     15
+#define SD_SPI_MISO_PIN     14
+#define SD_SPI_SCK_PIN      13
+#define SD_SPI_CS_PIN       12
+#define SD_SPI_FREQ         4000000   // 4 MHz（SD 卡 SPI 模式稳定频率）
+#define SD_MOUNT_POINT      "/sdcard"  // FatFS 挂载点
+#define SD_DATA_DIR         "/sdcard/data"  // 业务数据目录
+#define SD_FP_DIR           "/sdcard/data/fingerprints"  // 指纹模板目录
+
 // ===================== 锁控制参数 =====================
 #define LOCK_OPEN_DURATION_MS   3000   // 开锁持续时间 3 秒
 
@@ -108,9 +119,14 @@
 
 // ===================== 系统参数 =====================
 #define DEVICE_ID_DEFAULT       "CABINET_001"
-#define FINGER_MAX_USERS        200         // 最大指纹用户数
+#define FINGER_MAX_USERS        200         // 最大指纹用户数（AS608 模块上限）
 #define STATUS_REPORT_INTERVAL  60000       // 状态上报间隔 60 秒
-#define FIRMWARE_VERSION        "2.3.0"     // 固件版本号
+#define FIRMWARE_VERSION        "2.4.0"     // 固件版本号（SD卡集中存储版本）
+
+// ===================== 指纹模板参数 =====================
+#define FP_TEMPLATE_SIZE        512         // AS608 单枚模板字节数
+#define FP_MAX_TEMPLATES_PER_USER 2         // 每用户最多模板数
+#define FP_TEMPLATE_BUF_SIZE    (FP_TEMPLATE_SIZE + 64)  // 模板读写缓冲（含余量）
 
 // ===================== LED 闪烁参数 =====================
 #define LED_BLINK_FAST_MS       200         // 调试模式快闪
@@ -154,7 +170,13 @@ enum ErrorCode {
     ERR_FLASH_CRC           = 5002,  // Flash 校验失败
     ERR_UNKNOWN_CMD         = 9001,  // 未知命令
     ERR_JSON_PARSE          = 9002,  // JSON 解析失败
-    ERR_CRC_CHECK           = 9003   // CRC 校验失败
+    ERR_CRC_CHECK           = 9003,  // CRC 校验失败
+    // SD 卡集中存储相关错误
+    ERR_BAD_REQUEST         = 9101,  // 请求参数缺失/非法
+    ERR_NOT_FOUND           = 9102,  // 资源不存在（表/模板未找到）
+    ERR_INTERNAL            = 9103,  // 内部错误（SD卡未就绪/内存分配失败）
+    ERR_PERMISSION_DENIED   = 9104,  // 权限拒绝（非根节点访问SD存储）
+    ERR_VERSION_CONFLICT    = 9105   // 乐观锁版本冲突
 };
 
 // ===================== 设备配置结构体 =====================
