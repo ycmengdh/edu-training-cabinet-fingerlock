@@ -44,6 +44,8 @@
                                 Tag="Active" Click="NavUserManage_Click"/>
                         <Button x:Name="NavPermission" Content="🔑  权限管理" Style="{StaticResource NavButton}"
                                 Click="NavPermission_Click"/>
+                        <Button x:Name="NavRolePermission" Content="🛡  角色权限" Style="{StaticResource NavButton}"
+                                Click="NavRolePermission_Click"/>
                         <Button x:Name="NavDevice" Content="📡  设备管理" Style="{StaticResource NavButton}"
                                 Click="NavDevice_Click"/>
                         <Button x:Name="NavLog" Content="📋  日志查看" Style="{StaticResource NavButton}"
@@ -78,14 +80,15 @@
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
 
-                <!-- TCP 服务端状态 -->
+                <!-- Mesh 链路状态 -->
                 <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
-                    <Ellipse x:Name="TcpStatusDot" Width="10" Height="10" Fill="{StaticResource SuccessBrush}"/>
-                    <TextBlock x:Name="TcpStatusText" Text="TCP服务：运行中" Margin="8,0,0,0"
+                    <Ellipse x:Name="MeshStatusDot" Width="10" Height="10" Fill="{StaticResource DangerBrush}"/>
+                    <TextBlock x:Name="MeshStatusText" Text="Mesh链路：未连接" Margin="8,0,0,0"
                                Foreground="{StaticResource TextBrush}" FontSize="12" VerticalAlignment="Center"/>
                 </StackPanel>
 
@@ -97,11 +100,19 @@
                                FontWeight="Bold" FontSize="12" VerticalAlignment="Center" Margin="4,0,0,0"/>
                 </StackPanel>
 
+                <!-- 传输类型 -->
+                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="24,0,0,0">
+                    <TextBlock Text="传输：" Foreground="{StaticResource SubTextBrush}" FontSize="12"
+                               VerticalAlignment="Center"/>
+                    <TextBlock x:Name="TransportTypeText" Text="USB串口" Foreground="{StaticResource SubTextBrush}"
+                               FontWeight="Bold" FontSize="12" VerticalAlignment="Center" Margin="4,0,0,0"/>
+                </StackPanel>
+
                 <!-- 占位 -->
-                <TextBlock Grid.Column="2"/>
+                <TextBlock Grid.Column="3"/>
 
                 <!-- 当前时间 -->
-                <TextBlock x:Name="CurrentTimeText" Grid.Column="3" Foreground="{StaticResource SubTextBrush}"
+                <TextBlock x:Name="CurrentTimeText" Grid.Column="4" Foreground="{StaticResource SubTextBrush}"
                            FontSize="12" VerticalAlignment="Center"/>
             </Grid>
         </Border>

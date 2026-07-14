@@ -2,7 +2,8 @@ namespace FingerprintLockManager
 {
     /// <summary>
     /// 用户管理服务
-    /// 提供用户的增删改查、指纹 ID 分配等功能
+    /// 提供用户的增删改查、指纹 ID 分配、密码加盐哈希等功能。
+    /// 所有角色（admin/teacher/student）均需密码登录，AddUser 时自动生成盐值。
     /// </summary>
     public class UserService
     {
@@ -52,7 +53,7 @@ namespace FingerprintLockManager
         /// </summary>
         /// <param name="userId">用户 ID</param>
         /// <returns>用户对象；不存在或异常返回 null</returns>
-        public User GetUser(string userId)
+        public User? GetUser(string userId)
         {
             try
             {
@@ -73,7 +74,7 @@ namespace FingerprintLockManager
         /// </summary>
         /// <param name="fingerprintId">指纹模块中的 ID</param>
         /// <returns>用户对象；不存在或异常返回 null</returns>
-        public User GetUserByFingerprint(int fingerprintId)
+        public User? GetUserByFingerprint(int fingerprintId)
         {
             try
             {
@@ -88,7 +89,43 @@ namespace FingerprintLockManager
         }
 
         /// <summary>
-        /// 添加用户
+        /// 添加用户（自动生成盐值并对明文密码加盐哈希）
+        /// 所有角色均需密码。
+        /// </summary>
+        /// <param name="user">待添加的用户对象</param>
+        /// <param name="password">明文密码</param>
+        /// <returns>成功返回 true；失败或异常返回 false</returns>
+        public bool AddUser(User user, string password)
+        {
+            try
+            {
+                if (user == null || string.IsNullOrEmpty(user.UserId)) return false;
+                if (string.IsNullOrEmpty(password)) return false;
+
+                // 生成盐值并加盐哈希
+                string salt = PasswordHelper.GenerateSalt();
+                user.PasswordSalt = salt;
+                user.PasswordHash = PasswordHelper.HashPassword(password, salt);
+
+                // 设置创建时间
+                if (user.CreateTime == default(DateTime))
+                {
+                    user.CreateTime = DateTime.Now;
+                }
+                user.UpdateTime = DateTime.Now;
+
+                int rows = DatabaseService.Fsql.Insert(user).ExecuteAffrows();
+                return rows > 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 添加用户（盐值与哈希已设置好的场景，如数据迁移）
+        /// 若盐值为空则自动生成，密码哈希为空时设为空字符串。
         /// </summary>
         /// <param name="user">待添加的用户对象</param>
         /// <returns>成功返回 true；失败或异常返回 false</returns>
@@ -98,7 +135,12 @@ namespace FingerprintLockManager
             {
                 if (user == null || string.IsNullOrEmpty(user.UserId)) return false;
 
-                // 设置创建时间
+                if (string.IsNullOrEmpty(user.PasswordSalt))
+                {
+                    user.PasswordSalt = PasswordHelper.GenerateSalt();
+                }
+                if (user.PasswordHash == null) user.PasswordHash = "";
+
                 if (user.CreateTime == default(DateTime))
                 {
                     user.CreateTime = DateTime.Now;
@@ -140,7 +182,7 @@ namespace FingerprintLockManager
         }
 
         /// <summary>
-        /// 删除用户（同时删除其权限记录）
+        /// 删除用户（同时删除其个人权限覆盖记录）
         /// </summary>
         /// <param name="userId">用户 ID</param>
         /// <returns>成功返回 true；失败或异常返回 false</returns>
@@ -150,8 +192,8 @@ namespace FingerprintLockManager
             {
                 if (string.IsNullOrEmpty(userId)) return false;
 
-                // 先删除权限记录，再删除用户
-                DatabaseService.Fsql.Delete<Permission>()
+                // 先删除个人权限覆盖记录，再删除用户
+                DatabaseService.Fsql.Delete<UserPermission>()
                     .Where(p => p.UserId == userId)
                     .ExecuteAffrows();
 
@@ -181,6 +223,36 @@ namespace FingerprintLockManager
 
                 int rows = DatabaseService.Fsql.Update<User>()
                     .Set(u => u.FingerprintId, fingerprintId)
+                    .Set(u => u.UpdateTime, DateTime.Now)
+                    .Where(u => u.UserId == userId)
+                    .ExecuteAffrows();
+
+                return rows > 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 重置用户密码（生成新盐值并重新哈希）
+        /// </summary>
+        /// <param name="userId">用户 ID</param>
+        /// <param name="newPassword">新明文密码</param>
+        /// <returns>成功返回 true；失败或异常返回 false</returns>
+        public bool ResetPassword(string userId, string newPassword)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(newPassword)) return false;
+
+                string salt = PasswordHelper.GenerateSalt();
+                string hash = PasswordHelper.HashPassword(newPassword, salt);
+
+                int rows = DatabaseService.Fsql.Update<User>()
+                    .Set(u => u.PasswordSalt, salt)
+                    .Set(u => u.PasswordHash, hash)
                     .Set(u => u.UpdateTime, DateTime.Now)
                     .Where(u => u.UserId == userId)
                     .ExecuteAffrows();

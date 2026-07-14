@@ -10,7 +10,9 @@
         </Grid.RowDefinitions>
 
         <!-- 页面标题 -->
-        <TextBlock Grid.Row="0" Text="权限管理" Style="{StaticResource TitleText}" Margin="0,0,0,12"/>
+        <TextBlock Grid.Row="0" Text="权限管理（角色默认 + 个人覆盖）" Style="{StaticResource TitleText}" Margin="0,0,0,4"/>
+        <TextBlock Grid.Row="0" Text="勾选并保存将写入个人覆盖项（优先级高于角色默认）；点击“重置为角色默认”将删除个人覆盖并回退。"
+                   Foreground="{StaticResource SubTextBrush}" FontSize="11" Margin="0,28,0,12"/>
 
         <!-- 主体：左侧用户列表 + 右侧权限勾选 -->
         <Grid Grid.Row="1">
@@ -69,32 +71,51 @@
                                    Foreground="{StaticResource SubTextBrush}" FontSize="12"/>
                     </StackPanel>
 
-                    <!-- 4把锁的权限勾选框 -->
+                    <!-- 4把锁的权限勾选框（每把锁显示权限来源标记：默认/覆盖） -->
                     <StackPanel Grid.Row="1" VerticalAlignment="Top">
                         <TextBlock Text="锁权限设置" FontWeight="Bold" Margin="0,0,0,12"
                                    Foreground="{StaticResource TextBrush}"/>
+
                         <Border Style="{StaticResource Card}" Padding="12" Margin="0,0,0,8">
                             <StackPanel Orientation="Horizontal">
                                 <CheckBox x:Name="Lock0CheckBox" Content="Lock0 - 系统锁" Margin="0,0,0,0"
-                                          VerticalContentAlignment="Center" IsEnabled="False"/>
-                                <TextBlock Text="（仅管理员可勾选）" Margin="12,0,0,0" FontSize="11"
+                                          VerticalContentAlignment="Center"/>
+                                <TextBlock x:Name="Lock0Source" Text="[默认]" Margin="12,0,0,0" FontSize="11"
                                            Foreground="{StaticResource SubTextBrush}" VerticalAlignment="Center"/>
                             </StackPanel>
                         </Border>
                         <Border Style="{StaticResource Card}" Padding="12" Margin="0,0,0,8">
-                            <CheckBox x:Name="Lock1CheckBox" Content="Lock1 - 实训柜1" VerticalContentAlignment="Center"/>
+                            <StackPanel Orientation="Horizontal">
+                                <CheckBox x:Name="Lock1CheckBox" Content="Lock1 - 实训柜1" VerticalContentAlignment="Center"/>
+                                <TextBlock x:Name="Lock1Source" Text="[默认]" Margin="12,0,0,0" FontSize="11"
+                                           Foreground="{StaticResource SubTextBrush}" VerticalAlignment="Center"/>
+                            </StackPanel>
                         </Border>
                         <Border Style="{StaticResource Card}" Padding="12" Margin="0,0,0,8">
-                            <CheckBox x:Name="Lock2CheckBox" Content="Lock2 - 实训柜2" VerticalContentAlignment="Center"/>
+                            <StackPanel Orientation="Horizontal">
+                                <CheckBox x:Name="Lock2CheckBox" Content="Lock2 - 实训柜2" VerticalContentAlignment="Center"/>
+                                <TextBlock x:Name="Lock2Source" Text="[默认]" Margin="12,0,0,0" FontSize="11"
+                                           Foreground="{StaticResource SubTextBrush}" VerticalAlignment="Center"/>
+                            </StackPanel>
                         </Border>
                         <Border Style="{StaticResource Card}" Padding="12">
-                            <CheckBox x:Name="Lock3CheckBox" Content="Lock3 - 实训柜3" VerticalContentAlignment="Center"/>
+                            <StackPanel Orientation="Horizontal">
+                                <CheckBox x:Name="Lock3CheckBox" Content="Lock3 - 实训柜3" VerticalContentAlignment="Center"/>
+                                <TextBlock x:Name="Lock3Source" Text="[默认]" Margin="12,0,0,0" FontSize="11"
+                                           Foreground="{StaticResource SubTextBrush}" VerticalAlignment="Center"/>
+                            </StackPanel>
                         </Border>
+
+                        <TextBlock Text="说明：[默认]=来自角色默认权限模板；[覆盖]=来自个人覆盖项（优先级更高）"
+                                   Foreground="{StaticResource SubTextBrush}" FontSize="11" Margin="0,12,0,0"
+                                   TextWrapping="Wrap"/>
                     </StackPanel>
 
-                    <!-- 保存按钮 -->
+                    <!-- 保存与重置按钮 -->
                     <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
-                        <Button x:Name="SaveButton" Content="保存权限" Click="SaveButton_Click"/>
+                        <Button x:Name="ResetButton" Content="重置为角色默认" Style="{StaticResource SecondaryButton}"
+                                Click="ResetButton_Click"/>
+                        <Button x:Name="SaveButton" Content="保存权限" Margin="12,0,0,0" Click="SaveButton_Click"/>
                     </StackPanel>
                 </Grid>
             </Border>

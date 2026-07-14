@@ -7,21 +7,31 @@ namespace FingerprintLockManager
     /// 上位机与 ESP32 之间通过 JSON 消息进行通信，消息以换行符 \n 分隔。
     /// JSON 格式：
     /// {
+    ///   "msg_id": "a1b2c3",
     ///   "cmd": "FINGER_VERIFY",
     ///   "device_id": "CABINET_001",
+    ///   "source_device_id": "CABINET_001",
     ///   "data": { ... },
     ///   "timestamp": "2024-01-01 00:00:00"
     /// }
     /// </summary>
     public class Message
     {
+        /// <summary>消息 ID（ACK 时原样回传，用于命令确认匹配）</summary>
+        [JsonProperty("msg_id")]
+        public string MsgId { get; set; }
+
         /// <summary>命令字段（与 CommandType 枚举对应，如 "FINGER_VERIFY"）</summary>
         [JsonProperty("cmd")]
         public string Cmd { get; set; }
 
-        /// <summary>设备 ID（如 CABINET_001）</summary>
+        /// <summary>目标设备 ID（如 CABINET_001）</summary>
         [JsonProperty("device_id")]
         public string DeviceId { get; set; }
+
+        /// <summary>原始发送方设备 ID（Root 转发时区分真实来源节点）</summary>
+        [JsonProperty("source_device_id")]
+        public string SourceDeviceId { get; set; }
 
         /// <summary>消息数据负载（可为 null，反序列化后为 JObject）</summary>
         [JsonProperty("data")]
@@ -37,16 +47,38 @@ namespace FingerprintLockManager
         /// <param name="cmd">命令字符串</param>
         /// <param name="deviceId">设备 ID</param>
         /// <param name="data">附加数据，可为 null</param>
-        /// <returns>构造好的 Message 对象（自动填充当前时间戳）</returns>
+        /// <returns>构造好的 Message 对象（自动填充消息 ID 与当前时间戳）</returns>
         public static Message Create(string cmd, string deviceId, object data = null)
         {
             return new Message
             {
+                MsgId = GenerateMsgId(),
                 Cmd = cmd,
                 DeviceId = deviceId,
                 Data = data,
                 Timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")
             };
+        }
+
+        /// <summary>
+        /// 创建消息的静态方法（指定消息 ID，用于 ACK 匹配）
+        /// </summary>
+        public static Message Create(string msgId, string cmd, string deviceId, object data = null)
+        {
+            return new Message
+            {
+                MsgId = msgId,
+                Cmd = cmd,
+                DeviceId = deviceId,
+                Data = data,
+                Timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")
+            };
+        }
+
+        /// <summary>生成短消息 ID（时间戳 + 随机数）</summary>
+        private static string GenerateMsgId()
+        {
+            return DateTime.Now.ToString("yyyyMMddHHmmssfff") + Guid.NewGuid().ToString("N").Substring(0, 6);
         }
 
         /// <summary>

@@ -28,6 +28,21 @@ namespace FingerprintLockManager
     }
 
     /// <summary>
+    /// 上位机与 Mesh 根节点之间的传输链路类型
+    /// </summary>
+    public enum TransportType
+    {
+        /// <summary>USB 串口直连根节点（SerialTransport）</summary>
+        UsbSerial,
+
+        /// <summary>TCP 客户端：上位机主动连接根节点 AP 热点（TcpClientTransport）</summary>
+        TcpClient,
+
+        /// <summary>TCP 服务端：上位机监听端口，等待根节点连接（TcpServerTransport）</summary>
+        TcpServer
+    }
+
+    /// <summary>
     /// 通信命令类型枚举（对应协议中的 cmd 字段）
     /// </summary>
     public enum CommandType
@@ -87,6 +102,50 @@ namespace FingerprintLockManager
         ConfigSaved,
 
         /// <summary>心跳（双向，用于保活检测）</summary>
-        Heartbeat
+        Heartbeat,
+
+        /// <summary>应答（下位机 -> 上位机，对下发命令的确认）</summary>
+        Ack,
+
+        // ===== SD 卡集中存储命令（上位机 <-> 根节点） =====
+
+        /// <summary>查询 SD 卡表（上位机 -> 根节点）</summary>
+        SdQuery,
+
+        /// <summary>查询 SD 卡表响应（根节点 -> 上位机）</summary>
+        SdQueryResponse,
+
+        /// <summary>查询 SD 卡表分片（根节点 -> 上位机，大表分批）</summary>
+        SdQueryPart,
+
+        /// <summary>保存 SD 卡表（上位机 -> 根节点，带乐观锁）</summary>
+        SdSave,
+
+        /// <summary>保存 SD 卡表响应（根节点 -> 上位机）</summary>
+        SdSaveResponse,
+
+        /// <summary>查询 SD 卡版本号（上位机 -> 根节点）</summary>
+        SdQueryVersion,
+
+        /// <summary>查询 SD 卡版本号响应（根节点 -> 上位机）</summary>
+        SdVersionResponse,
+
+        /// <summary>上传指纹模板到 SD 卡（上位机 -> 根节点）</summary>
+        UploadFpTemplate,
+
+        /// <summary>上传指纹模板响应（根节点 -> 上位机）</summary>
+        FpTemplateUploadResponse,
+
+        /// <summary>从 SD 卡下载指纹模板（上位机 -> 根节点）</summary>
+        DownloadFpTemplate,
+
+        /// <summary>下载指纹模板响应（根节点 -> 上位机）</summary>
+        FpTemplateDownloadResponse,
+
+        /// <summary>删除 SD 卡指纹模板（上位机 -> 根节点）</summary>
+        DeleteFpTemplate,
+
+        /// <summary>删除指纹模板响应（根节点 -> 上位机）</summary>
+        FpTemplateDeleteResponse
     }
 }

@@ -2,12 +2,12 @@ namespace FingerprintLockManager
 {
     /// <summary>
     /// 登录认证服务
-    /// 负责管理员登录验证与密码修改
+    /// 负责用户登录验证（所有角色）与密码修改（加盐哈希）
     /// </summary>
     public class AuthService
     {
         /// <summary>
-        /// 管理员登录验证
+        /// 用户登录验证（所有角色均可登录）
         /// </summary>
         /// <param name="userId">用户 ID</param>
         /// <param name="password">明文密码</param>
@@ -25,8 +25,8 @@ namespace FingerprintLockManager
 
                 if (user == null) return null;
 
-                // 校验密码
-                if (!PasswordHelper.VerifyPassword(password, user.PasswordHash))
+                // 校验密码（加盐哈希）
+                if (!PasswordHelper.VerifyPassword(password, user.PasswordSalt, user.PasswordHash))
                 {
                     return null;
                 }
@@ -40,7 +40,7 @@ namespace FingerprintLockManager
         }
 
         /// <summary>
-        /// 修改密码
+        /// 修改密码（重新生成盐值并哈希）
         /// </summary>
         /// <param name="userId">用户 ID</param>
         /// <param name="oldPassword">原明文密码</param>
@@ -64,14 +64,16 @@ namespace FingerprintLockManager
 
                 if (user == null) return false;
 
-                // 校验原密码
-                if (!PasswordHelper.VerifyPassword(oldPassword, user.PasswordHash))
+                // 校验原密码（加盐哈希）
+                if (!PasswordHelper.VerifyPassword(oldPassword, user.PasswordSalt, user.PasswordHash))
                 {
                     return false;
                 }
 
-                // 更新密码哈希与更新时间
-                user.PasswordHash = PasswordHelper.HashPassword(newPassword);
+                // 生成新盐值并重新哈希
+                string newSalt = PasswordHelper.GenerateSalt();
+                user.PasswordSalt = newSalt;
+                user.PasswordHash = PasswordHelper.HashPassword(newPassword, newSalt);
                 user.UpdateTime = DateTime.Now;
 
                 int rows = DatabaseService.Fsql.Update<User>()
