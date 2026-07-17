@@ -34,6 +34,22 @@ namespace FingerprintLockManager
         /// <summary>SD 卡是否可用（根节点在线且 SD 卡就绪）</summary>
         public bool IsAvailable => App.MeshBridge.IsConnected && !string.IsNullOrEmpty(RootDeviceId);
 
+        /// <summary>链路断开时清理根节点定位和所有等待中的请求。</summary>
+        public void HandleConnectionChanged(bool connected)
+        {
+            if (connected) return;
+
+            RootDeviceId = "";
+            _fragments.Clear();
+            foreach (var pair in _pending)
+            {
+                if (_pending.TryRemove(pair.Key, out var pending))
+                {
+                    pending.Tcs.TrySetResult(null);
+                }
+            }
+        }
+
         /// <summary>
         /// 处理收到的 SD 卡响应消息（由 MessageHandler 调用）
         /// </summary>
@@ -51,6 +67,7 @@ namespace FingerprintLockManager
             // 普通响应：匹配并完成 pending 请求
             if (_pending.TryRemove(msg.MsgId, out var pending))
             {
+                _fragments.TryRemove(msg.MsgId, out _);
                 try
                 {
                     pending.Tcs.TrySetResult(msg);
@@ -71,15 +88,40 @@ namespace FingerprintLockManager
         /// <returns>表 JSON 字符串；失败返回 null</returns>
         public async Task<string?> QueryTableAsync(string table, int timeoutMs = DefaultTimeoutMs)
         {
+            var snapshot = await QueryTableSnapshotAsync(table, timeoutMs);
+            return snapshot?.Json;
+        }
+
+        /// <summary>查询表内容及根节点读取该内容时的版本号。</summary>
+        public async Task<SdTableSnapshot?> QueryTableSnapshotAsync(
+            string table, int timeoutMs = DefaultTimeoutMs)
+        {
             var msg = Message.Create(Protocol.CmdSdQuery, RootDeviceId, new { table });
             var resp = await SendRequestAsync(msg, timeoutMs);
             if (resp?.Cmd == Protocol.CmdSdQueryResponse)
             {
-                // data: {table, json:...}
                 var data = resp.Data as JObject;
-                return data?["json"]?.ToString(Formatting.None);
+                var json = data?["json"]?.ToString(Formatting.None);
+                if (string.IsNullOrWhiteSpace(json)) return null;
+                return new SdTableSnapshot
+                {
+                    Table = data?["table"]?.ToString() ?? table,
+                    Json = json,
+                    Version = data?["version"]?.Value<uint>() ?? 0
+                };
             }
             return null;
+        }
+
+        /// <summary>同步查询包装，供现有 WPF 页面使用；数据仍来自根节点 SD。</summary>
+        public string? QueryTable(string table, int timeoutMs = DefaultTimeoutMs)
+        {
+            return QueryTableAsync(table, timeoutMs).GetAwaiter().GetResult();
+        }
+
+        public SdTableSnapshot? QueryTableSnapshot(string table, int timeoutMs = DefaultTimeoutMs)
+        {
+            return QueryTableSnapshotAsync(table, timeoutMs).GetAwaiter().GetResult();
         }
 
         /// <summary>
@@ -87,7 +129,7 @@ namespace FingerprintLockManager
         /// </summary>
         /// <param name="table">表名</param>
         /// <param name="json">表 JSON 内容</param>
-        /// <param name="baseVersion">基础版本号（乐观锁），0 表示不检测</param>
+        /// <param name="baseVersion">读取该表时得到的基础版本号（包括初始版本 0）</param>
         /// <returns>成功返回 true；版本冲突返回 false</returns>
         public async Task<bool> SaveTableAsync(string table, string json, uint baseVersion = 0,
             int timeoutMs = DefaultTimeoutMs)
@@ -96,7 +138,8 @@ namespace FingerprintLockManager
             {
                 table,
                 json,
-                base_version = baseVersion
+                base_version = baseVersion,
+                enforce_version = true
             });
             var resp = await SendRequestAsync(msg, timeoutMs);
             if (resp?.Cmd == Protocol.CmdSdSaveResponse)
@@ -106,6 +149,13 @@ namespace FingerprintLockManager
                 return result == "success";
             }
             return false;
+        }
+
+        /// <summary>同步保存包装，供现有 WPF 页面使用。</summary>
+        public bool SaveTable(string table, string json, uint baseVersion = 0,
+            int timeoutMs = DefaultTimeoutMs)
+        {
+            return SaveTableAsync(table, json, baseVersion, timeoutMs).GetAwaiter().GetResult();
         }
 
         /// <summary>
@@ -128,11 +178,18 @@ namespace FingerprintLockManager
                     PermissionsVersion = data["permissions_version"]?.Value<uint>() ?? 0,
                     DevicesVersion = data["devices_version"]?.Value<uint>() ?? 0,
                     FpVersion = data["fp_version"]?.Value<uint>() ?? 0,
+                    LogsVersion = data["logs_version"]?.Value<uint>() ?? 0,
                     SdTotalBytes = data["sd_total_bytes"]?.Value<ulong>() ?? 0,
                     SdUsedBytes = data["sd_used_bytes"]?.Value<ulong>() ?? 0
                 };
             }
             return null;
+        }
+
+        /// <summary>同步版本查询包装。</summary>
+        public SdVersionInfo? QueryVersion(int timeoutMs = DefaultTimeoutMs)
+        {
+            return QueryVersionAsync(timeoutMs).GetAwaiter().GetResult();
         }
 
         // ====== 指纹模板 ======
@@ -210,25 +267,32 @@ namespace FingerprintLockManager
                 return null;
             }
 
-            var tcs = new TaskCompletionSource<Message>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var tcs = new TaskCompletionSource<Message?>(TaskCreationOptions.RunContinuationsAsynchronously);
             _pending[msg.MsgId] = new PendingRequest { Tcs = tcs, Cmd = msg.Cmd };
 
-            bool sent = App.MeshBridge.SendToDevice(RootDeviceId, msg);
-            if (!sent)
+            int attempts = IsReadOnlyRequest(msg.Cmd) ? 2 : 1;
+            for (int attempt = 0; attempt < attempts; attempt++)
             {
-                _pending.TryRemove(msg.MsgId, out _);
-                return null;
+                if (!IsAvailable || !App.MeshBridge.SendToDevice(RootDeviceId, msg)) break;
+
+                Task completed = await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs));
+                if (completed == tcs.Task)
+                {
+                    return await tcs.Task;
+                }
             }
 
-            // 超时处理
-            using var cts = new CancellationTokenSource(timeoutMs);
-            cts.Token.Register(() =>
-            {
-                _pending.TryRemove(msg.MsgId, out _);
-                tcs.TrySetResult(null!);
-            });
+            _pending.TryRemove(msg.MsgId, out _);
+            _fragments.TryRemove(msg.MsgId, out _);
+            tcs.TrySetResult(null);
+            return null;
+        }
 
-            return await tcs.Task;
+        private static bool IsReadOnlyRequest(string cmd)
+        {
+            return cmd == Protocol.CmdSdQuery ||
+                   cmd == Protocol.CmdSdQueryVersion ||
+                   cmd == Protocol.CmdDownloadFpTemplate;
         }
 
         /// <summary>处理分片消息：累积重组，完成后触发 pending</summary>
@@ -240,11 +304,17 @@ namespace FingerprintLockManager
             int part = data["part"]?.Value<int>() ?? 0;
             int total = data["total"]?.Value<int>() ?? 0;
             string? chunk = data["data"]?.ToString();
-            if (part <= 0 || total <= 0 || chunk == null) return;
+            if (part <= 0 || total <= 0 || total > 512 || part > total || chunk == null) return;
+            if (!_pending.ContainsKey(msg.MsgId)) return;
 
             var buf = _fragments.GetOrAdd(msg.MsgId, _ => new FragmentBuffer { Total = total });
             lock (buf)
             {
+                if (buf.Total != total)
+                {
+                    _fragments.TryRemove(msg.MsgId, out _);
+                    return;
+                }
                 buf.Parts[part] = chunk;
                 if (buf.Parts.Count < buf.Total) return;  // 未收齐
             }
@@ -259,12 +329,20 @@ namespace FingerprintLockManager
             string fullJson = sb.ToString();
 
             // 构造等效的 SD_QUERY_RESPONSE 消息
-            var merged = new Message
+            Message? merged = null;
+            try
             {
-                MsgId = msg.MsgId,
-                Cmd = Protocol.CmdSdQueryResponse,
-                Data = JObject.Parse(fullJson)
-            };
+                merged = new Message
+                {
+                    MsgId = msg.MsgId,
+                    Cmd = Protocol.CmdSdQueryResponse,
+                    Data = JObject.Parse(fullJson)
+                };
+            }
+            catch (JsonException)
+            {
+                // 完整分片不是有效 JSON，按请求失败处理。
+            }
 
             if (_pending.TryRemove(msg.MsgId, out var pending))
             {
@@ -288,7 +366,7 @@ namespace FingerprintLockManager
 
         private class PendingRequest
         {
-            public TaskCompletionSource<Message> Tcs { get; set; } = null!;
+            public TaskCompletionSource<Message?> Tcs { get; set; } = null!;
             public string Cmd { get; set; } = "";
         }
 
@@ -308,6 +386,7 @@ namespace FingerprintLockManager
         public uint PermissionsVersion { get; set; }
         public uint DevicesVersion { get; set; }
         public uint FpVersion { get; set; }
+        public uint LogsVersion { get; set; }
         public ulong SdTotalBytes { get; set; }
         public ulong SdUsedBytes { get; set; }
 
@@ -317,5 +396,12 @@ namespace FingerprintLockManager
                    $"权限={PermissionsVersion}, 设备={DevicesVersion}, 指纹={FpVersion}, " +
                    $"SD卡={SdUsedBytes / 1024 / 1024}MB/{SdTotalBytes / 1024 / 1024}MB";
         }
+    }
+
+    public class SdTableSnapshot
+    {
+        public string Table { get; set; } = "";
+        public string Json { get; set; } = "";
+        public uint Version { get; set; }
     }
 }

@@ -15,11 +15,11 @@ namespace FingerprintLockManager
         public LogPage()
         {
             InitializeComponent();
-            Loaded += (s, e) => LoadLogs();
+            Loaded += async (s, e) => await LoadLogsAsync();
         }
 
         /// <summary>根据筛选条件加载日志</summary>
-        private void LoadLogs()
+        private async Task LoadLogsAsync()
         {
             string? deviceId = string.IsNullOrWhiteSpace(DeviceIdFilter.Text) ? null : DeviceIdFilter.Text.Trim();
             string? userId = string.IsNullOrWhiteSpace(UserIdFilter.Text) ? null : UserIdFilter.Text.Trim();
@@ -32,20 +32,35 @@ namespace FingerprintLockManager
                 endTime = endTime.Value.Date.AddDays(1).AddSeconds(-1);
             }
 
-            var logs = App.LogService.QueryLogs(deviceId, userId, startTime, endTime, 2000);
-            LogDataGrid.ItemsSource = logs;
+            SetBusy(true, "正在读取根节点日志");
+            try
+            {
+                var logs = await Task.Run(() =>
+                    App.LogService.QueryLogs(deviceId, userId, startTime, endTime, 2000));
+                LogDataGrid.ItemsSource = logs;
+                PageStatusText.Text = $"当前显示 {logs.Count} 条记录";
+            }
+            catch (RootDataUnavailableException ex)
+            {
+                LogDataGrid.ItemsSource = null;
+                PageStatusText.Text = ex.Message;
+            }
+            finally
+            {
+                SetBusy(false);
+            }
         }
 
         /// <summary>查询按钮</summary>
-        private void QueryButton_Click(object sender, RoutedEventArgs e)
+        private async void QueryButton_Click(object sender, RoutedEventArgs e)
         {
-            LoadLogs();
+            await LoadLogsAsync();
         }
 
         /// <summary>刷新按钮</summary>
-        private void RefreshButton_Click(object sender, RoutedEventArgs e)
+        private async void RefreshButton_Click(object sender, RoutedEventArgs e)
         {
-            LoadLogs();
+            await LoadLogsAsync();
         }
 
         /// <summary>导出CSV</summary>
@@ -104,6 +119,14 @@ namespace FingerprintLockManager
                 return "\"" + field.Replace("\"", "\"\"") + "\"";
             }
             return field;
+        }
+
+        private void SetBusy(bool busy, string? status = null)
+        {
+            QueryButton.IsEnabled = !busy;
+            RefreshButton.IsEnabled = !busy;
+            ExportButton.IsEnabled = !busy;
+            if (!string.IsNullOrEmpty(status)) PageStatusText.Text = status;
         }
     }
 }

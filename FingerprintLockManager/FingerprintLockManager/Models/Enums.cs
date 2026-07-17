@@ -107,6 +107,9 @@ namespace FingerprintLockManager
         /// <summary>应答（下位机 -> 上位机，对下发命令的确认）</summary>
         Ack,
 
+        /// <summary>命令处理失败响应</summary>
+        Error,
+
         // ===== SD 卡集中存储命令（上位机 <-> 根节点） =====
 
         /// <summary>查询 SD 卡表（上位机 -> 根节点）</summary>

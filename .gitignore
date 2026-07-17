@@ -18,6 +18,7 @@ TestInit/
 TestInit.csproj
 
 # Arduino
+.pio/
 *.elf
 *.hex
 *.bin
@@ -26,6 +27,8 @@ build/
 .pioenvs/
 .piolibdeps/
 .vscode/
+.cache/
+clangd/
 .arduino/
 preferences.txt
 *.o

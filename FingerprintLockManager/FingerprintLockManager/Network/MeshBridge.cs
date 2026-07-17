@@ -80,24 +80,9 @@ namespace FingerprintLockManager
             _transport = CreateTransport(config);
             CurrentType = config.Type;
             _transport.LineReceived += OnLineReceived;
-
-            // 订阅连接状态变化（TCP 传输支持，串口无此事件）
-            if (_transport is TcpClientTransport tcpClient)
-            {
-                tcpClient.ConnectionChanged += OnConnectionChanged;
-            }
-            else if (_transport is TcpServerTransport tcpServer)
-            {
-                tcpServer.ConnectionChanged += OnConnectionChanged;
-            }
+            _transport.ConnectionChanged += OnConnectionChanged;
 
             _transport.Start();
-
-            // 串口启动即视为链路就绪
-            if (_transport is SerialTransport)
-            {
-                OnConnectionChanged(true);
-            }
         }
 
         /// <summary>停止桥接器并释放传输资源</summary>
@@ -106,14 +91,7 @@ namespace FingerprintLockManager
             if (_transport == null) return;
 
             _transport.LineReceived -= OnLineReceived;
-            if (_transport is TcpClientTransport tcpClient)
-            {
-                tcpClient.ConnectionChanged -= OnConnectionChanged;
-            }
-            else if (_transport is TcpServerTransport tcpServer)
-            {
-                tcpServer.ConnectionChanged -= OnConnectionChanged;
-            }
+            _transport.ConnectionChanged -= OnConnectionChanged;
 
             try { _transport.Stop(); } catch { }
             _transport = null;
@@ -233,7 +211,7 @@ namespace FingerprintLockManager
             DeviceClient device;
             lock (_devicesLock)
             {
-                if (!_devices.TryGetValue(deviceId, out device))
+                if (!_devices.TryGetValue(deviceId, out var existing))
                 {
                     device = new DeviceClient
                     {
@@ -243,6 +221,10 @@ namespace FingerprintLockManager
                     };
                     _devices[deviceId] = device;
                     isNew = true;
+                }
+                else
+                {
+                    device = existing;
                 }
                 device.IsOnline = true;
                 device.LastSeen = DateTime.Now;

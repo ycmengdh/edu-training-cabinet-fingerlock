@@ -17,18 +17,37 @@ namespace FingerprintLockManager
         public PermissionPage()
         {
             InitializeComponent();
-            Loaded += (s, e) => LoadUsers();
+            Loaded += async (s, e) => await LoadUsersAsync();
         }
 
         /// <summary>加载用户列表</summary>
-        private void LoadUsers()
+        private async Task LoadUsersAsync()
         {
-            var users = App.UserService.GetAllUsers();
-            UserListBox.ItemsSource = users;
+            SetBusy(true, "正在读取根节点权限数据");
+            try
+            {
+                var users = await Task.Run(App.UserService.GetAllUsers);
+                UserListBox.ItemsSource = users;
+                PageStatusText.Text = $"共 {users.Count} 个用户";
+            }
+            catch (RootDataUnavailableException ex)
+            {
+                UserListBox.ItemsSource = null;
+                PageStatusText.Text = ex.Message;
+            }
+            finally
+            {
+                SetBusy(false);
+            }
+        }
+
+        private async void RefreshButton_Click(object sender, RoutedEventArgs e)
+        {
+            await LoadUsersAsync();
         }
 
         /// <summary>用户列表选中变化：加载该用户权限</summary>
-        private void UserListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        private async void UserListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
             if (UserListBox.SelectedItem is not User user)
             {
@@ -37,14 +56,14 @@ namespace FingerprintLockManager
             }
 
             _selectedUser = user;
-            LoadUserPermissions(user);
+            await LoadUserPermissionsAsync(user);
         }
 
         /// <summary>
         /// 加载指定用户的权限并填充勾选框
         /// 合并角色默认权限 + 个人覆盖项，并标记每把锁的权限来源
         /// </summary>
-        private void LoadUserPermissions(User user)
+        private async Task LoadUserPermissionsAsync(User user)
         {
             // 显示用户信息
             SelectedUserName.Text = user.Name;
@@ -58,12 +77,28 @@ namespace FingerprintLockManager
             Lock0CheckBox.IsEnabled = isAdmin;
 
             // 第一层：角色默认权限
-            var rolePerm = App.RolePermissionService.GetRolePermission(user.Role);
-            bool[] finalAccess = rolePerm.ToArray();
+            RolePermission rolePerm;
+            List<UserPermission> overrides;
+            SetBusy(true, $"正在读取 {user.Name} 的权限");
+            try
+            {
+                (rolePerm, overrides) = await Task.Run(() => (
+                    App.RolePermissionService.GetRolePermission(user.Role),
+                    App.PermissionService.GetUserPermissions(user.UserId)));
+            }
+            catch (RootDataUnavailableException ex)
+            {
+                PageStatusText.Text = ex.Message;
+                return;
+            }
+            finally
+            {
+                SetBusy(false);
+            }
 
-            // 第二层：个人覆盖项（存在覆盖则替换对应锁，并标记来源）
+            if (_selectedUser?.UserId != user.UserId) return;
+            bool[] finalAccess = rolePerm.ToArray();
             bool[] hasOverride = new bool[4];
-            var overrides = App.PermissionService.GetUserPermissions(user.UserId);
             foreach (var p in overrides)
             {
                 if (p.LockId >= 0 && p.LockId < 4)
@@ -84,6 +119,7 @@ namespace FingerprintLockManager
             {
                 Lock0CheckBox.IsChecked = false;
             }
+            PageStatusText.Text = $"正在编辑 {user.Name} 的本地鉴权权限";
         }
 
         /// <summary>设置单个锁的勾选状态与来源标记</summary>
@@ -92,18 +128,18 @@ namespace FingerprintLockManager
             cb.IsChecked = hasAccess;
             if (isOverride)
             {
-                sourceText.Text = "[覆盖]";
+                sourceText.Text = "个人覆盖";
                 sourceText.Foreground = FindResource("PrimaryBrush") as Brush;
             }
             else
             {
-                sourceText.Text = "[默认]";
+                sourceText.Text = "角色默认";
                 sourceText.Foreground = FindResource("SubTextBrush") as Brush;
             }
         }
 
         /// <summary>保存权限按钮：写入个人覆盖项</summary>
-        private void SaveButton_Click(object sender, RoutedEventArgs e)
+        private async void SaveButton_Click(object sender, RoutedEventArgs e)
         {
             if (_selectedUser == null)
             {
@@ -123,15 +159,29 @@ namespace FingerprintLockManager
                 [3] = Lock3CheckBox.IsChecked == true
             };
 
-            if (App.PermissionService.SetUserPermissions(userId, dict))
+            SetBusy(true, "正在保存个人权限");
+            bool saved;
+            try
             {
-                MessageBox.Show("权限保存成功（已写入个人覆盖项）", "成功", MessageBoxButton.OK, MessageBoxImage.Information);
+                saved = await Task.Run(() => App.PermissionService.SetUserPermissions(userId, dict));
+            }
+            catch (RootDataUnavailableException ex)
+            {
+                MessageBox.Show(ex.Message, "根节点不可用", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+            finally
+            {
+                SetBusy(false);
+            }
 
-                // 重新加载以刷新来源标记
-                LoadUserPermissions(_selectedUser);
-
-                // 同步权限到该用户所在的所有在线设备
-                SyncPermissionsToDevice(userId);
+            if (saved)
+            {
+                await LoadUserPermissionsAsync(_selectedUser);
+                bool synced = await SyncPermissionsAsync();
+                MessageBox.Show(synced ? "权限已保存并广播到柜子" : "权限已保存，当前未完成广播",
+                    synced ? "保存完成" : "同步提示", MessageBoxButton.OK,
+                    synced ? MessageBoxImage.Information : MessageBoxImage.Warning);
             }
             else
             {
@@ -140,7 +190,7 @@ namespace FingerprintLockManager
         }
 
         /// <summary>重置为角色默认按钮：删除该用户所有个人覆盖项，回退到角色默认权限</summary>
-        private void ResetButton_Click(object sender, RoutedEventArgs e)
+        private async void ResetButton_Click(object sender, RoutedEventArgs e)
         {
             if (_selectedUser == null)
             {
@@ -152,11 +202,29 @@ namespace FingerprintLockManager
                 "确认重置", MessageBoxButton.YesNo, MessageBoxImage.Question);
             if (result != MessageBoxResult.Yes) return;
 
-            if (App.PermissionService.DeleteAllUserPermissions(_selectedUser.UserId))
+            bool reset;
+            SetBusy(true, "正在恢复角色默认权限");
+            try
             {
-                MessageBox.Show("已重置为角色默认权限", "成功", MessageBoxButton.OK, MessageBoxImage.Information);
-                LoadUserPermissions(_selectedUser);
-                SyncPermissionsToDevice(_selectedUser.UserId);
+                reset = await Task.Run(() => App.PermissionService.DeleteAllUserPermissions(_selectedUser.UserId));
+            }
+            catch (RootDataUnavailableException ex)
+            {
+                MessageBox.Show(ex.Message, "根节点不可用", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+            finally
+            {
+                SetBusy(false);
+            }
+
+            if (reset)
+            {
+                await LoadUserPermissionsAsync(_selectedUser);
+                bool synced = await SyncPermissionsAsync();
+                MessageBox.Show(synced ? "已恢复角色默认权限并广播" : "已恢复角色默认权限，广播未发送",
+                    "重置完成", MessageBoxButton.OK,
+                    synced ? MessageBoxImage.Information : MessageBoxImage.Warning);
             }
             else
             {
@@ -164,30 +232,25 @@ namespace FingerprintLockManager
             }
         }
 
-        /// <summary>同步权限到在线设备（按指纹查询最终权限后广播下发）</summary>
-        private void SyncPermissionsToDevice(string userId)
+        private void SetBusy(bool busy, string? status = null)
+        {
+            RefreshButton.IsEnabled = !busy;
+            UserListBox.IsEnabled = !busy;
+            SaveButton.IsEnabled = !busy && _selectedUser != null;
+            ResetButton.IsEnabled = !busy && _selectedUser != null;
+            if (!string.IsNullOrEmpty(status)) PageStatusText.Text = status;
+        }
+
+        private async Task<bool> SyncPermissionsAsync()
         {
             try
             {
-                var user = App.UserService.GetUser(userId);
-                if (user == null || !user.FingerprintId.HasValue) return;
-
-                bool[] permissions = App.PermissionService.GetFinalPermissions(user.UserId);
-
-                var data = new Dictionary<string, object>
-                {
-                    ["fingerprint_id"] = user.FingerprintId.Value,
-                    ["user_id"] = user.UserId,
-                    ["permissions"] = permissions
-                };
-
-                // 广播同步权限到所有在线设备（经 Root 转发）
-                var msg = Message.Create(Protocol.CmdSyncPermissions, "", data);
-                App.MeshBridge.Broadcast(msg);
+                return await Task.Run(App.CabinetSyncService.SyncAllPermissions);
             }
-            catch
+            catch (RootDataUnavailableException ex)
             {
-                // 同步失败时忽略，不影响本地保存
+                PageStatusText.Text = ex.Message;
+                return false;
             }
         }
     }

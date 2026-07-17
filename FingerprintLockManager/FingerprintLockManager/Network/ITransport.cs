@@ -3,8 +3,9 @@ namespace FingerprintLockManager
     /// <summary>
     /// 传输层抽象接口
     /// 统一 USB 串口、TCP 客户端、TCP 服务端三种链路的收发行为。
+    /// Send 接收 JSON，具体链路统一编码为 ESP 二进制协议帧。
     /// 上层 MeshBridge 通过本接口与 Mesh 根节点通讯，不关心具体物理链路。
-    /// 通讯格式：按行 JSON（每条消息以 \n 结尾）。
+    /// 通讯格式：JSON 负载封装在 ESP 二进制协议帧中，支持流式接收和分片。
     /// </summary>
     public interface ITransport
     {
@@ -12,7 +13,10 @@ namespace FingerprintLockManager
         bool IsConnected { get; }
 
         /// <summary>收到一行 JSON 消息事件（已去除尾部换行）</summary>
-        event Action<string> LineReceived;
+        event Action<string>? LineReceived;
+
+        /// <summary>物理链路连接状态变化</summary>
+        event Action<bool>? ConnectionChanged;
 
         /// <summary>启动传输（建立连接/开始监听）</summary>
         void Start();

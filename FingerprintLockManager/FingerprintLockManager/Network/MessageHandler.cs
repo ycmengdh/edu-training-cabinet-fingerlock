@@ -22,32 +22,32 @@ namespace FingerprintLockManager
         /// <summary>去重缓存锁</summary>
         private readonly object _dedupLock = new object();
 
-        /// <summary>指纹验证请求事件：参数为 deviceId, fingerprintId</summary>
-        public event Action<string, string> OnFingerVerifyRequest;
-
         /// <summary>设备注册事件：参数为 deviceId, deviceName</summary>
-        public event Action<string, string> OnDeviceRegistered;
+        public event Action<string, string>? OnDeviceRegistered;
 
         /// <summary>日志上报事件：参数为 deviceId, logJson</summary>
-        public event Action<string, string> OnLogReport;
+        public event Action<string, string>? OnLogReport;
 
         /// <summary>状态上报事件：参数为 statusJson</summary>
-        public event Action<string> OnStatusReport;
+        public event Action<string>? OnStatusReport;
 
         /// <summary>配置读取响应事件：参数为 deviceId, configJson</summary>
-        public event Action<string, string> OnConfigResponse;
+        public event Action<string, string>? OnConfigResponse;
 
         /// <summary>状态读取响应事件：参数为 deviceId, statusJson</summary>
-        public event Action<string, string> OnStatusResponse;
+        public event Action<string, string>? OnStatusResponse;
 
         /// <summary>配置保存成功事件：参数为 deviceId</summary>
-        public event Action<string> OnConfigSaved;
+        public event Action<string>? OnConfigSaved;
 
         /// <summary>根节点注册事件：参数为 rootDeviceId（用于 SD 卡集中存储定位根节点）</summary>
-        public event Action<string> OnRootDeviceRegistered;
+        public event Action<string>? OnRootDeviceRegistered;
 
         /// <summary>ACK 应答事件：参数为 msgId（原命令消息 ID）, result（结果/错误码）</summary>
-        public event Action<string, string> OnAckReceived;
+        public event Action<string, string>? OnAckReceived;
+
+        /// <summary>错误响应事件：msgId, errorCode, message</summary>
+        public event Action<string, string, string>? OnErrorReceived;
 
         /// <summary>
         /// 处理收到的消息，根据 cmd 字段分发到对应处理方法
@@ -58,12 +58,6 @@ namespace FingerprintLockManager
         {
             if (msg == null || string.IsNullOrEmpty(msg.Cmd)) return;
 
-            // 消息去重：同一 MsgId 仅处理一次（无 MsgId 的消息不去重）
-            if (!string.IsNullOrEmpty(msg.MsgId))
-            {
-                if (IsDuplicate(msg.MsgId)) return;
-            }
-
             // 同步设备 ID
             if (device != null && string.IsNullOrEmpty(device.DeviceId) && !string.IsNullOrEmpty(msg.DeviceId))
             {
@@ -73,13 +67,17 @@ namespace FingerprintLockManager
             var cmdType = Protocol.ToCommandType(msg.Cmd);
             if (cmdType == null) return;
 
+            // SD_QUERY_PART intentionally reuses the request MsgId for every
+            // part. Deduplicating it would discard all parts after the first.
+            if (cmdType != CommandType.SdQueryPart && !string.IsNullOrEmpty(msg.MsgId))
+            {
+                if (IsDuplicate(msg.MsgId)) return;
+            }
+
             switch (cmdType.Value)
             {
                 case CommandType.Register:
                     HandleRegister(device, msg);
-                    break;
-                case CommandType.FingerVerify:
-                    HandleFingerVerify(device, msg);
                     break;
                 case CommandType.StatusReport:
                     HandleStatusReport(device, msg);
@@ -111,6 +109,10 @@ namespace FingerprintLockManager
                 case CommandType.FpTemplateDownloadResponse:
                 case CommandType.FpTemplateDeleteResponse:
                     App.SdStorageService.HandleResponse(msg);
+                    break;
+                case CommandType.Error:
+                    App.SdStorageService.HandleResponse(msg);
+                    HandleError(msg);
                     break;
             }
         }
@@ -170,25 +172,11 @@ namespace FingerprintLockManager
 
             // 检测根节点（is_root=true），通知 SdStorageService
             bool isRoot = TryGetBoolData(msg, "is_root");
+            if (device != null) device.IsRoot = isRoot;
             if (isRoot && !string.IsNullOrEmpty(deviceId))
             {
                 OnRootDeviceRegistered?.Invoke(deviceId);
             }
-        }
-
-        /// <summary>
-        /// 处理指纹验证请求
-        /// 触发 OnFingerVerifyRequest 事件让上层查询用户权限并回复 AUTH_OK / AUTH_FAIL
-        /// </summary>
-        private void HandleFingerVerify(DeviceClient? device, Message msg)
-        {
-            var fingerprintId = TryGetStringData(msg, "fingerprint_id")
-                ?? TryGetStringData(msg, "fingerprintId")
-                ?? TryGetStringData(msg, "fp_id")
-                ?? "";
-
-            var deviceId = device?.DeviceId ?? msg.DeviceId;
-            OnFingerVerifyRequest?.Invoke(deviceId, fingerprintId);
         }
 
         /// <summary>
@@ -258,6 +246,13 @@ namespace FingerprintLockManager
             {
                 OnAckReceived?.Invoke(msgId, result);
             }
+        }
+
+        private void HandleError(Message msg)
+        {
+            string code = TryGetStringData(msg, "error_code") ?? Protocol.ErrUnknown;
+            string message = TryGetStringData(msg, "message") ?? "设备处理命令失败";
+            OnErrorReceived?.Invoke(msg.MsgId, code, message);
         }
 
         /// <summary>

@@ -17,17 +17,21 @@ namespace FingerprintLockManager
         /// <summary>设备注册（下位机 -> 上位机）</summary>
         public const string CmdRegister = "REGISTER";
 
-        /// <summary>指纹验证请求（下位机 -> 上位机）</summary>
+        /// <summary>旧版指纹验证命令（仅协议兼容，当前不走上位机鉴权）</summary>
         public const string CmdFingerVerify = "FINGER_VERIFY";
 
-        /// <summary>验证成功（上位机 -> 下位机）</summary>
+        /// <summary>旧版验证成功命令（柜子仅兼容应答，不授予权限）</summary>
         public const string CmdAuthOk = "AUTH_OK";
 
-        /// <summary>验证失败（上位机 -> 下位机）</summary>
+        /// <summary>旧版验证失败命令（柜子仅兼容应答，不参与本地验证）</summary>
         public const string CmdAuthFail = "AUTH_FAIL";
 
         /// <summary>同步权限（上位机 -> 下位机）</summary>
         public const string CmdSyncPermissions = "SYNC_PERMISSIONS";
+        public const string CmdBeginPermissionSync = "BEGIN_PERMISSION_SYNC";
+        public const string CmdSyncPermission = "SYNC_PERMISSION";
+        public const string CmdCommitPermissionSync = "COMMIT_PERMISSION_SYNC";
+        public const string CmdClearPermissions = "CLEAR_PERMISSIONS";
 
         /// <summary>添加指纹（上位机 -> 下位机）</summary>
         public const string CmdAddFingerprint = "ADD_FINGERPRINT";
@@ -52,6 +56,7 @@ namespace FingerprintLockManager
 
         /// <summary>重启设备（上位机 -> 下位机）</summary>
         public const string CmdReboot = "REBOOT";
+        public const string CmdRebootAck = "REBOOT_ACK";
 
         /// <summary>状态上报（下位机 -> 上位机）</summary>
         public const string CmdStatusReport = "STATUS_REPORT";
@@ -73,6 +78,9 @@ namespace FingerprintLockManager
 
         /// <summary>应答（下位机 -> 上位机，对下发命令的确认）</summary>
         public const string CmdAck = "ACK";
+
+        /// <summary>命令处理失败响应</summary>
+        public const string CmdError = "ERROR";
 
         // ===== SD 卡集中存储命令（上位机 <-> 根节点） =====
 
@@ -149,7 +157,7 @@ namespace FingerprintLockManager
         /// </summary>
         /// <param name="type">命令类型枚举</param>
         /// <returns>对应的命令字符串；未知类型返回 null</returns>
-        public static string ToCmdString(CommandType type)
+        public static string? ToCmdString(CommandType type)
         {
             switch (type)
             {
@@ -173,6 +181,7 @@ namespace FingerprintLockManager
                 case CommandType.ConfigSaved: return CmdConfigSaved;
                 case CommandType.Heartbeat: return CmdHeartbeat;
                 case CommandType.Ack: return CmdAck;
+                case CommandType.Error: return CmdError;
                 case CommandType.SdQuery: return CmdSdQuery;
                 case CommandType.SdQueryResponse: return CmdSdQueryResponse;
                 case CommandType.SdQueryPart: return CmdSdQueryPart;
@@ -220,6 +229,7 @@ namespace FingerprintLockManager
                 case CmdConfigSaved: return CommandType.ConfigSaved;
                 case CmdHeartbeat: return CommandType.Heartbeat;
                 case CmdAck: return CommandType.Ack;
+                case CmdError: return CommandType.Error;
                 case CmdSdQuery: return CommandType.SdQuery;
                 case CmdSdQueryResponse: return CommandType.SdQueryResponse;
                 case CmdSdQueryPart: return CommandType.SdQueryPart;

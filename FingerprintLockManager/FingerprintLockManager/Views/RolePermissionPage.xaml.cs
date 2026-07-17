@@ -13,15 +13,31 @@ namespace FingerprintLockManager
         public RolePermissionPage()
         {
             InitializeComponent();
-            Loaded += (s, e) => LoadRolePermissions();
+            Loaded += async (s, e) => await LoadRolePermissionsAsync();
         }
 
         /// <summary>加载角色默认权限到矩阵</summary>
-        private void LoadRolePermissions()
+        private async Task LoadRolePermissionsAsync()
         {
-            var admin = App.RolePermissionService.GetRolePermission("admin");
-            var teacher = App.RolePermissionService.GetRolePermission("teacher");
-            var student = App.RolePermissionService.GetRolePermission("student");
+            SetBusy(true, "正在读取角色权限");
+            List<RolePermission> roles;
+            try
+            {
+                roles = await Task.Run(App.RolePermissionService.GetAll);
+            }
+            catch (RootDataUnavailableException ex)
+            {
+                PageStatusText.Text = ex.Message;
+                return;
+            }
+            finally
+            {
+                SetBusy(false);
+            }
+
+            var admin = roles.FirstOrDefault(r => r.Role == "admin") ?? DefaultRole("admin");
+            var teacher = roles.FirstOrDefault(r => r.Role == "teacher") ?? DefaultRole("teacher");
+            var student = roles.FirstOrDefault(r => r.Role == "student") ?? DefaultRole("student");
 
             AdminLock0.IsChecked = admin.Lock0;
             AdminLock1.IsChecked = admin.Lock1;
@@ -37,10 +53,11 @@ namespace FingerprintLockManager
             StudentLock1.IsChecked = student.Lock1;
             StudentLock2.IsChecked = student.Lock2;
             StudentLock3.IsChecked = student.Lock3;
+            PageStatusText.Text = "角色权限已从根节点加载";
         }
 
         /// <summary>保存按钮：保存 3 个角色默认权限，并批量同步到设备</summary>
-        private void SaveButton_Click(object sender, RoutedEventArgs e)
+        private async void SaveButton_Click(object sender, RoutedEventArgs e)
         {
             // 构造 3 个角色权限对象
             var now = DateTime.Now;
@@ -73,9 +90,22 @@ namespace FingerprintLockManager
             };
 
             // 保存
-            bool ok = App.RolePermissionService.SetRolePermission(admin)
-                      && App.RolePermissionService.SetRolePermission(teacher)
-                      && App.RolePermissionService.SetRolePermission(student);
+            SetBusy(true, "正在保存角色权限");
+            bool ok;
+            try
+            {
+                ok = await Task.Run(() => App.RolePermissionService.SetAll(
+                    new[] { admin, teacher, student }));
+            }
+            catch (RootDataUnavailableException ex)
+            {
+                MessageBox.Show(ex.Message, "根节点不可用", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+            finally
+            {
+                SetBusy(false);
+            }
 
             if (!ok)
             {
@@ -83,53 +113,47 @@ namespace FingerprintLockManager
                 return;
             }
 
-            MessageBox.Show("角色默认权限保存成功，即将批量同步到在线设备...", "成功",
-                MessageBoxButton.OK, MessageBoxImage.Information);
-
-            // 批量重新计算所有用户最终权限并同步到设备
-            SyncAllUsersToDevice();
+            bool sent;
+            try
+            {
+                sent = await Task.Run(App.CabinetSyncService.SyncAllPermissions);
+            }
+            catch (RootDataUnavailableException ex)
+            {
+                PageStatusText.Text = ex.Message;
+                sent = false;
+            }
+            PageStatusText.Text = sent ? "角色权限已保存并广播" : "角色权限已保存，广播未发送";
+            MessageBox.Show(sent ? "角色权限已保存并广播到柜子" : "角色权限已保存，当前未完成广播",
+                sent ? "保存完成" : "同步提示", MessageBoxButton.OK,
+                sent ? MessageBoxImage.Information : MessageBoxImage.Warning);
         }
 
         /// <summary>重新加载按钮</summary>
-        private void ReloadButton_Click(object sender, RoutedEventArgs e)
+        private async void ReloadButton_Click(object sender, RoutedEventArgs e)
         {
-            LoadRolePermissions();
+            await LoadRolePermissionsAsync();
         }
 
         /// <summary>
         /// 批量重新计算所有用户最终权限并同步到在线设备
         /// 对每个有指纹的用户，计算最终权限（角色默认 + 个人覆盖合并）后下发 SYNC_PERMISSIONS。
         /// </summary>
-        private void SyncAllUsersToDevice()
+        private static RolePermission DefaultRole(string role)
         {
-            try
+            return role switch
             {
-                var users = App.UserService.GetAllUsers();
-                int syncCount = 0;
-                foreach (var user in users)
-                {
-                    if (!user.FingerprintId.HasValue) continue;
+                "admin" => new RolePermission { Role = role, Lock0 = true, Lock1 = true, Lock2 = true, Lock3 = true },
+                "teacher" => new RolePermission { Role = role, Lock1 = true, Lock2 = true, Lock3 = true },
+                _ => new RolePermission { Role = role }
+            };
+        }
 
-                    bool[] permissions = App.RolePermissionService.GetFinalPermissions(user.UserId);
-
-                    var data = new Dictionary<string, object>
-                    {
-                        ["fingerprint_id"] = user.FingerprintId.Value,
-                        ["user_id"] = user.UserId,
-                        ["permissions"] = permissions
-                    };
-                    var msg = Message.Create(Protocol.CmdSyncPermissions, "", data);
-                    App.MeshBridge.Broadcast(msg);
-                    syncCount++;
-                }
-
-                MessageBox.Show($"已向在线设备广播 {syncCount} 个用户的最终权限。", "同步完成",
-                    MessageBoxButton.OK, MessageBoxImage.Information);
-            }
-            catch
-            {
-                // 同步失败忽略，不影响本地保存
-            }
+        private void SetBusy(bool busy, string? status = null)
+        {
+            SaveButton.IsEnabled = !busy;
+            ReloadButton.IsEnabled = !busy;
+            if (!string.IsNullOrEmpty(status)) PageStatusText.Text = status;
         }
     }
 }

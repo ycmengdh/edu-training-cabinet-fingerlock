@@ -13,27 +13,35 @@ namespace FingerprintLockManager
         public UserManagePage()
         {
             InitializeComponent();
-            Loaded += (s, e) =>
+            Loaded += async (s, e) =>
             {
                 RoleFilterBox.SelectedIndex = 0;
-                LoadUsers();
+                await LoadUsersAsync();
             };
         }
 
         /// <summary>加载用户列表（按筛选条件）</summary>
-        private void LoadUsers()
+        private async Task LoadUsersAsync()
         {
             string? role = GetSelectedRole();
-            List<User> users;
-            if (string.IsNullOrEmpty(role))
+            SetBusy(true, "正在读取根节点用户数据");
+            try
             {
-                users = App.UserService.GetAllUsers();
+                List<User> users = await Task.Run(() => string.IsNullOrEmpty(role)
+                    ? App.UserService.GetAllUsers()
+                    : App.UserService.GetUsersByRole(role));
+                UserDataGrid.ItemsSource = users;
+                PageStatusText.Text = $"共 {users.Count} 个用户";
             }
-            else
+            catch (RootDataUnavailableException ex)
             {
-                users = App.UserService.GetUsersByRole(role);
+                UserDataGrid.ItemsSource = null;
+                PageStatusText.Text = ex.Message;
             }
-            UserDataGrid.ItemsSource = users;
+            finally
+            {
+                SetBusy(false);
+            }
         }
 
         /// <summary>获取下拉框选中的角色</summary>
@@ -47,21 +55,21 @@ namespace FingerprintLockManager
         }
 
         /// <summary>角色筛选变化</summary>
-        private void RoleFilterBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        private async void RoleFilterBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
             // 加载完成前 SelectedIndex=0 会触发，此时控件可能未就绪
             if (!IsLoaded) return;
-            LoadUsers();
+            await LoadUsersAsync();
         }
 
         /// <summary>刷新按钮</summary>
-        private void RefreshButton_Click(object sender, RoutedEventArgs e)
+        private async void RefreshButton_Click(object sender, RoutedEventArgs e)
         {
-            LoadUsers();
+            await LoadUsersAsync();
         }
 
         /// <summary>添加用户</summary>
-        private void AddUserButton_Click(object sender, RoutedEventArgs e)
+        private async void AddUserButton_Click(object sender, RoutedEventArgs e)
         {
             // 弹出对话框输入姓名、角色与密码
             if (!ShowAddUserDialog(out string name, out string role, out string password))
@@ -94,10 +102,26 @@ namespace FingerprintLockManager
             };
 
             // 双层权限模型：无需初始化个人权限，用户默认继承角色权限模板
-            if (App.UserService.AddUser(user, password))
+            SetBusy(true, "正在保存用户");
+            bool added;
+            try
+            {
+                added = await Task.Run(() => App.UserService.AddUser(user, password));
+            }
+            catch (RootDataUnavailableException ex)
+            {
+                MessageBox.Show(ex.Message, "根节点不可用", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+            finally
+            {
+                SetBusy(false);
+            }
+
+            if (added)
             {
                 MessageBox.Show($"用户添加成功！\n用户ID：{userId}", "成功", MessageBoxButton.OK, MessageBoxImage.Information);
-                LoadUsers();
+                await LoadUsersAsync();
             }
             else
             {
@@ -106,7 +130,7 @@ namespace FingerprintLockManager
         }
 
         /// <summary>删除用户</summary>
-        private void DeleteUserButton_Click(object sender, RoutedEventArgs e)
+        private async void DeleteUserButton_Click(object sender, RoutedEventArgs e)
         {
             if (UserDataGrid.SelectedItem is not User selected)
             {
@@ -117,7 +141,16 @@ namespace FingerprintLockManager
             // 不允许删除最后一个管理员
             if (selected.Role == "admin")
             {
-                var admins = App.UserService.GetUsersByRole("admin");
+                List<User> admins;
+                try
+                {
+                    admins = await Task.Run(() => App.UserService.GetUsersByRole("admin"));
+                }
+                catch (RootDataUnavailableException ex)
+                {
+                    MessageBox.Show(ex.Message, "根节点不可用", MessageBoxButton.OK, MessageBoxImage.Error);
+                    return;
+                }
                 if (admins.Count <= 1)
                 {
                     MessageBox.Show("不允许删除最后一个管理员账号", "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -129,10 +162,30 @@ namespace FingerprintLockManager
                 "确认删除", MessageBoxButton.YesNo, MessageBoxImage.Question);
             if (result != MessageBoxResult.Yes) return;
 
-            if (App.UserService.DeleteUser(selected.UserId))
+            SetBusy(true, "正在删除用户");
+            bool deleted;
+            try
             {
+                deleted = await Task.Run(() => App.UserService.DeleteUser(selected.UserId));
+            }
+            catch (RootDataUnavailableException ex)
+            {
+                MessageBox.Show(ex.Message, "根节点不可用", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+            finally
+            {
+                SetBusy(false);
+            }
+
+            if (deleted)
+            {
+                if (selected.FingerprintId.HasValue)
+                {
+                    App.CabinetSyncService.DeleteFingerprintFromAll(selected.FingerprintId.Value);
+                }
                 MessageBox.Show("删除成功", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
-                LoadUsers();
+                await LoadUsersAsync();
             }
             else
             {
@@ -141,7 +194,7 @@ namespace FingerprintLockManager
         }
 
         /// <summary>分配指纹ID</summary>
-        private void AssignFingerprintButton_Click(object sender, RoutedEventArgs e)
+        private async void AssignFingerprintButton_Click(object sender, RoutedEventArgs e)
         {
             if (UserDataGrid.SelectedItem is not User selected)
             {
@@ -150,7 +203,16 @@ namespace FingerprintLockManager
             }
 
             // 默认建议下一个可用指纹ID
-            int suggestId = App.UserService.GetNextFingerprintId();
+            int suggestId;
+            try
+            {
+                suggestId = await Task.Run(App.UserService.GetNextFingerprintId);
+            }
+            catch (RootDataUnavailableException ex)
+            {
+                MessageBox.Show(ex.Message, "根节点不可用", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
             if (!ShowAssignFingerprintDialog(suggestId, out int fingerprintId))
             {
                 return;
@@ -163,7 +225,16 @@ namespace FingerprintLockManager
             }
 
             // 检查指纹ID是否已被占用
-            var existUser = App.UserService.GetUserByFingerprint(fingerprintId);
+            User? existUser;
+            try
+            {
+                existUser = await Task.Run(() => App.UserService.GetUserByFingerprint(fingerprintId));
+            }
+            catch (RootDataUnavailableException ex)
+            {
+                MessageBox.Show(ex.Message, "根节点不可用", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
             if (existUser != null && existUser.UserId != selected.UserId)
             {
                 MessageBox.Show($"指纹ID {fingerprintId} 已被用户「{existUser.Name}」占用", "提示",
@@ -171,15 +242,120 @@ namespace FingerprintLockManager
                 return;
             }
 
-            if (App.UserService.AssignFingerprint(selected.UserId, fingerprintId))
+            SetBusy(true, "正在写入指纹编号");
+            bool assigned;
+            try
             {
-                MessageBox.Show("指纹分配成功", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
-                LoadUsers();
+                assigned = await Task.Run(() => App.UserService.AssignFingerprint(selected.UserId, fingerprintId));
+            }
+            catch (RootDataUnavailableException ex)
+            {
+                MessageBox.Show(ex.Message, "根节点不可用", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+            finally
+            {
+                SetBusy(false);
+            }
+
+            if (assigned)
+            {
+                selected.FingerprintId = fingerprintId;
+                bool permissionsSynced;
+                try
+                {
+                    permissionsSynced = await Task.Run(App.CabinetSyncService.SyncAllPermissions);
+                }
+                catch (RootDataUnavailableException)
+                {
+                    permissionsSynced = false;
+                }
+                if (!permissionsSynced)
+                {
+                    MessageBox.Show("指纹编号已保存到根节点，但柜子权限尚未同步。柜子会继续使用原有本地权限。",
+                        "同步提示", MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
+
+                var cabinets = App.MeshBridge.GetOnlineDevices()
+                    .Where(d => !d.IsRoot)
+                    .Select(d => new Device
+                    {
+                        DeviceId = d.DeviceId,
+                        DeviceName = string.IsNullOrWhiteSpace(d.DeviceName) ? d.DeviceId : d.DeviceName,
+                        IsOnline = true,
+                        MeshMac = d.MeshMac,
+                        IpAddress = ""
+                    }).ToList();
+                string? targetDevice = SelectCabinet(cabinets);
+                if (!string.IsNullOrEmpty(targetDevice))
+                {
+                    var message = Message.Create(Protocol.CmdAddFingerprint, targetDevice, new
+                    {
+                        fingerprint_id = fingerprintId,
+                        user_id = selected.UserId
+                    });
+                    CommandResult command = await App.CommandService.SendAsync(targetDevice, message);
+                    MessageBox.Show(command.Success
+                            ? "目标柜子已进入指纹录入状态。"
+                            : $"指纹编号已保存，但柜子未确认录入：{command.ErrorMessage}",
+                        command.Success ? "开始录入" : "录入提示", MessageBoxButton.OK,
+                        command.Success ? MessageBoxImage.Information : MessageBoxImage.Warning);
+                }
+                else
+                {
+                    MessageBox.Show("指纹编号已写入根节点，但当前没有选择柜子执行录入。",
+                        "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
+                await LoadUsersAsync();
             }
             else
             {
                 MessageBox.Show("指纹分配失败", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
             }
+        }
+
+        private void SetBusy(bool busy, string? status = null)
+        {
+            RefreshButton.IsEnabled = !busy;
+            AddUserButton.IsEnabled = !busy;
+            AssignFingerprintButton.IsEnabled = !busy;
+            DeleteUserButton.IsEnabled = !busy;
+            RoleFilterBox.IsEnabled = !busy;
+            if (!string.IsNullOrEmpty(status)) PageStatusText.Text = status;
+        }
+
+        private string? SelectCabinet(List<Device> cabinets)
+        {
+            if (cabinets.Count == 0) return null;
+            if (cabinets.Count == 1) return cabinets[0].DeviceId;
+
+            var dialog = new Window
+            {
+                Title = "选择录入柜子",
+                Width = 360,
+                Height = 180,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Owner = Window.GetWindow(this),
+                ResizeMode = ResizeMode.NoResize,
+                Background = FindResource("BackgroundBrush") as Brush
+            };
+            var panel = new StackPanel { Margin = new Thickness(20) };
+            panel.Children.Add(new TextBlock { Text = "请选择执行指纹录入的柜子", Margin = new Thickness(0, 0, 0, 8) });
+            var combo = new ComboBox { ItemsSource = cabinets, DisplayMemberPath = "DeviceName" };
+            combo.SelectedIndex = 0;
+            panel.Children.Add(combo);
+            var ok = new Button { Content = "确定", Width = 70, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 14, 0, 0) };
+            panel.Children.Add(ok);
+            dialog.Content = panel;
+
+            string? selected = null;
+            ok.Click += (s, e) =>
+            {
+                selected = (combo.SelectedItem as Device)?.DeviceId;
+                dialog.Close();
+            };
+            dialog.ShowDialog();
+            return selected;
         }
 
         // ===== 代码构建的对话框（避免额外文件） =====

@@ -1,4 +1,4 @@
-using FreeSql.DataAnnotations;
+using Newtonsoft.Json;
 
 namespace FingerprintLockManager
 {
@@ -9,35 +9,35 @@ namespace FingerprintLockManager
     public class Device
     {
         /// <summary>设备唯一标识（主键，非自增，如 CABINET_001）</summary>
-        [Column(IsPrimary = true, IsIdentity = false)]
-        public string DeviceId { get; set; }
+        [JsonProperty("device_id")]
+        public string DeviceId { get; set; } = "";
 
         /// <summary>设备名称，如 "实训柜1"</summary>
-        [Column(IsNullable = false)]
-        public string DeviceName { get; set; }
+        [JsonProperty("device_name")]
+        public string DeviceName { get; set; } = "";
 
         /// <summary>设备 IP 地址（连接时记录）</summary>
-        [Column(IsNullable = true)]
-        public string IpAddress { get; set; }
+        [JsonProperty("ip_address")]
+        public string IpAddress { get; set; } = "";
 
         /// <summary>是否在线</summary>
-        [Column(IsNullable = false)]
+        [JsonProperty("online")]
         public bool IsOnline { get; set; }
 
         /// <summary>注册时间</summary>
-        [Column(IsNullable = false)]
+        [JsonProperty("register_time")]
         public DateTime RegisterTime { get; set; }
 
         /// <summary>最后在线时间</summary>
-        [Column(IsNullable = true)]
+        [JsonProperty("last_online_time")]
         public DateTime? LastOnlineTime { get; set; }
 
         /// <summary>Mesh MAC 地址（Root 路由用，可为空）</summary>
-        [Column(IsNullable = true)]
-        public string MeshMac { get; set; }
+        [JsonProperty("mesh_mac")]
+        public string MeshMac { get; set; } = "";
 
         /// <summary>是否为 Mesh 根节点（默认 false）</summary>
-        [Column(IsNullable = false)]
+        [JsonProperty("is_root")]
         public bool IsRoot { get; set; } = false;
     }
 }

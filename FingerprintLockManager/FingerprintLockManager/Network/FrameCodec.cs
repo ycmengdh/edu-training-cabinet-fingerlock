@@ -1,11 +1,13 @@
+using System.IO;
 using System.Text;
+using System.Threading;
 
 namespace FingerprintLockManager
 {
     /// <summary>
     /// 协议帧编解码器（二进制帧，用于串口等无消息边界的链路）
-    /// 帧格式：0xA5 0x5A + 版本1B + 长度2B(大端,JSON负载长度) + JSON负载 + CRC16 2B(大端,MODBUS)
-    /// 当前实现单帧编解码；分片重组为可选项，暂未实现（大负载建议应用层分片）。
+    /// 帧格式：0xA5 0x5A + 版本1B + 长度2B(大端,负载长度) + 负载 + CRC16 2B(大端,MODBUS)。
+    /// 版本 0x01 是普通 JSON 帧，版本 0x02 是带 4 字节头的 JSON 分片帧。
     /// </summary>
     public static class FrameCodec
     {
@@ -15,9 +17,16 @@ namespace FingerprintLockManager
 
         /// <summary>协议版本</summary>
         public const byte Version = 0x01;
+        public const byte FragmentVersion = 0x02;
 
-        /// <summary>JSON 负载最大长度（65535 受 2 字节长度字段限制）</summary>
-        public const int MaxPayload = 0xFFFF;
+        /// <summary>单个协议帧的最大负载长度</summary>
+        // ESP32 ProtocolFrame accepts normal payloads up to 1400 bytes and
+        // reserves four bytes for its fragment header.
+        public const int MaxPayload = 1404;
+        private const int NormalPayload = 1400;
+        private const int FragmentHeaderSize = 4;
+        public const int MaxMessagePayload = 65536;
+        private static int _nextFragmentId;
 
         /// <summary>帧最小长度（头2 + 版本1 + 长度2 + 负载0 + CRC2 = 7）</summary>
         public const int MinFrameLength = 7;
@@ -27,29 +36,53 @@ namespace FingerprintLockManager
         /// </summary>
         /// <param name="jsonString">JSON 字符串（不含尾部换行）</param>
         /// <returns>完整帧字节数组；输入为空返回 null</returns>
-        public static byte[] Encode(string jsonString)
+        public static byte[]? Encode(string? jsonString)
         {
             if (string.IsNullOrEmpty(jsonString)) return null;
 
             byte[] payload = Encoding.UTF8.GetBytes(jsonString);
-            if (payload.Length > MaxPayload) return null;
+            if (payload.Length > MaxMessagePayload) return null;
+            if (payload.Length <= NormalPayload)
+            {
+                return EncodeSingle(Version, payload);
+            }
 
+            int chunkSize = NormalPayload - FragmentHeaderSize;
+            int total = (payload.Length + chunkSize - 1) / chunkSize;
+            if (total > 255) return null;
+
+            byte messageId = (byte)(Interlocked.Increment(ref _nextFragmentId) & 0xFF);
+            if (messageId == 0) messageId = 1;
+            using var output = new MemoryStream();
+            for (int sequence = 0; sequence < total; sequence++)
+            {
+                int offset = sequence * chunkSize;
+                int length = Math.Min(chunkSize, payload.Length - offset);
+                byte[] fragment = new byte[FragmentHeaderSize + length];
+                fragment[0] = messageId;
+                fragment[1] = (byte)sequence;
+                fragment[2] = (byte)total;
+                Buffer.BlockCopy(payload, offset, fragment, FragmentHeaderSize, length);
+                output.Write(EncodeSingle(FragmentVersion, fragment));
+            }
+            return output.ToArray();
+        }
+
+        private static byte[] EncodeSingle(byte version, byte[] payload)
+        {
             // 帧：头2 + 版本1 + 长度2 + 负载 + CRC2
             byte[] frame = new byte[MinFrameLength + payload.Length];
             frame[0] = Head0;
             frame[1] = Head1;
-            frame[2] = Version;
-            // 长度大端
+            frame[2] = version;
             frame[3] = (byte)((payload.Length >> 8) & 0xFF);
             frame[4] = (byte)(payload.Length & 0xFF);
-
             Buffer.BlockCopy(payload, 0, frame, 5, payload.Length);
 
             // CRC-16/MODBUS 覆盖：版本 + 长度 + 负载
             ushort crc = CalcCrc16Modbus(frame, 2, 3 + payload.Length);
             frame[frame.Length - 2] = (byte)((crc >> 8) & 0xFF);
             frame[frame.Length - 1] = (byte)(crc & 0xFF);
-
             return frame;
         }
 
@@ -58,25 +91,12 @@ namespace FingerprintLockManager
         /// </summary>
         /// <param name="frame">完整帧字节数组</param>
         /// <returns>JSON 字符串；校验失败或长度不足返回 null</returns>
-        public static string Decode(byte[] frame)
+        public static string? Decode(byte[]? frame)
         {
-            if (frame == null || frame.Length < MinFrameLength) return null;
-
-            // 校验帧头
-            if (frame[0] != Head0 || frame[1] != Head1) return null;
-
-            // 解析长度（大端）
-            int payloadLen = (frame[3] << 8) | frame[4];
-            if (payloadLen < 0 || payloadLen > MaxPayload) return null;
-            if (frame.Length < MinFrameLength + payloadLen) return null;
-
-            // 校验 CRC（覆盖 版本 + 长度 + 负载）
-            ushort crcRecv = (ushort)((frame[5 + payloadLen] << 8) | frame[5 + payloadLen + 1]);
-            ushort crcCalc = CalcCrc16Modbus(frame, 2, 3 + payloadLen);
-            if (crcRecv != crcCalc) return null;
-
-            // 提取 JSON 负载
-            return Encoding.UTF8.GetString(frame, 5, payloadLen);
+            if (!TryDecodeFrame(frame, 0, frame?.Length ?? 0,
+                    out byte frameVersion, out byte[]? payload, out _)) return null;
+            if (frameVersion != Version || payload == null) return null;
+            return Encoding.UTF8.GetString(payload);
         }
 
         /// <summary>
@@ -89,16 +109,34 @@ namespace FingerprintLockManager
         /// <param name="json">输出的 JSON 字符串</param>
         /// <param name="consumed">本次消耗的字节数</param>
         /// <returns>成功解析一帧返回 true；数据不足或校验失败返回 false</returns>
-        public static bool TryDecode(byte[] buffer, int offset, int count, out string json, out int consumed)
+        public static bool TryDecode(byte[] buffer, int offset, int count, out string? json, out int consumed)
         {
             json = null;
             consumed = 0;
+            if (!TryDecodeFrame(buffer, offset, count, out byte frameVersion,
+                    out byte[]? payload, out consumed)) return false;
+            if (frameVersion != Version || payload == null) return false;
+            json = Encoding.UTF8.GetString(payload);
+            return true;
+        }
 
-            if (buffer == null || count < MinFrameLength) return false;
+        /// <summary>
+        /// 解析一个完整协议帧。该方法同时接受普通帧和分片帧，供流式重组器使用。
+        /// consumed 在帧校验失败时也会推进到该帧末尾，避免坏帧阻塞后续数据。
+        /// </summary>
+        internal static bool TryDecodeFrame(byte[]? buffer, int offset, int count,
+            out byte frameVersion, out byte[]? payload, out int consumed)
+        {
+            frameVersion = 0;
+            payload = null;
+            consumed = 0;
 
-            // 查找帧头
+            if (buffer == null || offset < 0 || count <= 0 ||
+                offset > buffer.Length || count > buffer.Length - offset) return false;
+
             int headIdx = -1;
-            for (int i = offset; i <= offset + count - 2; i++)
+            int end = offset + count;
+            for (int i = offset; i + 1 < end; i++)
             {
                 if (buffer[i] == Head0 && buffer[i + 1] == Head1)
                 {
@@ -106,14 +144,14 @@ namespace FingerprintLockManager
                     break;
                 }
             }
+
             if (headIdx < 0)
             {
-                // 丢弃帧头之前的字节
-                consumed = count;
+                // 保留末尾可能是半个帧头的 0xA5。
+                consumed = count > 0 && buffer[end - 1] == Head0 ? count - 1 : count;
                 return false;
             }
 
-            // 丢弃帧头之前字节
             int skip = headIdx - offset;
             int remaining = count - skip;
             if (remaining < MinFrameLength)
@@ -122,10 +160,17 @@ namespace FingerprintLockManager
                 return false;
             }
 
-            int payloadLen = (buffer[headIdx + 3] << 8) | buffer[headIdx + 4];
-            if (payloadLen < 0 || payloadLen > MaxPayload)
+            frameVersion = buffer[headIdx + 2];
+            if (frameVersion != Version && frameVersion != FragmentVersion)
             {
-                // 长度非法，跳过帧头继续
+                consumed = skip + 2;
+                return false;
+            }
+
+            int payloadLen = (buffer[headIdx + 3] << 8) | buffer[headIdx + 4];
+            int maxPayload = frameVersion == FragmentVersion ? MaxPayload : NormalPayload;
+            if (payloadLen <= 0 || payloadLen > maxPayload)
+            {
                 consumed = skip + 2;
                 return false;
             }
@@ -133,17 +178,19 @@ namespace FingerprintLockManager
             int frameLen = MinFrameLength + payloadLen;
             if (remaining < frameLen)
             {
-                // 数据不足，等待更多
                 consumed = skip;
                 return false;
             }
 
-            // 提取完整帧
-            byte[] frame = new byte[frameLen];
-            Buffer.BlockCopy(buffer, headIdx, frame, 0, frameLen);
-            json = Decode(frame);
+            ushort crcRecv = (ushort)((buffer[headIdx + 5 + payloadLen] << 8) |
+                                      buffer[headIdx + 5 + payloadLen + 1]);
+            ushort crcCalc = CalcCrc16Modbus(buffer, headIdx + 2, 3 + payloadLen);
             consumed = skip + frameLen;
-            return json != null;
+            if (crcRecv != crcCalc) return false;
+
+            payload = new byte[payloadLen];
+            Buffer.BlockCopy(buffer, headIdx + 5, payload, 0, payloadLen);
+            return true;
         }
 
         /// <summary>
@@ -174,6 +221,151 @@ namespace FingerprintLockManager
                 }
             }
             return crc;
+        }
+    }
+
+    /// <summary>
+    /// Incremental decoder for a byte stream. Serial and TCP have no message
+    /// boundaries, so callers must feed bytes here instead of using ReadLine.
+    /// </summary>
+    public sealed class FrameStreamDecoder
+    {
+        private byte[] _buffer = new byte[8192];
+        private int _count;
+        private byte _fragmentMessageId;
+        private int _fragmentTotal;
+        private DateTime _fragmentStartedUtc;
+        private readonly Dictionary<int, byte[]> _fragmentParts = new();
+
+        public void Append(byte[] data, int offset, int count, Action<string> onMessage)
+        {
+            if (data == null || count <= 0 || onMessage == null) return;
+            EnsureCapacity(_count + count);
+            Buffer.BlockCopy(data, offset, _buffer, _count, count);
+            _count += count;
+
+            while (_count > 0)
+            {
+                bool decoded = FrameCodec.TryDecodeFrame(_buffer, 0, _count,
+                    out byte version, out byte[]? payload, out int consumed);
+
+                if (consumed > 0)
+                {
+                    if (decoded && payload != null)
+                    {
+                        Remove(consumed);
+                        if (version == FrameCodec.Version)
+                        {
+                            onMessage(Encoding.UTF8.GetString(payload));
+                        }
+                        else if (version == FrameCodec.FragmentVersion)
+                        {
+                            HandleFragment(payload, onMessage);
+                        }
+                    }
+                    else
+                    {
+                        Remove(consumed);
+                    }
+                    continue;
+                }
+
+                // A partial frame remains in the buffer. Wait for more bytes.
+                break;
+            }
+        }
+
+        public void Reset()
+        {
+            _count = 0;
+            ResetFragment();
+        }
+
+        private void HandleFragment(byte[] payload, Action<string> onMessage)
+        {
+            if (payload.Length < 4) return;
+
+            byte messageId = payload[0];
+            int sequence = payload[1];
+            int total = payload[2];
+            if (total <= 0 || sequence >= total) return;
+
+            if (_fragmentParts.Count > 0 &&
+                (messageId != _fragmentMessageId || total != _fragmentTotal ||
+                 DateTime.UtcNow - _fragmentStartedUtc > TimeSpan.FromSeconds(5)))
+            {
+                ResetFragment();
+            }
+
+            if (_fragmentParts.Count == 0)
+            {
+                _fragmentMessageId = messageId;
+                _fragmentTotal = total;
+                _fragmentStartedUtc = DateTime.UtcNow;
+            }
+
+            if (_fragmentParts.ContainsKey(sequence)) return;
+            byte[] part = new byte[payload.Length - 4];
+            Buffer.BlockCopy(payload, 4, part, 0, part.Length);
+            _fragmentParts[sequence] = part;
+
+            if (_fragmentParts.Count < _fragmentTotal) return;
+
+            int length = 0;
+            for (int i = 0; i < _fragmentTotal; i++)
+            {
+                if (!_fragmentParts.TryGetValue(i, out var current))
+                {
+                    ResetFragment();
+                    return;
+                }
+                length += current.Length;
+                if (length > FrameCodec.MaxMessagePayload)
+                {
+                    ResetFragment();
+                    return;
+                }
+            }
+
+            byte[] complete = new byte[length];
+            int offset = 0;
+            for (int i = 0; i < _fragmentTotal; i++)
+            {
+                byte[] current = _fragmentParts[i];
+                Buffer.BlockCopy(current, 0, complete, offset, current.Length);
+                offset += current.Length;
+            }
+
+            ResetFragment();
+            onMessage(Encoding.UTF8.GetString(complete));
+        }
+
+        private void ResetFragment()
+        {
+            _fragmentMessageId = 0;
+            _fragmentTotal = 0;
+            _fragmentStartedUtc = default;
+            _fragmentParts.Clear();
+        }
+
+        private void EnsureCapacity(int required)
+        {
+            if (required <= _buffer.Length) return;
+            int size = _buffer.Length;
+            while (size < required) size *= 2;
+            Array.Resize(ref _buffer, size);
+        }
+
+        private void Remove(int count)
+        {
+            if (count >= _count)
+            {
+                _count = 0;
+                return;
+            }
+
+            Buffer.BlockCopy(_buffer, count, _buffer, 0, _count - count);
+            _count -= count;
         }
     }
 }

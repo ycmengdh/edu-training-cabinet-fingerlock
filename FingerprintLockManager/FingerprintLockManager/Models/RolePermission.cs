@@ -1,4 +1,4 @@
-using FreeSql.DataAnnotations;
+using Newtonsoft.Json;
 
 namespace FingerprintLockManager
 {
@@ -7,31 +7,30 @@ namespace FingerprintLockManager
     /// 描述某个角色对 4 把锁（Lock0-3）的默认访问权限，作为双层权限模型的第一层。
     /// 默认值：admin=[T,T,T,T]，teacher=[F,T,T,T]，student=[F,F,F,F]
     /// </summary>
-    [Table(Name = "role_permissions")]
     public class RolePermission
     {
         /// <summary>角色名（主键，非自增）：admin / teacher / student</summary>
-        [Column(IsPrimary = true, IsIdentity = false)]
-        public string Role { get; set; }
+        [JsonProperty("role")]
+        public string Role { get; set; } = "";
 
         /// <summary>Lock0（系统锁）默认权限</summary>
-        [Column(IsNullable = false)]
+        [JsonProperty("lock_0")]
         public bool Lock0 { get; set; }
 
         /// <summary>Lock1（实训柜1）默认权限</summary>
-        [Column(IsNullable = false)]
+        [JsonProperty("lock_1")]
         public bool Lock1 { get; set; }
 
         /// <summary>Lock2（实训柜2）默认权限</summary>
-        [Column(IsNullable = false)]
+        [JsonProperty("lock_2")]
         public bool Lock2 { get; set; }
 
         /// <summary>Lock3（实训柜3）默认权限</summary>
-        [Column(IsNullable = false)]
+        [JsonProperty("lock_3")]
         public bool Lock3 { get; set; }
 
         /// <summary>更新时间</summary>
-        [Column(IsNullable = false)]
+        [JsonProperty("update_time")]
         public DateTime UpdateTime { get; set; }
 
         /// <summary>

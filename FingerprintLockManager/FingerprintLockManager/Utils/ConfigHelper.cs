@@ -11,9 +11,6 @@ namespace FingerprintLockManager
         /// <summary>TCP 监听端口（STA 模式下上位机作为 TCP 服务端的监听端口）</summary>
         public int TcpPort { get; set; } = 8888;
 
-        /// <summary>SQLite 数据库文件路径</summary>
-        public string DatabasePath { get; set; } = "./Data/fingerprint_lock.db";
-
         /// <summary>默认 AP 模式下 ESP32 设备的 IP 地址</summary>
         public string ApDeviceIp { get; set; } = "192.168.4.1";
 
@@ -71,7 +68,7 @@ namespace FingerprintLockManager
         private const string ConfigFileName = "app_config.json";
 
         /// <summary>当前配置（懒加载，首次访问时从磁盘读取）</summary>
-        private static AppConfig _current;
+        private static AppConfig? _current;
 
         /// <summary>
         /// 获取当前配置实例
@@ -126,7 +123,7 @@ namespace FingerprintLockManager
                 if (config == null) return;
 
                 string path = GetConfigPath();
-                string dir = Path.GetDirectoryName(path);
+                string? dir = Path.GetDirectoryName(path);
                 if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                 {
                     Directory.CreateDirectory(dir);

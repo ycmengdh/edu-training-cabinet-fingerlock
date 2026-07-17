@@ -204,32 +204,37 @@ namespace FingerprintLockManager
             try
             {
                 bool connected = App.MeshBridge.IsConnected;
-                int onlineCount = App.MeshBridge.GetOnlineDevices().Count;
+                int onlineCount = App.MeshBridge.GetOnlineDevices().Count(d => !d.IsRoot);
                 OnlineDeviceCount.Text = onlineCount.ToString();
 
                 if (connected)
                 {
-                    MeshStatusText.Text = "Mesh链路：已连接";
+                    MeshStatusText.Text = "链路已连接";
                     MeshStatusDot.Fill = FindResource("SuccessBrush") as System.Windows.Media.Brush;
                 }
                 else
                 {
-                    MeshStatusText.Text = "Mesh链路：未连接";
+                    MeshStatusText.Text = "链路未连接";
                     MeshStatusDot.Fill = FindResource("DangerBrush") as System.Windows.Media.Brush;
                 }
 
                 // 传输类型显示
                 TransportTypeText.Text = App.MeshBridge.CurrentType switch
                 {
-                    TransportType.UsbSerial => "USB串口",
-                    TransportType.TcpClient => "TCP客户端",
-                    TransportType.TcpServer => "TCP服务端",
+                    TransportType.UsbSerial => "USB 串口",
+                    TransportType.TcpClient => "TCP 客户端",
+                    TransportType.TcpServer => "TCP 服务端",
                     _ => "未启动"
                 };
+
+                bool rootAvailable = App.SdStorageService.IsAvailable;
+                RootDataStatusText.Text = rootAvailable ? "根节点数据可用" : "根节点数据不可用";
+                RootDataStatusDot.Fill = FindResource(
+                    rootAvailable ? "SuccessBrush" : "DangerBrush") as System.Windows.Media.Brush;
             }
             catch
             {
-                MeshStatusText.Text = "Mesh链路：未启动";
+                MeshStatusText.Text = "链路未启动";
                 MeshStatusDot.Fill = FindResource("DangerBrush") as System.Windows.Media.Brush;
             }
 

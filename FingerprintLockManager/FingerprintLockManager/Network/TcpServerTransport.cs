@@ -10,7 +10,7 @@ namespace FingerprintLockManager
     /// TCP 服务端传输实现（由原 TcpServer 适配为 ITransport）
     /// 上位机监听 0.0.0.0:8888，等待 Mesh 根节点（Root）连接。
     /// Root 是唯一连接方，但保留多连接管理能力以保持扩展性。
-    /// 收到 Root 转发的消息后触发 LineReceived 事件。
+    /// 收到 Root 转发的二进制协议帧后触发 LineReceived 事件。
     /// </summary>
     public class TcpServerTransport : ITransport
     {
@@ -81,7 +81,7 @@ namespace FingerprintLockManager
             }
         }
 
-        /// <summary>发送一条 JSON 消息（自动补 \n），写入所有已连接客户端</summary>
+        /// <summary>发送一条 JSON 消息（编码为二进制协议帧）</summary>
         public bool Send(string jsonLine)
         {
             List<TcpClientState> snapshot;
@@ -91,11 +91,12 @@ namespace FingerprintLockManager
             }
             if (snapshot.Count == 0) return false;
 
-            string line = jsonLine?.TrimEnd('\n', '\r') + "\n";
+            byte[]? frame = FrameCodec.Encode(jsonLine.TrimEnd('\n', '\r'));
+            if (frame == null) return false;
             bool anySuccess = false;
             foreach (var c in snapshot)
             {
-                if (WriteToClient(c, line)) anySuccess = true;
+                if (WriteToClient(c, frame)) anySuccess = true;
             }
             return anySuccess;
         }
@@ -119,8 +120,7 @@ namespace FingerprintLockManager
                 var state = new TcpClientState
                 {
                     Client = client,
-                    Reader = new StreamReader(client.GetStream()),
-                    Writer = new StreamWriter(client.GetStream()) { NewLine = "\n", AutoFlush = true }
+                    Stream = client.GetStream()
                 };
 
                 bool wasEmpty;
@@ -140,13 +140,13 @@ namespace FingerprintLockManager
         {
             try
             {
+                byte[] buffer = new byte[8192];
                 while (_running && !token.IsCancellationRequested)
                 {
-                    var line = await state.Reader.ReadLineAsync();
-                    if (line == null) break;
-                    if (string.IsNullOrWhiteSpace(line)) continue;
-                    line = line.TrimEnd('\r');
-                    LineReceived?.Invoke(line);
+                    int count = await state.Stream.ReadAsync(buffer, 0, buffer.Length, token);
+                    if (count == 0) break;
+                    state.Decoder.Append(buffer, 0, count,
+                        json => LineReceived?.Invoke(json));
                 }
             }
             catch
@@ -166,15 +166,15 @@ namespace FingerprintLockManager
             }
         }
 
-        /// <summary>向单个客户端写入一行</summary>
-        private bool WriteToClient(TcpClientState state, string line)
+        /// <summary>向单个客户端写入一帧</summary>
+        private bool WriteToClient(TcpClientState state, byte[] frame)
         {
             try
             {
                 lock (state.SendLock)
                 {
-                    state.Writer.Write(line);
-                    state.Writer.Flush();
+                    state.Stream.Write(frame, 0, frame.Length);
+                    state.Stream.Flush();
                 }
                 return true;
             }
@@ -187,8 +187,7 @@ namespace FingerprintLockManager
         /// <summary>清理单个客户端资源</summary>
         private void CleanupClient(TcpClientState state)
         {
-            try { state.Writer?.Dispose(); } catch { }
-            try { state.Reader?.Dispose(); } catch { }
+            try { state.Stream?.Dispose(); } catch { }
             try { state.Client?.Close(); } catch { }
         }
 
@@ -196,8 +195,8 @@ namespace FingerprintLockManager
         private class TcpClientState
         {
             public TcpClient Client = null!;
-            public StreamReader Reader = null!;
-            public StreamWriter Writer = null!;
+            public NetworkStream Stream = null!;
+            public FrameStreamDecoder Decoder { get; } = new FrameStreamDecoder();
             public readonly object SendLock = new object();
         }
     }

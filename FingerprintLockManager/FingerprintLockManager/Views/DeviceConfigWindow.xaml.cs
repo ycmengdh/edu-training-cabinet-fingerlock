@@ -80,7 +80,7 @@ namespace FingerprintLockManager
 
                 UpdateConnectionStatus();
                 // 连接成功后自动读取配置
-                ReadConfig();
+                await ReadConfigAsync();
             }
             catch (Exception ex)
             {
@@ -92,25 +92,35 @@ namespace FingerprintLockManager
         }
 
         /// <summary>读取配置按钮</summary>
-        private void ReadConfigButton_Click(object sender, RoutedEventArgs e)
+        private async void ReadConfigButton_Click(object sender, RoutedEventArgs e)
         {
-            ReadConfig();
+            await ReadConfigAsync();
         }
 
         /// <summary>下发配置按钮</summary>
-        private void WriteConfigButton_Click(object sender, RoutedEventArgs e)
+        private async void WriteConfigButton_Click(object sender, RoutedEventArgs e)
         {
             if (!EnsureConnected()) return;
 
             var config = BuildConfigFromForm();
             var msg = Message.Create(Protocol.CmdWriteConfig, config.DeviceId ?? "", config);
-            _client!.Send(msg);
-
-            MessageBox.Show("配置已下发，等待设备确认...", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
+            SetActionState(false, "正在保存配置");
+            Message? response = await _client!.SendRequestAsync(msg, Protocol.CmdConfigSaved);
+            SetActionState(true, response == null ? "设备未确认配置" : "配置已保存");
+            if (response?.Cmd == Protocol.CmdConfigSaved)
+            {
+                MessageBox.Show("设备已确认配置保存成功", "保存完成",
+                    MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            else
+            {
+                MessageBox.Show(ReadError(response, "等待设备确认超时"), "保存失败",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+            }
         }
 
         /// <summary>重启设备按钮</summary>
-        private void RebootButton_Click(object sender, RoutedEventArgs e)
+        private async void RebootButton_Click(object sender, RoutedEventArgs e)
         {
             if (!EnsureConnected()) return;
 
@@ -119,7 +129,18 @@ namespace FingerprintLockManager
             if (result != MessageBoxResult.Yes) return;
 
             var msg = Message.Create(Protocol.CmdReboot, DeviceIdBox.Text?.Trim() ?? "");
-            _client!.Send(msg);
+            SetActionState(false, "正在发送重启命令");
+            Message? response = await _client!.SendRequestAsync(msg, Protocol.CmdRebootAck, 4000);
+            if (response?.Cmd == Protocol.CmdRebootAck)
+            {
+                StatusText.Text = "设备正在重启";
+            }
+            else
+            {
+                SetActionState(true, "设备未确认重启");
+                MessageBox.Show(ReadError(response, "等待设备确认超时"), "重启失败",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+            }
         }
 
         /// <summary>关闭按钮</summary>
@@ -131,11 +152,18 @@ namespace FingerprintLockManager
         // ===== 通信处理 =====
 
         /// <summary>读取设备配置</summary>
-        private void ReadConfig()
+        private async Task ReadConfigAsync()
         {
             if (_client == null || !_client.IsConnected) return;
             var msg = Message.Create(Protocol.CmdReadConfig, "");
-            _client.Send(msg);
+            SetActionState(false, "正在读取配置");
+            Message? response = await _client.SendRequestAsync(msg, Protocol.CmdConfigResponse);
+            SetActionState(true, response == null ? "读取配置超时" : "配置已读取");
+            if (response == null)
+            {
+                MessageBox.Show("等待设备配置响应超时", "读取失败",
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
         }
 
         /// <summary>收到消息回调（来自后台线程，需切到 UI 线程）</summary>
@@ -159,9 +187,6 @@ namespace FingerprintLockManager
                     FillConfigFromMessage(msg);
                     break;
 
-                case CommandType.ConfigSaved:
-                    MessageBox.Show("设备配置保存成功！", "成功", MessageBoxButton.OK, MessageBoxImage.Information);
-                    break;
             }
         }
 
@@ -229,6 +254,8 @@ namespace FingerprintLockManager
                 ConnectButton.Content = "断开";
                 ConnectButton.IsEnabled = true;
                 ReadConfigButton.IsEnabled = true;
+                WriteConfigButton.IsEnabled = true;
+                RebootButton.IsEnabled = true;
             }
             else
             {
@@ -237,6 +264,8 @@ namespace FingerprintLockManager
                 ConnectButton.Content = "连接设备";
                 ConnectButton.IsEnabled = true;
                 ReadConfigButton.IsEnabled = false;
+                WriteConfigButton.IsEnabled = false;
+                RebootButton.IsEnabled = false;
             }
         }
 
@@ -249,6 +278,30 @@ namespace FingerprintLockManager
                 return false;
             }
             return true;
+        }
+
+        private void SetActionState(bool enabled, string status)
+        {
+            bool connected = _client?.IsConnected == true;
+            ReadConfigButton.IsEnabled = enabled && connected;
+            WriteConfigButton.IsEnabled = enabled && connected;
+            RebootButton.IsEnabled = enabled && connected;
+            ConnectButton.IsEnabled = enabled;
+            StatusText.Text = status;
+        }
+
+        private static string ReadError(Message? response, string fallback)
+        {
+            if (response?.Cmd != Protocol.CmdError || response.Data == null) return fallback;
+            try
+            {
+                var data = Newtonsoft.Json.Linq.JObject.FromObject(response.Data);
+                return data["message"]?.ToString() ?? fallback;
+            }
+            catch
+            {
+                return fallback;
+            }
         }
 
         /// <summary>获取本机局域网 IP（用于预填服务器IP）</summary>

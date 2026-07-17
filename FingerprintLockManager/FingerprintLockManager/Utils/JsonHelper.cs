@@ -23,7 +23,7 @@ namespace FingerprintLockManager
         /// <returns>JSON 字符串；对象为 null 时返回 null</returns>
         public static string Serialize(object obj)
         {
-            if (obj == null) return null;
+            ArgumentNullException.ThrowIfNull(obj);
             return JsonConvert.SerializeObject(obj, _settings);
         }
 
@@ -34,7 +34,7 @@ namespace FingerprintLockManager
         /// <returns>带缩进的 JSON 字符串</returns>
         public static string SerializeIndented(object obj)
         {
-            if (obj == null) return null;
+            ArgumentNullException.ThrowIfNull(obj);
             return JsonConvert.SerializeObject(obj, Formatting.Indented, _settings);
         }
 
@@ -45,7 +45,7 @@ namespace FingerprintLockManager
         /// <typeparam name="T">目标类型</typeparam>
         /// <param name="json">JSON 字符串</param>
         /// <returns>反序列化后的对象；失败或输入为空时返回 default(T)</returns>
-        public static T Deserialize<T>(string json)
+        public static T? Deserialize<T>(string? json)
         {
             if (string.IsNullOrEmpty(json)) return default;
             try

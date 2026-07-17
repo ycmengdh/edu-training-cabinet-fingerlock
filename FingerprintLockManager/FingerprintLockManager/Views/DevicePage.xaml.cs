@@ -12,31 +12,46 @@ namespace FingerprintLockManager
         public DevicePage()
         {
             InitializeComponent();
-            Loaded += (s, e) =>
+            Loaded += async (s, e) =>
             {
                 if (LockSelectBox.Items.Count > 0)
                 {
                     LockSelectBox.SelectedIndex = 1; // 默认 Lock1
                 }
-                LoadDevices();
+                await LoadDevicesAsync();
             };
         }
 
         /// <summary>加载设备列表</summary>
-        private void LoadDevices()
+        private async Task LoadDevicesAsync()
         {
-            var devices = App.DeviceService.GetAllDevices();
-            DeviceDataGrid.ItemsSource = devices;
+            RefreshButton.IsEnabled = false;
+            PageStatusText.Text = "正在读取根节点数据";
+            try
+            {
+                var devices = await Task.Run(App.DeviceService.GetAllDevices);
+                DeviceDataGrid.ItemsSource = devices.Where(d => !d.IsRoot).ToList();
+                PageStatusText.Text = $"共 {DeviceDataGrid.Items.Count} 个柜子节点";
+            }
+            catch (RootDataUnavailableException ex)
+            {
+                DeviceDataGrid.ItemsSource = null;
+                PageStatusText.Text = ex.Message;
+            }
+            finally
+            {
+                RefreshButton.IsEnabled = true;
+            }
         }
 
         /// <summary>刷新按钮</summary>
-        private void RefreshButton_Click(object sender, RoutedEventArgs e)
+        private async void RefreshButton_Click(object sender, RoutedEventArgs e)
         {
-            LoadDevices();
+            await LoadDevicesAsync();
         }
 
         /// <summary>远程开锁：向选中设备发送 CONTROL_LOCK 命令</summary>
-        private void RemoteUnlockButton_Click(object sender, RoutedEventArgs e)
+        private async void RemoteUnlockButton_Click(object sender, RoutedEventArgs e)
         {
             if (DeviceDataGrid.SelectedItem is not Device selected)
             {
@@ -85,21 +100,18 @@ namespace FingerprintLockManager
                 ["operator"] = App.CurrentUser?.UserId ?? "system"
             };
             var msg = Message.Create(Protocol.CmdControlLock, selected.DeviceId, data);
-            App.MeshBridge.SendToDevice(selected.DeviceId, msg);
-
-            // 记录日志
-            App.LogService.AddLog(new LogEntry
+            RemoteUnlockButton.IsEnabled = false;
+            var result = await App.CommandService.SendAsync(selected.DeviceId, msg);
+            RemoteUnlockButton.IsEnabled = true;
+            if (!result.Success)
             {
-                DeviceId = selected.DeviceId,
-                UserId = App.CurrentUser?.UserId ?? "",
-                LockId = lockId,
-                Action = "remote_open",
-                Result = "success",
-                Reason = "",
-                CreateTime = DateTime.Now
-            });
+                MessageBox.Show(result.ErrorMessage, "开锁失败",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
 
-            MessageBox.Show($"已向设备「{selected.DeviceName}」发送 Lock{lockId} 开锁指令", "成功",
+            // 开锁日志由柜子记录并上报根节点，上位机不重复写日志表。
+            MessageBox.Show($"设备「{selected.DeviceName}」已确认 Lock {lockId} 开锁", "开锁完成",
                 MessageBoxButton.OK, MessageBoxImage.Information);
         }
     }

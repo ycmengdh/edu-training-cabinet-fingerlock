@@ -8,10 +8,10 @@ namespace FingerprintLockManager
     public class DeviceClient
     {
         /// <summary>设备 ID（设备注册后由消息同步，或上层手动设置）</summary>
-        public string DeviceId { get; set; }
+        public string DeviceId { get; set; } = "";
 
         /// <summary>设备名称</summary>
-        public string DeviceName { get; set; }
+        public string DeviceName { get; set; } = "";
 
         /// <summary>是否在线</summary>
         public bool IsOnline { get; set; }
@@ -23,7 +23,7 @@ namespace FingerprintLockManager
         public DateTime LastSeen { get; set; }
 
         /// <summary>Mesh MAC 地址（Root 路由用）</summary>
-        public string MeshMac { get; set; }
+        public string MeshMac { get; set; } = "";
 
         /// <summary>是否为 Mesh 根节点</summary>
         public bool IsRoot { get; set; }
@@ -53,7 +53,7 @@ namespace FingerprintLockManager
         /// </summary>
         /// <param name="cmd">命令字符串</param>
         /// <param name="data">附加数据，可为 null</param>
-        public void Send(string cmd, object data = null)
+        public void Send(string cmd, object? data = null)
         {
             var msg = Message.Create(cmd, DeviceId, data);
             Send(msg);

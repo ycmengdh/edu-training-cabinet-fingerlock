@@ -1,91 +1,27 @@
 namespace FingerprintLockManager
 {
     /// <summary>
-    /// 登录认证服务
-    /// 负责用户登录验证（所有角色）与密码修改（加盐哈希）
+    /// 登录认证服务。账号和密码哈希从根节点 users.json 读取。
     /// </summary>
     public class AuthService
     {
-        /// <summary>
-        /// 用户登录验证（所有角色均可登录）
-        /// </summary>
-        /// <param name="userId">用户 ID</param>
-        /// <param name="password">明文密码</param>
-        /// <returns>验证通过返回 User 对象；失败或异常返回 null</returns>
-        public User Login(string userId, string password)
+        public User? Login(string userId, string password)
         {
-            try
-            {
-                if (string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(password)) return null;
-
-                // 根据用户 ID 查询用户
-                var user = DatabaseService.Fsql.Select<User>()
-                    .Where(u => u.UserId == userId)
-                    .First();
-
-                if (user == null) return null;
-
-                // 校验密码（加盐哈希）
-                if (!PasswordHelper.VerifyPassword(password, user.PasswordSalt, user.PasswordHash))
-                {
-                    return null;
-                }
-
-                return user;
-            }
-            catch
-            {
-                return null;
-            }
+            if (string.IsNullOrWhiteSpace(userId) || string.IsNullOrEmpty(password)) return null;
+            var user = App.UserService.GetUser(userId);
+            if (user == null || !PasswordHelper.VerifyPassword(
+                    password, user.PasswordSalt, user.PasswordHash)) return null;
+            return user;
         }
 
-        /// <summary>
-        /// 修改密码（重新生成盐值并哈希）
-        /// </summary>
-        /// <param name="userId">用户 ID</param>
-        /// <param name="oldPassword">原明文密码</param>
-        /// <param name="newPassword">新明文密码</param>
-        /// <returns>修改成功返回 true；原密码错误或异常返回 false</returns>
         public bool ChangePassword(string userId, string oldPassword, string newPassword)
         {
-            try
-            {
-                if (string.IsNullOrEmpty(userId) ||
-                    string.IsNullOrEmpty(oldPassword) ||
-                    string.IsNullOrEmpty(newPassword))
-                {
-                    return false;
-                }
-
-                // 查询用户
-                var user = DatabaseService.Fsql.Select<User>()
-                    .Where(u => u.UserId == userId)
-                    .First();
-
-                if (user == null) return false;
-
-                // 校验原密码（加盐哈希）
-                if (!PasswordHelper.VerifyPassword(oldPassword, user.PasswordSalt, user.PasswordHash))
-                {
-                    return false;
-                }
-
-                // 生成新盐值并重新哈希
-                string newSalt = PasswordHelper.GenerateSalt();
-                user.PasswordSalt = newSalt;
-                user.PasswordHash = PasswordHelper.HashPassword(newPassword, newSalt);
-                user.UpdateTime = DateTime.Now;
-
-                int rows = DatabaseService.Fsql.Update<User>()
-                    .SetSource(user)
-                    .ExecuteAffrows();
-
-                return rows > 0;
-            }
-            catch
-            {
-                return false;
-            }
+            if (string.IsNullOrWhiteSpace(userId) || string.IsNullOrEmpty(oldPassword) ||
+                string.IsNullOrEmpty(newPassword)) return false;
+            var user = App.UserService.GetUser(userId);
+            if (user == null || !PasswordHelper.VerifyPassword(
+                    oldPassword, user.PasswordSalt, user.PasswordHash)) return false;
+            return App.UserService.ResetPassword(userId, newPassword);
         }
     }
 }

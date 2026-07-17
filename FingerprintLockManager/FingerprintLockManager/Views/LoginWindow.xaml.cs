@@ -9,25 +9,41 @@ namespace FingerprintLockManager
     /// </summary>
     public partial class LoginWindow : Window
     {
+        private bool _loggingIn;
+
         public LoginWindow()
         {
             InitializeComponent();
-            // 默认焦点在用户ID输入框
-            Loaded += (s, e) => UserIdBox.Focus();
+            Loaded += OnLoaded;
+            Closed += OnClosed;
+        }
+
+        private void OnLoaded(object sender, RoutedEventArgs e)
+        {
+            App.MeshBridge.ConnectionChanged += OnConnectionChanged;
+            App.MessageHandler.OnRootDeviceRegistered += OnRootRegistered;
+            UpdateLinkStatus();
+            UserIdBox.Focus();
+        }
+
+        private void OnClosed(object? sender, EventArgs e)
+        {
+            App.MeshBridge.ConnectionChanged -= OnConnectionChanged;
+            App.MessageHandler.OnRootDeviceRegistered -= OnRootRegistered;
         }
 
         /// <summary>登录按钮点击：验证账号密码</summary>
-        private void LoginButton_Click(object sender, RoutedEventArgs e)
+        private async void LoginButton_Click(object sender, RoutedEventArgs e)
         {
-            DoLogin();
+            await DoLoginAsync();
         }
 
         /// <summary>密码框回车登录</summary>
-        protected override void OnKeyDown(KeyEventArgs e)
+        protected override async void OnKeyDown(KeyEventArgs e)
         {
             if (e.Key == Key.Enter)
             {
-                DoLogin();
+                await DoLoginAsync();
             }
             base.OnKeyDown(e);
         }
@@ -35,8 +51,9 @@ namespace FingerprintLockManager
         /// <summary>
         /// 执行登录验证
         /// </summary>
-        private void DoLogin()
+        private async Task DoLoginAsync()
         {
+            if (_loggingIn) return;
             string userId = UserIdBox.Text?.Trim() ?? "";
             string password = PasswordBox.Password ?? "";
 
@@ -47,12 +64,40 @@ namespace FingerprintLockManager
                 return;
             }
 
-            // 调用认证服务验证
-            var user = App.AuthService.Login(userId, password);
+            if (!App.SdStorageService.IsAvailable)
+            {
+                HintText.Text = "根节点数据服务尚未连接";
+                HintText.Foreground = FindResource("WarningBrush") as System.Windows.Media.Brush;
+                return;
+            }
+
+            _loggingIn = true;
+            LoginButton.IsEnabled = false;
+            LoginButton.Content = "验证中";
+            HintText.Text = "验证中";
+            HintText.Foreground = FindResource("SubTextBrush") as System.Windows.Media.Brush;
+            User? user = null;
+            try
+            {
+                user = await Task.Run(() => App.AuthService.Login(userId, password));
+            }
+            catch (RootDataUnavailableException ex)
+            {
+                HintText.Text = ex.Message;
+                HintText.Foreground = FindResource("DangerBrush") as System.Windows.Media.Brush;
+            }
+            finally
+            {
+                _loggingIn = false;
+                LoginButton.IsEnabled = true;
+                LoginButton.Content = "登录";
+            }
+
             if (user == null)
             {
-                HintText.Text = "用户ID或密码错误";
-                HintText.Foreground = FindResource("DangerBrush") as System.Windows.Media.Brush;
+                if (HintText.Text == "验证中") HintText.Text = "用户 ID 或密码错误";
+                if (HintText.Text == "用户 ID 或密码错误")
+                    HintText.Foreground = FindResource("DangerBrush") as System.Windows.Media.Brush;
                 PasswordBox.Clear();
                 return;
             }
@@ -63,7 +108,26 @@ namespace FingerprintLockManager
             var main = new MainWindow();
             main.Show();
 
-            this.Close();
+            Close();
+        }
+
+        private void OnConnectionChanged(bool connected) =>
+            Dispatcher.BeginInvoke(new Action(UpdateLinkStatus));
+        private void OnRootRegistered(string deviceId) =>
+            Dispatcher.BeginInvoke(new Action(UpdateLinkStatus));
+
+        private void UpdateLinkStatus()
+        {
+            bool available = App.SdStorageService.IsAvailable;
+            LinkStatusText.Text = available ? "根节点数据已连接" : "等待根节点";
+            LinkStatusDot.Fill = FindResource(
+                available ? "SuccessBrush" : "DangerBrush") as System.Windows.Media.Brush;
+            if (!_loggingIn)
+            {
+                HintText.Text = available ? "请输入账号信息" : "根节点数据服务尚未连接";
+                HintText.Foreground = FindResource(
+                    available ? "SubTextBrush" : "WarningBrush") as System.Windows.Media.Brush;
+            }
         }
     }
 }

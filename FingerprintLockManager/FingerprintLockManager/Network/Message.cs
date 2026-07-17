@@ -4,11 +4,11 @@ namespace FingerprintLockManager
 {
     /// <summary>
     /// 通信消息模型
-    /// 上位机与 ESP32 之间通过 JSON 消息进行通信，消息以换行符 \n 分隔。
+    /// 上位机与 ESP32 之间通过二进制协议帧传输 JSON 消息。
     /// JSON 格式：
     /// {
     ///   "msg_id": "a1b2c3",
-    ///   "cmd": "FINGER_VERIFY",
+    ///   "cmd": "SYNC_PERMISSION",
     ///   "device_id": "CABINET_001",
     ///   "source_device_id": "CABINET_001",
     ///   "data": { ... },
@@ -19,27 +19,27 @@ namespace FingerprintLockManager
     {
         /// <summary>消息 ID（ACK 时原样回传，用于命令确认匹配）</summary>
         [JsonProperty("msg_id")]
-        public string MsgId { get; set; }
+        public string MsgId { get; set; } = "";
 
-        /// <summary>命令字段（与 CommandType 枚举对应，如 "FINGER_VERIFY"）</summary>
+        /// <summary>命令字段（与 CommandType 枚举对应）</summary>
         [JsonProperty("cmd")]
-        public string Cmd { get; set; }
+        public string Cmd { get; set; } = "";
 
         /// <summary>目标设备 ID（如 CABINET_001）</summary>
         [JsonProperty("device_id")]
-        public string DeviceId { get; set; }
+        public string DeviceId { get; set; } = "";
 
         /// <summary>原始发送方设备 ID（Root 转发时区分真实来源节点）</summary>
         [JsonProperty("source_device_id")]
-        public string SourceDeviceId { get; set; }
+        public string SourceDeviceId { get; set; } = "";
 
         /// <summary>消息数据负载（可为 null，反序列化后为 JObject）</summary>
         [JsonProperty("data")]
-        public object Data { get; set; }
+        public object? Data { get; set; }
 
         /// <summary>时间戳字符串（格式 yyyy-MM-dd HH:mm:ss）</summary>
         [JsonProperty("timestamp")]
-        public string Timestamp { get; set; }
+        public string Timestamp { get; set; } = "";
 
         /// <summary>
         /// 创建消息的静态方法
@@ -48,7 +48,7 @@ namespace FingerprintLockManager
         /// <param name="deviceId">设备 ID</param>
         /// <param name="data">附加数据，可为 null</param>
         /// <returns>构造好的 Message 对象（自动填充消息 ID 与当前时间戳）</returns>
-        public static Message Create(string cmd, string deviceId, object data = null)
+        public static Message Create(string cmd, string deviceId, object? data = null)
         {
             return new Message
             {
@@ -63,7 +63,7 @@ namespace FingerprintLockManager
         /// <summary>
         /// 创建消息的静态方法（指定消息 ID，用于 ACK 匹配）
         /// </summary>
-        public static Message Create(string msgId, string cmd, string deviceId, object data = null)
+        public static Message Create(string msgId, string cmd, string deviceId, object? data = null)
         {
             return new Message
             {
@@ -82,7 +82,7 @@ namespace FingerprintLockManager
         }
 
         /// <summary>
-        /// 将消息序列化为 JSON 字符串（带 \n 结尾，可直接写入网络流）
+        /// 将消息序列化为 JSON 字符串（带 \n 结尾，供兼容调用方使用；网络传输由 Transport 负责封帧）
         /// </summary>
         /// <returns>以换行符结尾的 JSON 字符串</returns>
         public string ToJson()
@@ -95,7 +95,7 @@ namespace FingerprintLockManager
         /// </summary>
         /// <param name="json">JSON 字符串（可带或不带尾部 \n）</param>
         /// <returns>解析后的 Message 对象；输入为空或解析失败时返回 null</returns>
-        public static Message FromJson(string json)
+        public static Message? FromJson(string? json)
         {
             if (string.IsNullOrEmpty(json)) return null;
             // 去除尾部换行符，避免反序列化异常

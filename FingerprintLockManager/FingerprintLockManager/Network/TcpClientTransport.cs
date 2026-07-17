@@ -1,5 +1,4 @@
 using System.Net.Sockets;
-using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -8,7 +7,7 @@ namespace FingerprintLockManager
     /// <summary>
     /// WiFi TCP 客户端传输实现
     /// 上位机主动连接 Mesh 根节点的 AP 热点（默认 192.168.4.1:8888）。
-    /// 断线后自动重连（3 秒间隔），按行读取（\n 分隔）。
+    /// 断线后自动重连（3 秒间隔），使用 ESP 二进制协议帧收发。
     /// </summary>
     public class TcpClientTransport : ITransport
     {
@@ -16,10 +15,10 @@ namespace FingerprintLockManager
         private const int ReconnectIntervalMs = 3000;
 
         private TcpClient? _client;
-        private StreamReader? _reader;
-        private StreamWriter? _writer;
+        private NetworkStream? _stream;
         private CancellationTokenSource? _cts;
         private readonly object _sendLock = new object();
+        private readonly FrameStreamDecoder _decoder = new FrameStreamDecoder();
         private volatile bool _connected;
         private bool _running;
 
@@ -32,7 +31,7 @@ namespace FingerprintLockManager
         /// <summary>是否已连接</summary>
         public bool IsConnected => _connected;
 
-        /// <summary>收到一行 JSON 消息事件</summary>
+        /// <summary>收到一条完整 JSON 消息事件</summary>
         public event Action<string>? LineReceived;
 
         /// <summary>连接状态变化事件（参数为是否已连接）</summary>
@@ -66,17 +65,18 @@ namespace FingerprintLockManager
             DisconnectInternal();
         }
 
-        /// <summary>发送一条 JSON 消息（自动补 \n）</summary>
+        /// <summary>发送一条 JSON 消息（编码为 ESP 二进制协议帧）</summary>
         public bool Send(string jsonLine)
         {
-            if (!_connected || _writer == null) return false;
+            if (!_connected || _stream == null) return false;
             try
             {
-                string line = jsonLine?.TrimEnd('\n', '\r') + "\n";
+                byte[]? frame = FrameCodec.Encode(jsonLine.TrimEnd('\n', '\r'));
+                if (frame == null) return false;
                 lock (_sendLock)
                 {
-                    _writer.Write(line);
-                    _writer.Flush();
+                    _stream.Write(frame, 0, frame.Length);
+                    _stream.Flush();
                 }
                 return true;
             }
@@ -99,9 +99,8 @@ namespace FingerprintLockManager
                     _client.NoDelay = true;
                     _connected = true;
 
-                    var stream = _client.GetStream();
-                    _reader = new StreamReader(stream);
-                    _writer = new StreamWriter(stream) { NewLine = "\n", AutoFlush = true };
+                    _stream = _client.GetStream();
+                    _decoder.Reset();
 
                     ConnectionChanged?.Invoke(true);
 
@@ -130,18 +129,18 @@ namespace FingerprintLockManager
             }
         }
 
-        /// <summary>接收循环：按行读取直到连接断开</summary>
+        /// <summary>接收循环：读取二进制帧直到连接断开</summary>
         private async Task ReceiveLoopAsync(CancellationToken token)
         {
             try
             {
+                byte[] buffer = new byte[8192];
                 while (_running && _connected && !token.IsCancellationRequested)
                 {
-                    var line = await _reader!.ReadLineAsync();
-                    if (line == null) break;
-                    if (string.IsNullOrWhiteSpace(line)) continue;
-                    line = line.TrimEnd('\r');
-                    LineReceived?.Invoke(line);
+                    int count = await _stream!.ReadAsync(buffer, 0, buffer.Length, token);
+                    if (count == 0) break;
+                    _decoder.Append(buffer, 0, count,
+                        json => LineReceived?.Invoke(json));
                 }
             }
             catch
@@ -155,11 +154,9 @@ namespace FingerprintLockManager
         {
             bool wasConnected = _connected;
             _connected = false;
-            try { _writer?.Dispose(); } catch { }
-            try { _reader?.Dispose(); } catch { }
+            try { _stream?.Dispose(); } catch { }
             try { _client?.Close(); } catch { }
-            _writer = null;
-            _reader = null;
+            _stream = null;
             _client = null;
 
             if (wasConnected)
