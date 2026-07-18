@@ -24,9 +24,11 @@ bool SdStorage::init() {
         return false;
     }
 
-    // Mount SD card in 1-bit mode, format if mount failed
-    if (!SD_MMC.begin(SD_MOUNT_POINT, true, true)) {
-        Debug::println(F("[SD] SD card mount failed! Check: 1. card inserted 2. wiring 3. pins"));
+    // Mount SD card in 1-bit mode. Never auto-format: missing card is a normal
+    // offline condition and must not wipe or crash the root node.
+    // mode1bit=true, format_if_mount_failed=false
+    if (!SD_MMC.begin(SD_MOUNT_POINT, true, false)) {
+        Debug::println(F("[SD] SD card mount failed (no card / wiring). Root continues without storage."));
         mounted = false;
         return false;
     }
@@ -105,6 +107,7 @@ bool SdStorage::ensureDir(const String &path) {
 
 bool SdStorage::atomicWrite(const String &path, const uint8_t *data, size_t len) {
     String tmpPath = path + ".tmp";
+    String bakPath = path + ".bak";
 
     // 1. Write temp file
     File f = SD_MMC.open(tmpPath, FILE_WRITE);
@@ -122,14 +125,25 @@ bool SdStorage::atomicWrite(const String &path, const uint8_t *data, size_t len)
         return false;
     }
 
-    // 2. Remove original file if exists
+    // 2. Keep previous good file as .bak
     if (SD_MMC.exists(path)) {
-        SD_MMC.remove(path);
+        if (SD_MMC.exists(bakPath)) {
+            SD_MMC.remove(bakPath);
+        }
+        if (!SD_MMC.rename(path, bakPath)) {
+            Debug::printf("[SD] Backup rename failed: %s -> %s\n", path.c_str(), bakPath.c_str());
+            SD_MMC.remove(tmpPath);
+            return false;
+        }
     }
 
-    // 3. Rename temp file to target
+    // 3. Promote temp to target
     if (!SD_MMC.rename(tmpPath, path)) {
         Debug::printf("[SD] Rename failed: %s -> %s\n", tmpPath.c_str(), path.c_str());
+        // Attempt rollback from .bak
+        if (SD_MMC.exists(bakPath)) {
+            SD_MMC.rename(bakPath, path);
+        }
         return false;
     }
 
@@ -142,9 +156,13 @@ bool SdStorage::readTable(const String &tableName, String &outJson) {
     if (!mounted) return false;
 
     String path = tablePath(tableName);
+    String bakPath = path + ".bak";
     File f = SD_MMC.open(path, FILE_READ);
     if (!f) {
-        return false;
+        // Fall back to last good backup after a crash mid-write.
+        f = SD_MMC.open(bakPath, FILE_READ);
+        if (!f) return false;
+        Debug::printf("[SD] reading backup table: %s\n", tableName.c_str());
     }
 
     outJson = "";

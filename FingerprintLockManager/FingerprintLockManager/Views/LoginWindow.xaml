@@ -26,9 +26,14 @@
                     <TextBlock Text="指纹权限管理系统" Foreground="#C8D1D4" FontSize="16" Margin="0,5,0,0"/>
                     <Rectangle Width="42" Height="3" Fill="{StaticResource AccentBrush}" HorizontalAlignment="Left" Margin="0,22,0,0"/>
                 </StackPanel>
-                <StackPanel Grid.Row="1" Orientation="Horizontal">
-                    <Ellipse x:Name="LinkStatusDot" Width="8" Height="8" Fill="{StaticResource DangerBrush}" VerticalAlignment="Center"/>
-                    <TextBlock x:Name="LinkStatusText" Text="等待根节点" Foreground="#9EAAAE" FontSize="11" Margin="8,0,0,0"/>
+                <StackPanel Grid.Row="1">
+                    <StackPanel Orientation="Horizontal">
+                        <Ellipse x:Name="LinkStatusDot" Width="8" Height="8" Fill="{StaticResource DangerBrush}" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="LinkStatusText" Text="等待根节点" Foreground="White" FontSize="12"
+                                   FontWeight="SemiBold" Margin="8,0,0,0"/>
+                    </StackPanel>
+                    <TextBlock x:Name="LinkStatusDetailText" Text="物理链路尚未连接" Foreground="#9EAAAE"
+                               FontSize="10" Margin="16,5,0,0" TextWrapping="Wrap"/>
                 </StackPanel>
             </Grid>
         </Border>
@@ -50,10 +55,24 @@
                 <TextBlock Text="密码" Style="{StaticResource LabelText}" Margin="0,18,0,7"/>
                 <PasswordBox x:Name="PasswordBox" Height="38"/>
                 <Button x:Name="LoginButton" Content="登录" Height="38" Margin="0,24,0,0" Click="LoginButton_Click"/>
+                <Grid Margin="0,10,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="10"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <Button x:Name="ConnectionSettingsButton" Content="连接设置" Height="38"
+                            Style="{StaticResource SecondaryButton}" Click="ConnectionSettingsButton_Click"/>
+                    <Button x:Name="CommunicationTestButton" Grid.Column="2" Content="通讯测试" Height="38"
+                            Style="{StaticResource SecondaryButton}" Click="CommunicationTestButton_Click"/>
+                </Grid>
             </StackPanel>
 
-            <TextBlock x:Name="HintText" Grid.Row="2" Text="请输入账号信息"
-                       Foreground="{StaticResource SubTextBrush}" FontSize="11" TextWrapping="Wrap"/>
+            <Border x:Name="HintBorder" Grid.Row="2" Background="{StaticResource BackgroundBrush}"
+                    BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="4" Padding="10,8">
+                <TextBlock x:Name="HintText" Text="请输入账号信息"
+                           Foreground="{StaticResource SubTextBrush}" FontSize="11" TextWrapping="Wrap"/>
+            </Border>
         </Grid>
     </Grid>
 </Window>

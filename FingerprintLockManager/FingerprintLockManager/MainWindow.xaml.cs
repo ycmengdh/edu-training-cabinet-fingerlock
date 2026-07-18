@@ -59,6 +59,12 @@ namespace FingerprintLockManager
 
         // ===== 导航按钮点击事件 =====
 
+        private void NavDashboard_Click(object sender, RoutedEventArgs e)
+        {
+            SelectNavButton(sender);
+            NavigateToPage(new DashboardPage());
+        }
+
         private void NavUserManage_Click(object sender, RoutedEventArgs e)
         {
             SelectNavButton(sender);
@@ -76,6 +82,12 @@ namespace FingerprintLockManager
         {
             SelectNavButton(sender);
             NavigateToPage(new RolePermissionPage());
+        }
+
+        private void NavClassManage_Click(object sender, RoutedEventArgs e)
+        {
+            SelectNavButton(sender);
+            NavigateToPage(new ClassManagePage());
         }
 
         private void NavDevice_Click(object sender, RoutedEventArgs e)
@@ -98,6 +110,30 @@ namespace FingerprintLockManager
             window.ShowDialog();
         }
 
+        private void NavSettings_Click(object sender, RoutedEventArgs e)
+        {
+            SelectNavButton(sender);
+            var window = new SettingsWindow { Owner = this };
+            window.ShowDialog();
+        }
+
+        private void ChangePasswordButton_Click(object sender, RoutedEventArgs e)
+        {
+            var window = new ChangePasswordWindow { Owner = this };
+            window.ShowDialog();
+        }
+
+        private void LogoutButton_Click(object sender, RoutedEventArgs e)
+        {
+            var result = MessageBox.Show("确认退出当前账号？", "退出登录",
+                MessageBoxButton.YesNo, MessageBoxImage.Question);
+            if (result != MessageBoxResult.Yes) return;
+
+            App.CurrentUser = null;
+            new LoginWindow().Show();
+            Close();
+        }
+
         /// <summary>
         /// 根据当前用户角色控制导航菜单可见性
         /// admin：全部可见
@@ -109,31 +145,39 @@ namespace FingerprintLockManager
             string role = App.CurrentUser?.Role ?? "student";
 
             // 默认全部可见
+            NavDashboard.Visibility = Visibility.Visible;
             NavUserManage.Visibility = Visibility.Visible;
             NavPermission.Visibility = Visibility.Visible;
             NavRolePermission.Visibility = Visibility.Visible;
+            NavClassManage.Visibility = Visibility.Visible;
             NavDevice.Visibility = Visibility.Visible;
             NavLog.Visibility = Visibility.Visible;
             NavDeviceConfig.Visibility = Visibility.Visible;
+            NavSettings.Visibility = Visibility.Visible;
 
             switch (role)
             {
                 case "admin":
-                    // 全部可见，角色权限仅 admin 可见
+                    // 全部可见
                     break;
                 case "teacher":
-                    // 隐藏角色权限和用户管理
+                    // 隐藏角色权限、用户管理、班级管理和系统设置
                     NavRolePermission.Visibility = Visibility.Collapsed;
                     NavUserManage.Visibility = Visibility.Collapsed;
+                    NavClassManage.Visibility = Visibility.Collapsed;
+                    NavSettings.Visibility = Visibility.Collapsed;
                     break;
                 case "student":
                 default:
                     // 学生仅见日志
+                    NavDashboard.Visibility = Visibility.Collapsed;
                     NavUserManage.Visibility = Visibility.Collapsed;
                     NavPermission.Visibility = Visibility.Collapsed;
                     NavRolePermission.Visibility = Visibility.Collapsed;
+                    NavClassManage.Visibility = Visibility.Collapsed;
                     NavDevice.Visibility = Visibility.Collapsed;
                     NavDeviceConfig.Visibility = Visibility.Collapsed;
+                    NavSettings.Visibility = Visibility.Collapsed;
                     break;
             }
         }
@@ -142,9 +186,11 @@ namespace FingerprintLockManager
         private Button? GetDefaultNavButton()
         {
             // 按顺序返回首个可见的导航按钮
+            if (NavDashboard.Visibility == Visibility.Visible) return NavDashboard;
             if (NavUserManage.Visibility == Visibility.Visible) return NavUserManage;
             if (NavPermission.Visibility == Visibility.Visible) return NavPermission;
             if (NavRolePermission.Visibility == Visibility.Visible) return NavRolePermission;
+            if (NavClassManage.Visibility == Visibility.Visible) return NavClassManage;
             if (NavDevice.Visibility == Visibility.Visible) return NavDevice;
             if (NavLog.Visibility == Visibility.Visible) return NavLog;
             if (NavDeviceConfig.Visibility == Visibility.Visible) return NavDeviceConfig;
@@ -154,9 +200,11 @@ namespace FingerprintLockManager
         /// <summary>根据按钮导航到对应页面</summary>
         private void NavigateByButton(Button btn)
         {
-            if (btn == NavUserManage) NavigateToPage(new UserManagePage());
+            if (btn == NavDashboard) NavigateToPage(new DashboardPage());
+            else if (btn == NavUserManage) NavigateToPage(new UserManagePage());
             else if (btn == NavPermission) NavigateToPage(new PermissionPage());
             else if (btn == NavRolePermission) NavigateToPage(new RolePermissionPage());
+            else if (btn == NavClassManage) NavigateToPage(new ClassManagePage());
             else if (btn == NavDevice) NavigateToPage(new DevicePage());
             else if (btn == NavLog) NavigateToPage(new LogPage());
         }

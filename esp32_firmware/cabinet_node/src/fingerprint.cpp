@@ -193,6 +193,11 @@ int Fingerprint::getFingerprintCount() {
     return 0;
 }
 
+bool Fingerprint::templateExists(int id) {
+    if (!ready || id < 0 || id >= FINGER_MAX_USERS) return false;
+    return finger.loadModel(id) == FINGERPRINT_OK;
+}
+
 bool Fingerprint::readTemplate(int id, uint8_t *outBuf, size_t bufSize, size_t &outLen) {
     outLen = 0;
     if (!ready) {

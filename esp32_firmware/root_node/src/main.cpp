@@ -97,9 +97,15 @@ void reportStatus() {
 
 // ====== Initialization ======
 void setup() {
-    // Serial at 921600 for host communication
+    // Host link is USB-Serial-JTAG on GPIO19/20 (Serial when CDC_ON_BOOT=1).
     Serial.begin(UPLINK_USB_BAUD);
-    delay(300);
+    unsigned long serialWait = millis();
+    while (!Serial && millis() - serialWait < 3000) {
+        delay(10);
+    }
+    delay(200);
+    Serial.print("\r\n[ROOT_BOOT] USB-SERIAL-JTAG ALIVE (GPIO19/20)\r\n");
+    Serial.flush();
     Debug::println();
     Debug::println(F("========================================"));
     Debug::println(F("  ESP32 Root Node Firmware v2.5"));
@@ -121,33 +127,73 @@ void setup() {
                   deviceConfig.uplink_mode == UPLINK_USB ? "USB" :
                   deviceConfig.uplink_mode == UPLINK_AP  ? "WiFi AP" : "WiFi STA");
 
-    // 3. Initialize SD card (SD_MMC 1-bit mode)
-#ifdef ENABLE_SD_CARD
-    SdStorage::init();
-#endif
-
-    // 4. Initialize display
-    Display::init();
-
-    // 5. Message handler init
+    // 3. Bring up the critical communication path before optional peripherals.
+    // SD/TFT faults must never prevent REGISTER or host command handling.
     MessageHandler::init();
-
-    // 6. Set message callbacks (must be before MeshComm::init)
     MeshComm::setMessageCallback(onMessageReceived);
     MeshComm::setMeshMessageCallback(onMeshMessage);
-
-    // 7. Initialize Mesh radio and root uplink bridge
     MeshComm::init();
-    // MeshComm owns the mesh radio; MeshBridge owns the root uplink.
     MeshBridge::init();
+    if (deviceConfig.uplink_mode == UPLINK_USB) {
+        Serial.printf("\r\n[ROOT_BOOT] PROTOCOL READY; baud=%d; frame=A5 5A\r\n",
+                      UPLINK_USB_BAUD);
+        Serial.flush();
+    }
 
-    // 8. NTP time sync (only for STA uplink mode)
+    // 4. Initialize SD card (optional). Missing card must not reboot the node.
+#ifdef ENABLE_SD_CARD
+    if (!SdStorage::init()) {
+        Debug::println(F("[MAIN] WARNING: SD unavailable — data APIs will fail until a card is mounted"));
+    }
+#else
+    Debug::println(F("[MAIN] SD support not compiled in"));
+#endif
+    // Keep two short ASCII boot markers even in framed USB mode. They let a
+    // plain serial terminal prove that SD failure did not stop the firmware;
+    // the host frame decoder treats these bytes as harmless unframed data.
+    if (deviceConfig.uplink_mode == UPLINK_USB) {
+#ifdef ENABLE_SD_CARD
+        Serial.printf("\r\n[ROOT_BOOT] SD=%s; continuing startup\r\n",
+                      SdStorage::isReady() ? "READY" : "UNAVAILABLE");
+#else
+        Serial.print("\r\n[ROOT_BOOT] SD=DISABLED; continuing startup\r\n");
+#endif
+        Serial.flush();
+    }
+    // The initial REGISTER is sent before SD initialization. Report once more
+    // now so the host receives the final storage state.
+    MeshBridge::announceRootStatus();
+
+    // 5. Initialize display last. The preceding marker pinpoints a panel/SPI
+    // fault without hiding the fact that the protocol bridge already started.
+    if (deviceConfig.uplink_mode == UPLINK_USB) {
+        Serial.print("\r\n[ROOT_BOOT] DISPLAY INIT\r\n");
+        Serial.flush();
+    }
+    Display::init();
+    if (!Display::isActive()) {
+        Debug::println(F("[MAIN] WARNING: display not active — continuing headless"));
+    }
+    if (deviceConfig.uplink_mode == UPLINK_USB) {
+        Serial.printf("\r\n[ROOT_BOOT] DISPLAY=%s; entering main loop\r\n",
+                      Display::isActive() ? "READY" : "OFF");
+        Serial.flush();
+    }
+
+    // 6. NTP time sync (only for STA uplink mode)
     initNTP();
 
     bootTime = millis();
     lastStatusReport = millis();
 
     Debug::println(F("[MAIN] Init done, entering main loop"));
+    Debug::printf("[MAIN] SD=%s Display=%s MeshInit=ok\n",
+#ifdef ENABLE_SD_CARD
+                  SdStorage::isReady() ? "ready" : "missing",
+#else
+                  "disabled",
+#endif
+                  Display::isActive() ? "ok" : "off");
     Debug::println(F("----------------------------------------"));
 }
 

@@ -41,13 +41,19 @@ namespace FingerprintLockManager
         public event Action<string>? OnConfigSaved;
 
         /// <summary>根节点注册事件：参数为 rootDeviceId（用于 SD 卡集中存储定位根节点）</summary>
-        public event Action<string>? OnRootDeviceRegistered;
+        public event Action<string, bool?>? OnRootDeviceRegistered;
 
         /// <summary>ACK 应答事件：参数为 msgId（原命令消息 ID）, result（结果/错误码）</summary>
         public event Action<string, string>? OnAckReceived;
 
         /// <summary>错误响应事件：msgId, errorCode, message</summary>
         public event Action<string, string, string>? OnErrorReceived;
+
+        /// <summary>指纹录入最终结果事件。</summary>
+        public event Action<string, FingerprintEnrollmentResult>? OnFingerprintEnrollmentResult;
+
+        /// <summary>权限事务提交结果事件：deviceId, msgId, result。</summary>
+        public event Action<string, string, string>? OnPermissionSyncResult;
 
         /// <summary>
         /// 处理收到的消息，根据 cmd 字段分发到对应处理方法
@@ -71,7 +77,8 @@ namespace FingerprintLockManager
             // part. Deduplicating it would discard all parts after the first.
             if (cmdType != CommandType.SdQueryPart && !string.IsNullOrEmpty(msg.MsgId))
             {
-                if (IsDuplicate(msg.MsgId)) return;
+                string sourceId = device?.DeviceId ?? msg.SourceDeviceId ?? msg.DeviceId;
+                if (IsDuplicate($"{sourceId}|{msg.Cmd}|{msg.MsgId}")) return;
             }
 
             switch (cmdType.Value)
@@ -96,6 +103,12 @@ namespace FingerprintLockManager
                     break;
                 case CommandType.Ack:
                     HandleAck(device, msg);
+                    break;
+                case CommandType.AddFingerprintResult:
+                    HandleFingerprintEnrollmentResult(device, msg);
+                    break;
+                case CommandType.SyncAck:
+                    HandlePermissionSyncResult(device, msg);
                     break;
                 case CommandType.Heartbeat:
                     // 心跳包：仅维持连接，无需业务处理
@@ -175,7 +188,7 @@ namespace FingerprintLockManager
             if (device != null) device.IsRoot = isRoot;
             if (isRoot && !string.IsNullOrEmpty(deviceId))
             {
-                OnRootDeviceRegistered?.Invoke(deviceId);
+                OnRootDeviceRegistered?.Invoke(deviceId, TryGetNullableBoolData(msg, "sd_ready"));
             }
         }
 
@@ -255,6 +268,46 @@ namespace FingerprintLockManager
             OnErrorReceived?.Invoke(msg.MsgId, code, message);
         }
 
+        private void HandleFingerprintEnrollmentResult(DeviceClient? device, Message msg)
+        {
+            string deviceId = device?.DeviceId ?? msg.SourceDeviceId ?? msg.DeviceId;
+            string result = TryGetStringData(msg, "result") ?? "fail";
+            string message = TryGetStringData(msg, "message") ?? "";
+            int fingerprintId = (msg.Data as JObject)?["fingerprint_id"]?.Value<int>() ?? -1;
+            string userId = TryGetStringData(msg, "user_id") ?? "";
+            byte[]? template = null;
+            string? hex = TryGetStringData(msg, "template_hex");
+            if (!string.IsNullOrEmpty(hex) && hex.Length % 2 == 0)
+            {
+                try
+                {
+                    template = Convert.FromHexString(hex);
+                }
+                catch (FormatException)
+                {
+                    message = "设备返回的指纹模板格式无效";
+                    result = "fail";
+                }
+            }
+
+            OnFingerprintEnrollmentResult?.Invoke(msg.MsgId, new FingerprintEnrollmentResult
+            {
+                Success = string.Equals(result, "success", StringComparison.OrdinalIgnoreCase),
+                DeviceId = deviceId,
+                UserId = userId,
+                FingerprintId = fingerprintId,
+                TemplateBytes = template,
+                ErrorMessage = message
+            });
+        }
+
+        private void HandlePermissionSyncResult(DeviceClient? device, Message msg)
+        {
+            string deviceId = device?.DeviceId ?? msg.SourceDeviceId ?? msg.DeviceId;
+            string result = TryGetStringData(msg, "result") ?? "fail";
+            OnPermissionSyncResult?.Invoke(deviceId, msg.MsgId, result);
+        }
+
         /// <summary>
         /// 从消息 Data 中尝试获取字符串字段
         /// Data 反序列化后为 JObject，支持按字段名查找
@@ -291,6 +344,15 @@ namespace FingerprintLockManager
             if (string.IsNullOrEmpty(val)) return false;
             return val.Equals("true", StringComparison.OrdinalIgnoreCase)
                 || val == "1";
+        }
+
+        private bool? TryGetNullableBoolData(Message msg, string fieldName)
+        {
+            string? val = TryGetStringData(msg, fieldName);
+            if (string.IsNullOrWhiteSpace(val)) return null;
+            if (val.Equals("true", StringComparison.OrdinalIgnoreCase) || val == "1") return true;
+            if (val.Equals("false", StringComparison.OrdinalIgnoreCase) || val == "0") return false;
+            return null;
         }
     }
 }

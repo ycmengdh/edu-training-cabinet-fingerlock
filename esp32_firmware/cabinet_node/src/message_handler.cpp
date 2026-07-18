@@ -11,6 +11,7 @@
 #include "lock_control.h"
 #include "mesh_comm.h"
 #include "logger.h"
+#include "message_hmac.h"
 #ifdef ENABLE_SD_CARD
 #include "sd_storage.h"
 #endif
@@ -30,6 +31,7 @@ MessageHandler::VerifyState MessageHandler::state = STATE_IDLE;
 unsigned long MessageHandler::stateEnterTime = 0;
 int  MessageHandler::enrollFingerprintId = -1;
 String MessageHandler::enrollUserId      = "";
+String MessageHandler::enrollRequestMsgId = "";
 int  MessageHandler::verifyFailCount     = 0;
 bool MessageHandler::permLostPending     = false;
 unsigned long MessageHandler::lastPermLostReport = 0;
@@ -47,6 +49,7 @@ void MessageHandler::init() {
     pendingFingerprintId = -1;
     stateEnterTime = millis();
     enrollFingerprintId = -1;
+    enrollRequestMsgId = "";
     verifyFailCount = 0;
     resetPermissionSync();
 
@@ -155,9 +158,11 @@ void MessageHandler::checkTimeout() {
     }
 }
 
-void MessageHandler::startEnroll(int fingerprintId, const String &userId) {
+void MessageHandler::startEnroll(int fingerprintId, const String &userId,
+                                 const String &requestMsgId) {
     enrollFingerprintId = fingerprintId;
     enrollUserId = userId;
+    enrollRequestMsgId = requestMsgId;
     setState(STATE_ENROLLING);
     Debug::printf("[MSG] start enroll fingerprint: id=%d user=%s\n", fingerprintId, userId.c_str());
 }
@@ -216,8 +221,27 @@ void MessageHandler::update() {
             bool ok = Fingerprint::enrollFingerprint(enrollFingerprintId);
             String data = "{\"fingerprint_id\":" + String(enrollFingerprintId) +
                           ",\"user_id\":\"" + enrollUserId + "\",\"result\":\"" +
-                          (ok ? "success" : "fail") + "\"}";
-            sendMessage("ADD_FINGERPRINT_RESULT", data);
+                          (ok ? "success" : "fail") + "\"";
+
+            if (ok) {
+                uint8_t templateBuf[FP_TEMPLATE_BUF_SIZE];
+                size_t templateLen = 0;
+                if (Fingerprint::readTemplate(enrollFingerprintId, templateBuf,
+                                              sizeof(templateBuf), templateLen)) {
+                    const char *hexChars = "0123456789ABCDEF";
+                    String templateHex;
+                    templateHex.reserve(templateLen * 2);
+                    for (size_t i = 0; i < templateLen; i++) {
+                        templateHex += hexChars[(templateBuf[i] >> 4) & 0x0F];
+                        templateHex += hexChars[templateBuf[i] & 0x0F];
+                    }
+                    data += ",\"template_hex\":\"" + templateHex + "\"";
+                }
+            } else {
+                data += ",\"message\":\"" + Fingerprint::lastError() + "\"";
+            }
+            data += "}";
+            sendMessage("ADD_FINGERPRINT_RESULT", data, enrollRequestMsgId);
 
             if (ok) {
                 // 更新指纹计数
@@ -229,6 +253,7 @@ void MessageHandler::update() {
             state = STATE_IDLE;
             enrollFingerprintId = -1;
             enrollUserId = "";
+            enrollRequestMsgId = "";
             break;
         }
 
@@ -272,6 +297,11 @@ void MessageHandler::handleIncoming(const String &message) {
 
     JsonObject data = doc["data"].as<JsonObject>();
 
+    if (!MessageHmac::verify(doc, cfg.hmac_enabled, cfg.hmac_key)) {
+        sendError(ERR_PERMISSION_DENIED, "hmac verification failed", msgId);
+        return;
+    }
+
     Debug::printf("[MSG] process command: %s (msg_id=%s)\n", cmd, msgId);
 
     // 命令分发
@@ -291,6 +321,8 @@ void MessageHandler::handleIncoming(const String &message) {
         cmdClearPermissions(data, msgId);
     } else if (strcmp(cmd, "ADD_FINGERPRINT") == 0) {
         cmdAddFingerprint(data, msgId);
+    } else if (strcmp(cmd, "RESTORE_FINGERPRINT") == 0) {
+        cmdRestoreFingerprint(data, msgId);
     } else if (strcmp(cmd, "DELETE_FINGERPRINT") == 0) {
         cmdDeleteFingerprint(data, msgId);
     } else if (strcmp(cmd, "DELETE_ALL_FINGERPRINTS") == 0) {
@@ -386,6 +418,7 @@ void MessageHandler::cmdSyncPermissions(const JsonObject &data, const String &ms
             perm.lock_perm[1] = lp["lock_1"] | false;
             perm.lock_perm[2] = lp["lock_2"] | false;
             perm.lock_perm[3] = lp["lock_3"] | false;
+            if (perm.role != ROLE_ADMIN) perm.lock_perm[0] = false;
 
             const char *expireDate = user["expire_date"] | "";
             if (strlen(expireDate) > 0) {
@@ -438,6 +471,7 @@ bool MessageHandler::parsePermission(const JsonObject &data, UserPermission &per
     perm.lock_perm[1] = lp["lock_1"] | false;
     perm.lock_perm[2] = lp["lock_2"] | false;
     perm.lock_perm[3] = lp["lock_3"] | false;
+    if (perm.role != ROLE_ADMIN) perm.lock_perm[0] = false;
 
     const char *expireDate = data["expire_date"] | "";
     perm.expire_days = strlen(expireDate) > 0
@@ -535,20 +569,83 @@ void MessageHandler::cmdClearPermissions(const JsonObject &data, const String &m
 void MessageHandler::cmdAddFingerprint(const JsonObject &data, const String &msgId) {
     int fpId = data["fingerprint_id"] | -1;
     String userId = data["user_id"] | "";
+    bool replace = data["replace"] | false;
     if (fpId < 0) {
         sendError(ERR_FP_TEMPLATE_FORMAT, "invalid fingerprint id", msgId);
         return;
     }
 
-    // 检查指纹 ID 是否已存在
-    UserPermission existing;
-    if (Storage::loadPermission(fpId, existing) && existing.valid) {
+    // 权限缓存中存在该 ID 并不代表传感器已经录入模板。
+    // 必须查询 AS608 自身，否则“先同步权限、后录入”的正常流程会被误判为重复。
+    if (Fingerprint::templateExists(fpId) && !replace) {
         sendError(ERR_FP_ID_EXISTS, "fingerprint id already exists", msgId);
         return;
     }
 
     sendAck(msgId, "enrolling");
-    startEnroll(fpId, userId);
+    startEnroll(fpId, userId, msgId);
+}
+
+void MessageHandler::cmdRestoreFingerprint(const JsonObject &data, const String &msgId) {
+    int fpId = data["fingerprint_id"] | -1;
+    String userId = data["user_id"] | "";
+    bool replace = data["replace"] | true;
+    const char *hex = data["template_hex"] | "";
+
+    if (fpId < 0 || fpId >= FINGER_MAX_USERS) {
+        sendError(ERR_FP_TEMPLATE_FORMAT, "invalid fingerprint id", msgId);
+        return;
+    }
+    if (state != STATE_IDLE) {
+        sendError(ERR_INTERNAL, "device busy", msgId);
+        return;
+    }
+    if (Fingerprint::templateExists(fpId) && !replace) {
+        sendError(ERR_FP_ID_EXISTS, "fingerprint id already exists", msgId);
+        return;
+    }
+
+    size_t hexLen = strlen(hex);
+    if (hexLen == 0 || (hexLen % 2) != 0 || hexLen / 2 > FP_TEMPLATE_BUF_SIZE) {
+        sendError(ERR_FP_TEMPLATE_FORMAT, "invalid template hex", msgId);
+        return;
+    }
+
+    size_t binLen = hexLen / 2;
+    uint8_t *buf = (uint8_t *)malloc(binLen);
+    if (!buf) {
+        sendError(ERR_FLASH_WRITE, "out of memory", msgId);
+        return;
+    }
+    for (size_t i = 0; i < binLen; i++) {
+        uint8_t hi = hexCharToVal(hex[i * 2]);
+        uint8_t lo = hexCharToVal(hex[i * 2 + 1]);
+        if (hi == 0xFF || lo == 0xFF) {
+            free(buf);
+            sendError(ERR_FP_TEMPLATE_FORMAT, "invalid template hex digit", msgId);
+            return;
+        }
+        buf[i] = (uint8_t)((hi << 4) | lo);
+    }
+
+    bool ok = Fingerprint::writeTemplate(fpId, buf, binLen);
+    free(buf);
+    if (!ok) {
+        sendError(ERR_FP_COMM_FAILED, Fingerprint::lastError().c_str(), msgId);
+        return;
+    }
+
+    DeviceConfig cfg;
+    Storage::loadDeviceConfig(cfg);
+    cfg.fingerprint_count = Fingerprint::getFingerprintCount();
+    Storage::saveDeviceConfig(cfg);
+
+    String respData = "{\"fingerprint_id\":" + String(fpId) +
+                      ",\"user_id\":\"" + userId + "\"" +
+                      ",\"result\":\"success\"}";
+    sendMessage("RESTORE_FINGERPRINT_RESULT", respData, msgId);
+    sendAck(msgId, "success");
+    Debug::printf("[MSG] restored fingerprint id=%d user=%s\n", fpId, userId.c_str());
 }
 
 void MessageHandler::cmdDeleteFingerprint(const JsonObject &data, const String &msgId) {
@@ -645,6 +742,8 @@ void MessageHandler::cmdWriteConfig(const JsonObject &data, const String &msgId)
     if (data.containsKey("wifi_password")) cfg.wifi_password = data["wifi_password"].as<String>();
     if (data.containsKey("server_ip"))   cfg.server_ip = data["server_ip"].as<String>();
     if (data.containsKey("server_port")) cfg.server_port = data["server_port"] | UPLINK_TCP_PORT;
+    if (data.containsKey("hmac_enabled")) cfg.hmac_enabled = data["hmac_enabled"].as<bool>();
+    if (data.containsKey("hmac_key")) cfg.hmac_key = data["hmac_key"].as<String>();
 
     Storage::saveDeviceConfig(cfg);
     sendMessage("CONFIG_SAVED", "{\"result\":\"success\"}", msgId);
@@ -1046,12 +1145,12 @@ void MessageHandler::cmdDeleteFpTemplate(const JsonObject &data, const String &m
                   userId.c_str(), ok ? "success" : "no template");
 }
 
-// hex 字符转数值
+#endif // ENABLE_SD_CARD
+
+// hex 字符转数值（RESTORE_FINGERPRINT 与 SD 模板编解码共用）
 uint8_t MessageHandler::hexCharToVal(char c) {
     if (c >= '0' && c <= '9') return c - '0';
     if (c >= 'A' && c <= 'F') return c - 'A' + 10;
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    return 0;
+    return 0xFF;
 }
-
-#endif // ENABLE_SD_CARD

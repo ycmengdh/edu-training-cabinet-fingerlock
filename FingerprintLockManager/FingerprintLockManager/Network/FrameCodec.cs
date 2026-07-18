@@ -237,7 +237,8 @@ namespace FingerprintLockManager
         private DateTime _fragmentStartedUtc;
         private readonly Dictionary<int, byte[]> _fragmentParts = new();
 
-        public void Append(byte[] data, int offset, int count, Action<string> onMessage)
+        public void Append(byte[] data, int offset, int count, Action<string> onMessage,
+            Action<byte[]>? onUnframedData = null)
         {
             if (data == null || count <= 0 || onMessage == null) return;
             EnsureCapacity(_count + count);
@@ -246,6 +247,23 @@ namespace FingerprintLockManager
 
             while (_count > 0)
             {
+                int headIndex = FindFrameHead();
+                if (headIndex != 0)
+                {
+                    int noiseCount = headIndex > 0
+                        ? headIndex
+                        : (_buffer[_count - 1] == FrameCodec.Head0 ? _count - 1 : _count);
+                    if (noiseCount > 0)
+                    {
+                        ReportUnframed(noiseCount, onUnframedData);
+                        Remove(noiseCount);
+                        continue;
+                    }
+
+                    // Only a possible first header byte remains.
+                    break;
+                }
+
                 bool decoded = FrameCodec.TryDecodeFrame(_buffer, 0, _count,
                     out byte version, out byte[]? payload, out int consumed);
 
@@ -265,6 +283,7 @@ namespace FingerprintLockManager
                     }
                     else
                     {
+                        ReportUnframed(consumed, onUnframedData);
                         Remove(consumed);
                     }
                     continue;
@@ -354,6 +373,24 @@ namespace FingerprintLockManager
             int size = _buffer.Length;
             while (size < required) size *= 2;
             Array.Resize(ref _buffer, size);
+        }
+
+        private int FindFrameHead()
+        {
+            for (int i = 0; i + 1 < _count; i++)
+            {
+                if (_buffer[i] == FrameCodec.Head0 && _buffer[i + 1] == FrameCodec.Head1)
+                    return i;
+            }
+            return -1;
+        }
+
+        private void ReportUnframed(int count, Action<byte[]>? callback)
+        {
+            if (callback == null || count <= 0) return;
+            byte[] bytes = new byte[count];
+            Buffer.BlockCopy(_buffer, 0, bytes, 0, count);
+            callback(bytes);
         }
 
         private void Remove(int count)

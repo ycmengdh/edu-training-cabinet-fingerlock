@@ -18,8 +18,12 @@
                 <TextBlock Text="柜子节点" Style="{StaticResource TitleText}"/>
                 <TextBlock x:Name="PageStatusText" Text="等待根节点数据" Foreground="{StaticResource SubTextBrush}" FontSize="11" Margin="0,4,0,0"/>
             </StackPanel>
-            <Button x:Name="RefreshButton" Grid.Column="1" Style="{StaticResource IconButton}"
-                    Content="&#xE72C;" ToolTip="刷新设备" Click="RefreshButton_Click" VerticalAlignment="Bottom"/>
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Bottom">
+                <Button x:Name="ResyncButton" Style="{StaticResource SecondaryButton}" Click="ResyncButton_Click"
+                        Content="重新同步权限" Margin="0,0,8,0"/>
+                <Button x:Name="RefreshButton" Style="{StaticResource IconButton}"
+                        Content="&#xE72C;" ToolTip="刷新设备" Click="RefreshButton_Click"/>
+            </StackPanel>
         </Grid>
 
         <Border Grid.Row="1" Style="{StaticResource ToolbarPanel}" Margin="0,0,0,12">
@@ -83,11 +87,17 @@
                             </DataTemplate>
                         </DataGridTemplateColumn.CellTemplate>
                     </DataGridTemplateColumn>
-                    <DataGridTextColumn Header="设备 ID" Binding="{Binding DeviceId}" Width="150"/>
-                    <DataGridTextColumn Header="设备名称" Binding="{Binding DeviceName}" Width="150"/>
-                    <DataGridTextColumn Header="IP 地址" Binding="{Binding IpAddress}" Width="130"/>
-                    <DataGridTextColumn Header="Mesh MAC" Binding="{Binding MeshMac}" Width="150"/>
-                    <DataGridTextColumn Header="最后在线" Binding="{Binding LastOnlineTime, StringFormat=yyyy-MM-dd HH:mm:ss}" Width="*"/>
+                    <DataGridTextColumn Header="设备 ID" Binding="{Binding DeviceId}" Width="120"/>
+                    <DataGridTextColumn Header="设备名称" Binding="{Binding DeviceName}" Width="110"/>
+                    <DataGridTextColumn Header="权限同步" Binding="{Binding PermissionSyncText}" Width="80"/>
+                    <DataGridTextColumn Header="权限版本" Binding="{Binding Status.PermissionVersion}" Width="80"/>
+                    <DataGridTextColumn Header="待传日志" Binding="{Binding Status.PendingLogCount}" Width="70"/>
+                    <DataGridTextColumn Header="指纹数" Binding="{Binding Status.FingerprintCount}" Width="64"/>
+                    <DataGridTextColumn Header="时间同步" Binding="{Binding TimeSyncedText}" Width="70"/>
+                    <DataGridTextColumn Header="固件" Binding="{Binding FirmwareVersion}" Width="80"/>
+                    <DataGridTextColumn Header="Mesh 层" Binding="{Binding Status.MeshLayer}" Width="64"/>
+                    <DataGridTextColumn Header="运行时长" Binding="{Binding Status.UptimeText}" Width="90"/>
+                    <DataGridTextColumn Header="最后在线" Binding="{Binding LastSeenTime, StringFormat=yyyy-MM-dd HH:mm:ss}" Width="*"/>
                 </DataGrid.Columns>
             </DataGrid>
         </Border>

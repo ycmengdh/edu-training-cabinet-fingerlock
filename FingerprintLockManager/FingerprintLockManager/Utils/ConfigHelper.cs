@@ -38,6 +38,12 @@ namespace FingerprintLockManager
         /// <summary>TCP 服务端监听端口（TcpServer 用，默认 8888）</summary>
         public int TcpServerPort { get; set; } = 8888;
 
+        /// <summary>是否对敏感命令附加 HMAC 签名（默认关闭，便于联调）</summary>
+        public bool HmacEnabled { get; set; }
+
+        /// <summary>HMAC 共享密钥（与设备 NVS 中配置一致）</summary>
+        public string HmacKey { get; set; } = "";
+
         /// <summary>
         /// 将 AppConfig 转为 MeshBridge 启动所需的 TransportConfig
         /// 注意：本类中存在同名 string 属性 TransportType，引用枚举需用全限定名避免歧义。

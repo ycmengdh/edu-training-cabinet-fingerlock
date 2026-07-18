@@ -18,12 +18,14 @@ namespace FingerprintLockManager
         // ===== 全局业务服务实例 =====
         public static AuthService AuthService { get; } = new AuthService();
         public static UserService UserService { get; } = new UserService();
+        public static ClassService ClassService { get; } = new ClassService();
         public static PermissionService PermissionService { get; } = new PermissionService();
         public static RolePermissionService RolePermissionService { get; } = new RolePermissionService();
         public static DeviceService DeviceService { get; } = new DeviceService();
         public static LogService LogService { get; } = new LogService();
         public static CabinetSyncService CabinetSyncService { get; } = new CabinetSyncService();
         public static CommandService CommandService { get; } = new CommandService();
+        public static SystemHealthService SystemHealthService { get; } = new SystemHealthService();
 
         /// <summary>SD 卡集中存储服务（通过 Mesh 与根节点 SD 卡通信）</summary>
         public static SdStorageService SdStorageService { get; } = new SdStorageService();
@@ -52,7 +54,7 @@ namespace FingerprintLockManager
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Mesh 链路启动失败：{ex.Message}\n请在主界面后检查链路配置。",
+                MessageBox.Show($"Mesh 链路启动失败：{ex.Message}\n请在登录页面打开“连接设置”检查链路配置。",
                     "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
             }
 
@@ -86,6 +88,8 @@ namespace FingerprintLockManager
             MessageHandler.OnLogReport += OnLogReport;
             MessageHandler.OnAckReceived += OnAckReceived;
             MessageHandler.OnErrorReceived += OnErrorReceived;
+            MessageHandler.OnFingerprintEnrollmentResult += OnFingerprintEnrollmentResult;
+            MessageHandler.OnPermissionSyncResult += OnPermissionSyncResult;
             MessageHandler.OnConfigSaved += OnConfigSavedHandler;
         }
 
@@ -131,12 +135,17 @@ namespace FingerprintLockManager
         }
 
         /// <summary>根节点注册：记录根节点 ID，供 SD 卡集中存储服务定位</summary>
-        private void OnRootDeviceRegistered(string rootDeviceId)
+        private void OnRootDeviceRegistered(string rootDeviceId, bool? storageReady)
         {
             try
             {
-                SdStorageService.RootDeviceId = rootDeviceId;
-                System.Diagnostics.Debug.WriteLine($"[APP] 根节点已注册: {rootDeviceId}，SD 卡存储服务可用");
+                SdStorageService.RegisterRoot(rootDeviceId, storageReady);
+                MeshBridge.Send(rootDeviceId, Protocol.CmdTimeSync, new
+                {
+                    timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
+                });
+                System.Diagnostics.Debug.WriteLine(
+                    $"[APP] 根节点已注册: {rootDeviceId}，SD={storageReady?.ToString() ?? "unknown"}");
             }
             catch
             {
@@ -162,6 +171,17 @@ namespace FingerprintLockManager
         private void OnErrorReceived(string msgId, string errorCode, string message)
         {
             CommandService.HandleError(msgId, errorCode, message);
+        }
+
+        private void OnFingerprintEnrollmentResult(
+            string msgId, FingerprintEnrollmentResult result)
+        {
+            CommandService.HandleFingerprintEnrollmentResult(msgId, result);
+        }
+
+        private void OnPermissionSyncResult(string deviceId, string msgId, string result)
+        {
+            CommandService.HandlePermissionSyncResult(deviceId, msgId, result);
         }
 
         /// <summary>链路建立后重新发现根节点；断线时立即结束所有 SD 请求。</summary>

@@ -29,10 +29,29 @@ namespace FingerprintLockManager
         private readonly ConcurrentDictionary<string, PendingRequest> _pending = new();
 
         /// <summary>根节点设备 ID（SD 卡命令发往根节点）</summary>
-        public string RootDeviceId { get; set; } = "";
+        public string RootDeviceId { get; private set; } = "";
+
+        /// <summary>null=旧固件未报告，true=就绪，false=已确认故障/未挂载。</summary>
+        public bool? IsStorageReady { get; private set; }
+
+        public string LastError { get; private set; } = "";
+
+        public bool IsRootConnected => App.MeshBridge.IsConnected &&
+            !string.IsNullOrEmpty(RootDeviceId);
 
         /// <summary>SD 卡是否可用（根节点在线且 SD 卡就绪）</summary>
-        public bool IsAvailable => App.MeshBridge.IsConnected && !string.IsNullOrEmpty(RootDeviceId);
+        public bool IsAvailable => IsRootConnected && IsStorageReady != false;
+
+        public event Action? StatusChanged;
+
+        public void RegisterRoot(string rootDeviceId, bool? storageReady)
+        {
+            RootDeviceId = rootDeviceId ?? "";
+            if (storageReady.HasValue || IsStorageReady == null)
+                IsStorageReady = storageReady;
+            LastError = IsStorageReady == false ? "根节点 SD 卡未就绪" : "";
+            StatusChanged?.Invoke();
+        }
 
         /// <summary>链路断开时清理根节点定位和所有等待中的请求。</summary>
         public void HandleConnectionChanged(bool connected)
@@ -40,6 +59,8 @@ namespace FingerprintLockManager
             if (connected) return;
 
             RootDeviceId = "";
+            IsStorageReady = null;
+            LastError = "根节点物理链路已断开";
             _fragments.Clear();
             foreach (var pair in _pending)
             {
@@ -48,6 +69,7 @@ namespace FingerprintLockManager
                     pending.Tcs.TrySetResult(null);
                 }
             }
+            StatusChanged?.Invoke();
         }
 
         /// <summary>
@@ -110,6 +132,7 @@ namespace FingerprintLockManager
                     Version = data?["version"]?.Value<uint>() ?? 0
                 };
             }
+            CaptureResponseError(resp);
             return null;
         }
 
@@ -286,6 +309,19 @@ namespace FingerprintLockManager
             _fragments.TryRemove(msg.MsgId, out _);
             tcs.TrySetResult(null);
             return null;
+        }
+
+        private void CaptureResponseError(Message? response)
+        {
+            if (response?.Cmd != Protocol.CmdError) return;
+            var data = response.Data as JObject;
+            string message = data?["message"]?.ToString() ?? "根节点返回错误";
+            LastError = message.Equals("sd card not ready", StringComparison.OrdinalIgnoreCase)
+                ? "根节点通讯正常，但 SD 卡未就绪"
+                : message;
+            if (message.Contains("sd card", StringComparison.OrdinalIgnoreCase))
+                IsStorageReady = false;
+            StatusChanged?.Invoke();
         }
 
         private static bool IsReadOnlyRequest(string cmd)

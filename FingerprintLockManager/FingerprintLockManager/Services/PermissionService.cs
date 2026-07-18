@@ -24,19 +24,24 @@ namespace FingerprintLockManager
 
         public bool[] GetFinalPermissions(string userId)
         {
-            var result = _rolePermissions.GetRolePermission(
-                App.UserService.GetUser(userId)?.Role ?? "student").ToArray();
+            string role = App.UserService.GetUser(userId)?.Role ?? "student";
+            var result = _rolePermissions.GetRolePermission(role).ToArray();
             foreach (var permission in GetUserPermissions(userId))
             {
                 if (permission.LockId >= 0 && permission.LockId < LockCount)
                     result[permission.LockId] = permission.HasAccess;
             }
+            PermissionPolicy.Enforce(role, result);
             return result;
         }
 
         public bool SetUserPermission(string userId, int lockId, bool hasAccess)
         {
             if (string.IsNullOrWhiteSpace(userId) || lockId < 0 || lockId >= LockCount)
+                return false;
+
+            var user = App.UserService.GetUser(userId);
+            if (user == null || (hasAccess && !PermissionPolicy.CanGrant(user.Role, lockId)))
                 return false;
 
             var permissions = _root.Read<UserPermission>("permissions");
@@ -62,10 +67,13 @@ namespace FingerprintLockManager
         public bool SetUserPermissions(string userId, Dictionary<int, bool> permissions)
         {
             if (string.IsNullOrWhiteSpace(userId) || permissions == null) return false;
+            var user = App.UserService.GetUser(userId);
+            if (user == null) return false;
             var items = _root.Read<UserPermission>("permissions");
             foreach (var pair in permissions)
             {
                 if (pair.Key < 0 || pair.Key >= LockCount) return false;
+                if (pair.Value && !PermissionPolicy.CanGrant(user.Role, pair.Key)) return false;
                 var existing = items.FirstOrDefault(p => p.UserId == userId && p.LockId == pair.Key);
                 if (existing == null)
                 {

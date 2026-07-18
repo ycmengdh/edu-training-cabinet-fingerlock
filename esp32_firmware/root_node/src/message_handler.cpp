@@ -11,6 +11,7 @@
 #include "mesh_comm.h"
 #include "mesh_bridge.h"
 #include "protocol_frame.h"
+#include "message_hmac.h"
 #ifdef ENABLE_SD_CARD
 #include "sd_storage.h"
 static void syncPermissionsToCabinet(const uint8_t *mac, const char *deviceId);
@@ -97,6 +98,13 @@ void MessageHandler::handleMeshMessage(const uint8_t *fromMac, const String &mes
 
         if (strcmp(cmd, "REGISTER") == 0) {
             syncPermissionsToCabinet(fromMac, deviceId);
+
+            time_t currentTime = time(nullptr);
+            if (currentTime > 1700000000) {
+                String timeData = "{\"timestamp\":" + String((uint32_t)currentTime) + "}";
+                MeshComm::sendToNode(fromMac, ProtocolFrame::buildMessage(
+                    "TIME_SYNC", deviceId, timeData));
+            }
         }
     }
 #endif
@@ -185,7 +193,8 @@ static void syncPermissionsToCabinet(const uint8_t *mac, const char *deviceId) {
     for (JsonObject user : users) {
         int fingerprintId = user["fingerprint_id"] | -1;
         const char *userId = user["user_id"] | "";
-        if (fingerprintId >= 0 && strlen(userId) > 0) total++;
+        bool enabled = user["enabled"] | true;
+        if (enabled && fingerprintId >= 0 && strlen(userId) > 0) total++;
     }
     if (total > PERM_MAX_USERS) {
         Debug::printf("[MSG] permission sync to %s aborted: %d users exceed limit\n",
@@ -202,7 +211,8 @@ static void syncPermissionsToCabinet(const uint8_t *mac, const char *deviceId) {
     for (JsonObject user : users) {
         int fingerprintId = user["fingerprint_id"] | -1;
         String userId = user["user_id"] | "";
-        if (fingerprintId < 0 || userId.length() == 0) continue;
+        bool enabled = user["enabled"] | true;
+        if (!enabled || fingerprintId < 0 || userId.length() == 0) continue;
 
         const char *role = user["role"] | "student";
         bool lockPermissions[4] = {false, false, false, false};
@@ -222,6 +232,10 @@ static void syncPermissionsToCabinet(const uint8_t *mac, const char *deviceId) {
                 lockPermissions[lockId] = overrideItem["has_access"] | false;
             }
         }
+
+        // Defense in depth: malformed or manually edited root data must not
+        // grant the system lock to a teacher or student.
+        if (strcmp(role, "admin") != 0) lockPermissions[0] = false;
 
         DynamicJsonDocument permissionDoc(1024);
         permissionDoc["version"] = globalVersion;
@@ -310,6 +324,12 @@ void MessageHandler::handleIncoming(const String &message) {
     }
 
     JsonObject data = doc["data"].as<JsonObject>();
+
+    if (!MessageHmac::verify(doc, cfg.hmac_enabled, cfg.hmac_key)) {
+        sendError(ERR_PERMISSION_DENIED, "hmac verification failed", msgId);
+        return;
+    }
+
     Debug::printf("[MSG] process command: %s (msg_id=%s)\n", cmd, msgId);
 
     if (strcmp(cmd, "REGISTER") == 0) {
@@ -361,7 +381,12 @@ void MessageHandler::cmdRegister(const String &msgId) {
     data += "\"mesh_mac\":\"" + MeshComm::getMeshMac() + "\",";
     data += "\"mesh_layer\":" + String(MeshComm::getMeshLayer()) + ",";
     data += "\"child_count\":" + String(MeshComm::getChildCount()) + ",";
-    data += "\"route_count\":" + String(MeshBridge::getRouteCount());
+    data += "\"route_count\":" + String(MeshBridge::getRouteCount()) + ",";
+#ifdef ENABLE_SD_CARD
+    data += "\"sd_ready\":" + String(SdStorage::isReady() ? "true" : "false");
+#else
+    data += "\"sd_ready\":false";
+#endif
     data += "}";
     // Use REGISTER for both announcement and request/response so the host can
     // discover the root even when it connected after boot.
@@ -374,6 +399,11 @@ void MessageHandler::cmdTimeSync(const JsonObject &data, const String &msgId) {
     if (timestamp > 0) {
         Storage::setUnixTime(timestamp);
         Debug::printf("[MSG] time synced: %u\n", timestamp);
+
+        String timeData = "{\"timestamp\":" + String(timestamp) + "}";
+        int propagated = MeshBridge::broadcastToCabinets(
+            ProtocolFrame::buildMessage("TIME_SYNC", "", timeData));
+        Debug::printf("[MSG] time propagated to %d cabinets\n", propagated);
         sendAck(msgId, "time_synced");
     } else {
         sendError(ERR_UNKNOWN_CMD, "invalid timestamp", msgId);
@@ -411,6 +441,8 @@ void MessageHandler::cmdWriteConfig(const JsonObject &data, const String &msgId)
     if (data.containsKey("wifi_password")) cfg.wifi_password = data["wifi_password"].as<String>();
     if (data.containsKey("server_ip"))   cfg.server_ip = data["server_ip"].as<String>();
     if (data.containsKey("server_port")) cfg.server_port = data["server_port"] | UPLINK_TCP_PORT;
+    if (data.containsKey("hmac_enabled")) cfg.hmac_enabled = data["hmac_enabled"].as<bool>();
+    if (data.containsKey("hmac_key")) cfg.hmac_key = data["hmac_key"].as<String>();
 
     Storage::saveDeviceConfig(cfg);
     sendMessage("CONFIG_SAVED", "{\"result\":\"success\"}", msgId);

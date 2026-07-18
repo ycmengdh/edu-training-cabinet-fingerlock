@@ -65,8 +65,20 @@ namespace FingerprintLockManager
         /// <summary>添加指纹（上位机 -> 下位机）</summary>
         AddFingerprint,
 
+        /// <summary>指纹录入最终结果（下位机 -> 上位机）</summary>
+        AddFingerprintResult,
+
+        /// <summary>权限事务提交结果（下位机 -> 上位机）</summary>
+        SyncAck,
+
         /// <summary>删除指纹（上位机 -> 下位机）</summary>
         DeleteFingerprint,
+
+        /// <summary>从备份恢复指纹模板到柜子</summary>
+        RestoreFingerprint,
+
+        /// <summary>指纹恢复结果（下位机 -> 上位机）</summary>
+        RestoreFingerprintResult,
 
         /// <summary>控制锁（上位机 -> 下位机）</summary>
         ControlLock,
@@ -103,6 +115,9 @@ namespace FingerprintLockManager
 
         /// <summary>心跳（双向，用于保活检测）</summary>
         Heartbeat,
+
+        /// <summary>Unix 时间同步（上位机/根节点 -> 柜子）</summary>
+        TimeSync,
 
         /// <summary>应答（下位机 -> 上位机，对下发命令的确认）</summary>
         Ack,

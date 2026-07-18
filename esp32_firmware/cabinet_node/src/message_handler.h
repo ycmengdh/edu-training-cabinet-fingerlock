@@ -41,7 +41,8 @@ public:
     static void setState(VerifyState s);
 
     // 触发录入指纹（由 ADD_FINGERPRINT 命令调用）
-    static void startEnroll(int fingerprintId, const String &userId);
+    static void startEnroll(int fingerprintId, const String &userId,
+                            const String &requestMsgId);
 
     // 发送带 msg_id 的消息（ACK 机制：msg_id 原样回传）
     static bool sendMessage(const String &cmd, const String &dataJson = "",
@@ -68,6 +69,7 @@ private:
     static void cmdCommitPermissionSync(const JsonObject &data, const String &msgId);
     static void cmdClearPermissions(const JsonObject &data, const String &msgId);
     static void cmdAddFingerprint(const JsonObject &data, const String &msgId);
+    static void cmdRestoreFingerprint(const JsonObject &data, const String &msgId);
     static void cmdDeleteFingerprint(const JsonObject &data, const String &msgId);
     static void cmdControlLock(const JsonObject &data, const String &msgId);
     static void cmdReadConfig(const String &msgId);
@@ -123,6 +125,7 @@ private:
     // 录入指纹相关
     static int enrollFingerprintId;
     static String enrollUserId;
+    static String enrollRequestMsgId;
     // 指纹验证失败次数（用于告警）
     static int verifyFailCount;
     // 权限丢失待上报标志

@@ -8,6 +8,7 @@ namespace FingerprintLockManager
         public List<RolePermission> GetAll()
         {
             return new RootDataService().Read<RolePermission>("role_permissions")
+                .Select(PermissionPolicy.Normalize)
                 .OrderBy(r => r.Role).ToList();
         }
 
@@ -20,6 +21,7 @@ namespace FingerprintLockManager
         public bool SetRolePermission(RolePermission rolePermission)
         {
             if (rolePermission == null || string.IsNullOrWhiteSpace(rolePermission.Role)) return false;
+            rolePermission = PermissionPolicy.Normalize(rolePermission);
             var root = new RootDataService();
             var items = root.Read<RolePermission>("role_permissions");
             rolePermission.UpdateTime = DateTime.Now;
@@ -34,6 +36,7 @@ namespace FingerprintLockManager
             if (rolePermissions == null) return false;
             var incoming = rolePermissions
                 .Where(r => r != null && !string.IsNullOrWhiteSpace(r.Role))
+                .Select(PermissionPolicy.Normalize)
                 .ToDictionary(r => r.Role, StringComparer.OrdinalIgnoreCase);
             if (incoming.Count == 0) return false;
 
@@ -71,6 +74,7 @@ namespace FingerprintLockManager
                 if (item.LockId >= 0 && item.LockId < result.Length)
                     result[item.LockId] = item.HasAccess;
             }
+            PermissionPolicy.Enforce(user.Role, result);
             return result;
         }
 

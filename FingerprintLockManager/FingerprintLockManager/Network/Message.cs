@@ -41,6 +41,18 @@ namespace FingerprintLockManager
         [JsonProperty("timestamp")]
         public string Timestamp { get; set; } = "";
 
+        /// <summary>HMAC 秒级时间戳（可选）</summary>
+        [JsonProperty("hmac_ts")]
+        public long? HmacTs { get; set; }
+
+        /// <summary>HMAC 随机数（可选）</summary>
+        [JsonProperty("hmac_nonce")]
+        public string? HmacNonce { get; set; }
+
+        /// <summary>HMAC-SHA256 十六进制签名（可选）</summary>
+        [JsonProperty("hmac_sig")]
+        public string? HmacSig { get; set; }
+
         /// <summary>
         /// 创建消息的静态方法
         /// </summary>
@@ -50,7 +62,7 @@ namespace FingerprintLockManager
         /// <returns>构造好的 Message 对象（自动填充消息 ID 与当前时间戳）</returns>
         public static Message Create(string cmd, string deviceId, object? data = null)
         {
-            return new Message
+            var message = new Message
             {
                 MsgId = GenerateMsgId(),
                 Cmd = cmd,
@@ -58,6 +70,8 @@ namespace FingerprintLockManager
                 Data = data,
                 Timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")
             };
+            MessageHmac.ApplyIfEnabled(message);
+            return message;
         }
 
         /// <summary>
@@ -65,7 +79,7 @@ namespace FingerprintLockManager
         /// </summary>
         public static Message Create(string msgId, string cmd, string deviceId, object? data = null)
         {
-            return new Message
+            var message = new Message
             {
                 MsgId = msgId,
                 Cmd = cmd,
@@ -73,6 +87,8 @@ namespace FingerprintLockManager
                 Data = data,
                 Timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")
             };
+            MessageHmac.ApplyIfEnabled(message);
+            return message;
         }
 
         /// <summary>生成短消息 ID（时间戳 + 随机数）</summary>

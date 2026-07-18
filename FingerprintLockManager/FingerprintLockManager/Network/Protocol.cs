@@ -32,12 +32,22 @@ namespace FingerprintLockManager
         public const string CmdSyncPermission = "SYNC_PERMISSION";
         public const string CmdCommitPermissionSync = "COMMIT_PERMISSION_SYNC";
         public const string CmdClearPermissions = "CLEAR_PERMISSIONS";
+        public const string CmdSyncAck = "SYNC_ACK";
 
         /// <summary>添加指纹（上位机 -> 下位机）</summary>
         public const string CmdAddFingerprint = "ADD_FINGERPRINT";
 
+        /// <summary>指纹录入最终结果（下位机 -> 上位机）</summary>
+        public const string CmdAddFingerprintResult = "ADD_FINGERPRINT_RESULT";
+
         /// <summary>删除指纹（上位机 -> 下位机）</summary>
         public const string CmdDeleteFingerprint = "DELETE_FINGERPRINT";
+
+        /// <summary>从备份恢复指纹模板到柜子传感器（上位机 -> 下位机）</summary>
+        public const string CmdRestoreFingerprint = "RESTORE_FINGERPRINT";
+
+        /// <summary>指纹恢复结果（下位机 -> 上位机）</summary>
+        public const string CmdRestoreFingerprintResult = "RESTORE_FINGERPRINT_RESULT";
 
         /// <summary>控制锁（上位机 -> 下位机）</summary>
         public const string CmdControlLock = "CONTROL_LOCK";
@@ -75,6 +85,9 @@ namespace FingerprintLockManager
 
         /// <summary>心跳（双向，用于保活检测）</summary>
         public const string CmdHeartbeat = "HEARTBEAT";
+
+        /// <summary>Unix 时间同步（上位机 -> 根节点 -> 柜子）</summary>
+        public const string CmdTimeSync = "TIME_SYNC";
 
         /// <summary>应答（下位机 -> 上位机，对下发命令的确认）</summary>
         public const string CmdAck = "ACK";
@@ -167,7 +180,11 @@ namespace FingerprintLockManager
                 case CommandType.AuthFail: return CmdAuthFail;
                 case CommandType.SyncPermissions: return CmdSyncPermissions;
                 case CommandType.AddFingerprint: return CmdAddFingerprint;
+                case CommandType.AddFingerprintResult: return CmdAddFingerprintResult;
+                case CommandType.SyncAck: return CmdSyncAck;
                 case CommandType.DeleteFingerprint: return CmdDeleteFingerprint;
+                case CommandType.RestoreFingerprint: return CmdRestoreFingerprint;
+                case CommandType.RestoreFingerprintResult: return CmdRestoreFingerprintResult;
                 case CommandType.ControlLock: return CmdControlLock;
                 case CommandType.ReadConfig: return CmdReadConfig;
                 case CommandType.WriteConfig: return CmdWriteConfig;
@@ -180,6 +197,7 @@ namespace FingerprintLockManager
                 case CommandType.StatusResponse: return CmdStatusResponse;
                 case CommandType.ConfigSaved: return CmdConfigSaved;
                 case CommandType.Heartbeat: return CmdHeartbeat;
+                case CommandType.TimeSync: return CmdTimeSync;
                 case CommandType.Ack: return CmdAck;
                 case CommandType.Error: return CmdError;
                 case CommandType.SdQuery: return CmdSdQuery;
@@ -215,7 +233,11 @@ namespace FingerprintLockManager
                 case CmdAuthFail: return CommandType.AuthFail;
                 case CmdSyncPermissions: return CommandType.SyncPermissions;
                 case CmdAddFingerprint: return CommandType.AddFingerprint;
+                case CmdAddFingerprintResult: return CommandType.AddFingerprintResult;
+                case CmdSyncAck: return CommandType.SyncAck;
                 case CmdDeleteFingerprint: return CommandType.DeleteFingerprint;
+                case CmdRestoreFingerprint: return CommandType.RestoreFingerprint;
+                case CmdRestoreFingerprintResult: return CommandType.RestoreFingerprintResult;
                 case CmdControlLock: return CommandType.ControlLock;
                 case CmdReadConfig: return CommandType.ReadConfig;
                 case CmdWriteConfig: return CommandType.WriteConfig;
@@ -228,6 +250,7 @@ namespace FingerprintLockManager
                 case CmdStatusResponse: return CommandType.StatusResponse;
                 case CmdConfigSaved: return CommandType.ConfigSaved;
                 case CmdHeartbeat: return CommandType.Heartbeat;
+                case CmdTimeSync: return CommandType.TimeSync;
                 case CmdAck: return CommandType.Ack;
                 case CmdError: return CommandType.Error;
                 case CmdSdQuery: return CommandType.SdQuery;

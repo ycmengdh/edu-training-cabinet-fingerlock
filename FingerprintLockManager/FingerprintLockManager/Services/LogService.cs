@@ -27,15 +27,30 @@ namespace FingerprintLockManager
         }
 
         public List<LogEntry> QueryLogs(string? deviceId = null, string? userId = null,
-            DateTime? startTime = null, DateTime? endTime = null, int limit = 1000)
+            DateTime? startTime = null, DateTime? endTime = null, string? result = null,
+            int limit = 1000, int offset = 0)
         {
-            var query = ReadLogs().AsEnumerable();
-            if (!string.IsNullOrWhiteSpace(deviceId)) query = query.Where(l => l.DeviceId == deviceId);
-            if (!string.IsNullOrWhiteSpace(userId)) query = query.Where(l => l.UserId == userId);
-            if (startTime.HasValue) query = query.Where(l => l.CreateTime >= startTime.Value);
-            if (endTime.HasValue) query = query.Where(l => l.CreateTime <= endTime.Value);
-            return query.OrderByDescending(l => l.CreateTime)
-                .Take(limit > 0 ? limit : 1000).ToList();
+            var query = Filter(deviceId, userId, startTime, endTime, result);
+            if (offset > 0) query = query.Skip(offset);
+            return query.Take(limit > 0 ? limit : 1000).ToList();
+        }
+
+        public int CountLogs(string? deviceId = null, string? userId = null,
+            DateTime? startTime = null, DateTime? endTime = null, string? result = null)
+        {
+            return Filter(deviceId, userId, startTime, endTime, result).Count();
+        }
+
+        public List<(string Reason, int Count)> AggregateFailReasons(
+            string? deviceId = null, string? userId = null,
+            DateTime? startTime = null, DateTime? endTime = null, int top = 5)
+        {
+            return Filter(deviceId, userId, startTime, endTime, "fail")
+                .GroupBy(l => string.IsNullOrWhiteSpace(l.Reason) ? "(无原因)" : l.Reason)
+                .Select(g => (Reason: g.Key, Count: g.Count()))
+                .OrderByDescending(x => x.Count)
+                .Take(top > 0 ? top : 5)
+                .ToList();
         }
 
         public long GetLogCount()
@@ -46,6 +61,22 @@ namespace FingerprintLockManager
         public void ClearLogs()
         {
             _root.Save("logs", Array.Empty<LogEntry>());
+        }
+
+        private IEnumerable<LogEntry> Filter(string? deviceId, string? userId,
+            DateTime? startTime, DateTime? endTime, string? result)
+        {
+            var query = ReadLogs().AsEnumerable();
+            if (!string.IsNullOrWhiteSpace(deviceId)) query = query.Where(l => l.DeviceId == deviceId);
+            if (!string.IsNullOrWhiteSpace(userId)) query = query.Where(l => l.UserId == userId);
+            if (startTime.HasValue) query = query.Where(l => l.CreateTime >= startTime.Value);
+            if (endTime.HasValue) query = query.Where(l => l.CreateTime <= endTime.Value);
+            if (!string.IsNullOrWhiteSpace(result))
+            {
+                query = query.Where(l =>
+                    string.Equals(l.Result, result, StringComparison.OrdinalIgnoreCase));
+            }
+            return query.OrderByDescending(l => l.CreateTime);
         }
 
         private List<LogEntry> ReadLogs()

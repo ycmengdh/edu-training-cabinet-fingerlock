@@ -35,7 +35,7 @@ namespace FingerprintLockManager
         public bool AddUser(User user, string password)
         {
             if (user == null || string.IsNullOrWhiteSpace(user.UserId) ||
-                string.IsNullOrEmpty(password)) return false;
+                !PasswordHelper.IsPasswordAcceptable(password)) return false;
 
             var users = _root.Read<User>("users");
             if (users.Any(u => u.UserId == user.UserId)) return false;
@@ -45,6 +45,7 @@ namespace FingerprintLockManager
             user.PasswordHash = PasswordHelper.HashPassword(password, salt);
             user.CreateTime = user.CreateTime == default ? DateTime.Now : user.CreateTime;
             user.UpdateTime = DateTime.Now;
+            user.Enabled = true;
             users.Add(user);
             return _root.Save("users", users);
         }
@@ -58,6 +59,7 @@ namespace FingerprintLockManager
             user.PasswordHash ??= "";
             user.CreateTime = user.CreateTime == default ? DateTime.Now : user.CreateTime;
             user.UpdateTime = DateTime.Now;
+            user.Enabled = true;
             users.Add(user);
             return _root.Save("users", users);
         }
@@ -105,13 +107,25 @@ namespace FingerprintLockManager
 
         public bool ResetPassword(string userId, string newPassword)
         {
-            if (string.IsNullOrWhiteSpace(userId) || string.IsNullOrEmpty(newPassword)) return false;
+            if (string.IsNullOrWhiteSpace(userId) ||
+                !PasswordHelper.IsPasswordAcceptable(newPassword)) return false;
             var users = _root.Read<User>("users");
             var user = users.FirstOrDefault(u => u.UserId == userId);
             if (user == null) return false;
 
             user.PasswordSalt = PasswordHelper.GenerateSalt();
             user.PasswordHash = PasswordHelper.HashPassword(newPassword, user.PasswordSalt);
+            user.UpdateTime = DateTime.Now;
+            return _root.Save("users", users);
+        }
+
+        public bool SetEnabled(string userId, bool enabled)
+        {
+            if (string.IsNullOrWhiteSpace(userId)) return false;
+            var users = _root.Read<User>("users");
+            var user = users.FirstOrDefault(u => u.UserId == userId);
+            if (user == null) return false;
+            user.Enabled = enabled;
             user.UpdateTime = DateTime.Now;
             return _root.Save("users", users);
         }

@@ -9,15 +9,30 @@ namespace FingerprintLockManager
         {
             if (string.IsNullOrWhiteSpace(userId) || string.IsNullOrEmpty(password)) return null;
             var user = App.UserService.GetUser(userId);
-            if (user == null || !PasswordHelper.VerifyPassword(
+            if (user == null || !user.Enabled || !PasswordHelper.VerifyPassword(
                     password, user.PasswordSalt, user.PasswordHash)) return null;
+
+            // Upgrade legacy hashes without making a successful login depend
+            // on the migration write succeeding.
+            if (PasswordHelper.NeedsRehash(user.PasswordHash))
+            {
+                try
+                {
+                    App.UserService.ResetPassword(userId, password);
+                }
+                catch (RootDataUnavailableException)
+                {
+                    // The next successful login will retry the migration.
+                }
+            }
             return user;
         }
 
         public bool ChangePassword(string userId, string oldPassword, string newPassword)
         {
             if (string.IsNullOrWhiteSpace(userId) || string.IsNullOrEmpty(oldPassword) ||
-                string.IsNullOrEmpty(newPassword)) return false;
+                !PasswordHelper.IsPasswordAcceptable(newPassword) ||
+                string.Equals(oldPassword, newPassword, StringComparison.Ordinal)) return false;
             var user = App.UserService.GetUser(userId);
             if (user == null || !PasswordHelper.VerifyPassword(
                     oldPassword, user.PasswordSalt, user.PasswordHash)) return false;

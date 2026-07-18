@@ -1,3 +1,6 @@
+using System.Text;
+using System.Threading;
+
 namespace FingerprintLockManager
 {
     /// <summary>
@@ -32,7 +35,13 @@ namespace FingerprintLockManager
     {
         private readonly object _devicesLock = new object();
         private readonly Dictionary<string, DeviceClient> _devices = new Dictionary<string, DeviceClient>();
+        private readonly object _traceLock = new object();
+        private readonly Queue<CommunicationTraceEntry> _recentTrace = new Queue<CommunicationTraceEntry>();
         private ITransport? _transport;
+        private long _sentCount;
+        private long _receivedCount;
+
+        private const int MaxTraceEntries = 500;
 
         /// <summary>当前传输实例</summary>
         public ITransport? Transport => _transport;
@@ -42,6 +51,31 @@ namespace FingerprintLockManager
 
         /// <summary>当前传输类型</summary>
         public TransportType? CurrentType { get; private set; }
+
+        public string TransportDescription => _transport?.Description ?? "链路未启动";
+
+        public string LastTransportError => _transport?.LastError ?? "";
+
+        public long SentCount => Interlocked.Read(ref _sentCount);
+
+        public long ReceivedCount => Interlocked.Read(ref _receivedCount);
+
+        public DateTime? LastSentTime { get; private set; }
+
+        public DateTime? LastReceivedTime { get; private set; }
+
+        public List<CommunicationTraceEntry> RecentTrace
+        {
+            get
+            {
+                lock (_traceLock) return _recentTrace.ToList();
+            }
+        }
+
+        public void ClearTrace()
+        {
+            lock (_traceLock) _recentTrace.Clear();
+        }
 
         /// <summary>
         /// 所有已发现的逻辑设备（返回列表副本，保证线程安全）
@@ -69,6 +103,9 @@ namespace FingerprintLockManager
         /// <summary>链路连接状态变化事件（参数为是否已连接）</summary>
         public event Action<bool>? ConnectionChanged;
 
+        /// <summary>通讯测试窗口使用的实时收发与链路诊断记录。</summary>
+        public event Action<CommunicationTraceEntry>? TraceAdded;
+
         /// <summary>
         /// 根据传输配置启动对应 ITransport 实现
         /// </summary>
@@ -81,6 +118,14 @@ namespace FingerprintLockManager
             CurrentType = config.Type;
             _transport.LineReceived += OnLineReceived;
             _transport.ConnectionChanged += OnConnectionChanged;
+            _transport.DiagnosticMessage += OnTransportDiagnostic;
+            _transport.UnframedDataReceived += OnUnframedDataReceived;
+
+            Interlocked.Exchange(ref _sentCount, 0);
+            Interlocked.Exchange(ref _receivedCount, 0);
+            LastSentTime = null;
+            LastReceivedTime = null;
+            RecordTrace(CommunicationDirection.System, "链路", $"启动 {_transport.Description}");
 
             _transport.Start();
         }
@@ -92,8 +137,11 @@ namespace FingerprintLockManager
 
             _transport.LineReceived -= OnLineReceived;
             _transport.ConnectionChanged -= OnConnectionChanged;
+            _transport.DiagnosticMessage -= OnTransportDiagnostic;
+            _transport.UnframedDataReceived -= OnUnframedDataReceived;
 
             try { _transport.Stop(); } catch { }
+            RecordTrace(CommunicationDirection.System, "链路", $"停止 {_transport.Description}");
             _transport = null;
             CurrentType = null;
 
@@ -122,7 +170,7 @@ namespace FingerprintLockManager
         {
             if (_transport == null || msg == null) return false;
             msg.DeviceId = deviceId;
-            return _transport.Send(JsonHelper.Serialize(msg));
+            return SendJson(JsonHelper.Serialize(msg));
         }
 
         /// <summary>
@@ -147,7 +195,7 @@ namespace FingerprintLockManager
         {
             if (_transport == null || msg == null) return false;
             msg.DeviceId = ""; // 空表示广播
-            return _transport.Send(JsonHelper.Serialize(msg));
+            return SendJson(JsonHelper.Serialize(msg));
         }
 
         /// <summary>
@@ -180,6 +228,9 @@ namespace FingerprintLockManager
         /// <summary>收到一行 JSON 的处理：解析消息 → 更新设备 → 触发事件</summary>
         private void OnLineReceived(string line)
         {
+            Interlocked.Increment(ref _receivedCount);
+            LastReceivedTime = DateTime.Now;
+            RecordTrace(CommunicationDirection.Receive, "协议 JSON", line);
             try
             {
                 var msg = Message.FromJson(line);
@@ -198,9 +249,9 @@ namespace FingerprintLockManager
                 // 触发消息事件，由 App 路由到 MessageHandler
                 MessageReceived?.Invoke(device, msg);
             }
-            catch
+            catch (Exception ex)
             {
-                // 解析异常忽略，避免影响接收循环
+                RecordTrace(CommunicationDirection.System, "解析失败", ex.Message);
             }
         }
 
@@ -242,12 +293,49 @@ namespace FingerprintLockManager
         private bool SendViaTransport(Message msg)
         {
             if (_transport == null) return false;
-            return _transport.Send(JsonHelper.Serialize(msg));
+            return SendJson(JsonHelper.Serialize(msg));
+        }
+
+        private bool SendJson(string json)
+        {
+            if (_transport == null)
+            {
+                RecordTrace(CommunicationDirection.System, "发送失败", "链路尚未启动");
+                return false;
+            }
+
+            bool sent = _transport.Send(json);
+            if (sent)
+            {
+                Interlocked.Increment(ref _sentCount);
+                LastSentTime = DateTime.Now;
+                RecordTrace(CommunicationDirection.Transmit, "协议 JSON", json);
+            }
+            else
+            {
+                string reason = string.IsNullOrWhiteSpace(_transport.LastError)
+                    ? "物理链路未连接或写入失败"
+                    : _transport.LastError;
+                RecordTrace(CommunicationDirection.System, "发送失败", reason);
+            }
+            return sent;
+        }
+
+        private void OnTransportDiagnostic(string message) =>
+            RecordTrace(CommunicationDirection.System, "传输层", message);
+
+        private void OnUnframedDataReceived(byte[] bytes)
+        {
+            if (bytes == null || bytes.Length == 0) return;
+            string content = FormatUnframedData(bytes);
+            RecordTrace(CommunicationDirection.Receive, "原始数据", content);
         }
 
         /// <summary>链路连接状态变化</summary>
         private void OnConnectionChanged(bool connected)
         {
+            RecordTrace(CommunicationDirection.System, "物理链路",
+                connected ? "已连接" : "已断开");
             ConnectionChanged?.Invoke(connected);
 
             // 链路断开时，标记所有设备离线
@@ -267,6 +355,40 @@ namespace FingerprintLockManager
                     }
                 }
             }
+        }
+
+        private void RecordTrace(CommunicationDirection direction, string category, string content)
+        {
+            const int maxContentLength = 16000;
+            if (content.Length > maxContentLength)
+                content = content.Substring(0, maxContentLength) + $"\n… 已截断 {content.Length - maxContentLength} 字符";
+
+            var entry = new CommunicationTraceEntry
+            {
+                Timestamp = DateTime.Now,
+                Direction = direction,
+                Category = category,
+                Content = content
+            };
+            lock (_traceLock)
+            {
+                _recentTrace.Enqueue(entry);
+                while (_recentTrace.Count > MaxTraceEntries) _recentTrace.Dequeue();
+            }
+            TraceAdded?.Invoke(entry);
+        }
+
+        private static string FormatUnframedData(byte[] bytes)
+        {
+            int printable = bytes.Count(b => b == 9 || b == 10 || b == 13 || (b >= 32 && b <= 126));
+            if (printable >= bytes.Length * 0.75)
+            {
+                return Encoding.UTF8.GetString(bytes).TrimEnd('\0', '\r', '\n');
+            }
+
+            int shown = Math.Min(bytes.Length, 128);
+            string hex = BitConverter.ToString(bytes, 0, shown).Replace('-', ' ');
+            return bytes.Length > shown ? $"HEX({bytes.Length}B) {hex} …" : $"HEX({bytes.Length}B) {hex}";
         }
     }
 }

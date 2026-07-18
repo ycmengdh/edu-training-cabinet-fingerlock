@@ -59,10 +59,15 @@
 #define TFT_DC   13
 #define TFT_RST  14
 
+// ESP32-S3: force SPI3 (HSPI) host. Default FSPI register mapping in this
+// TFT_eSPI revision can yield SPI_USER_REG -> 0x10 and StoreProhibited.
+#define USE_HSPI_PORT
+
 // ##################################################################################
 //
 // Section 7. SPI frequency
 //
 // ##################################################################################
 
-#define SPI_FREQUENCY  40000000
+// 27 MHz is more reliable than 40 MHz on short jumper wiring.
+#define SPI_FREQUENCY  27000000

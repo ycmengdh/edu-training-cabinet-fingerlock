@@ -2,6 +2,9 @@
  * display.cpp - TFT status display for Root Node
  * Simple text rendering on 0.96" ST7735 80x160 display via TFT_eSPI.
  * Updates every 1.5 seconds to show root node status.
+ *
+ * Display failure must never reboot the root node. SD-less bring-up and
+ * boards without a panel still need Mesh/USB uplink.
  */
 #include "display.h"
 #include "config.h"
@@ -12,12 +15,23 @@
 #ifdef ENABLE_SD_CARD
 #include "sd_storage.h"
 #endif
+
+// Set to 1 to skip TFT entirely (useful when panel is not wired).
+#ifndef ROOT_DISABLE_TFT
+#define ROOT_DISABLE_TFT 0
+#endif
+
+#if !ROOT_DISABLE_TFT
 #include <TFT_eSPI.h>
+#include <SPI.h>
+#endif
 
 bool Display::initialized = false;
 unsigned long Display::lastUpdate = 0;
 
+#if !ROOT_DISABLE_TFT
 static TFT_eSPI tft = TFT_eSPI();
+#endif
 
 #define DISPLAY_UPDATE_INTERVAL_MS  1500
 #define COLOR_BG      TFT_BLACK
@@ -28,6 +42,24 @@ static TFT_eSPI tft = TFT_eSPI();
 #define COLOR_TEXT    TFT_WHITE
 
 void Display::init() {
+#if ROOT_DISABLE_TFT
+    initialized = false;
+    Debug::println(F("[DISP] TFT disabled at compile time (ROOT_DISABLE_TFT=1)"));
+    return;
+#else
+    // Explicit SPI pin setup before TFT_eSPI register macros touch the bus.
+    // On ESP32-S3 a bad SPI host mapping can StoreProhibited (addr 0x10).
+    SPI.begin(TFT_SCLK_PIN, -1, TFT_MOSI_PIN, TFT_CS_PIN);
+
+    // Defensive pin state before library init.
+    pinMode(TFT_CS_PIN, OUTPUT);
+    digitalWrite(TFT_CS_PIN, HIGH);
+    pinMode(TFT_DC_PIN, OUTPUT);
+    digitalWrite(TFT_DC_PIN, HIGH);
+    pinMode(TFT_RST_PIN, OUTPUT);
+    digitalWrite(TFT_RST_PIN, HIGH);
+    delay(10);
+
     tft.init();
     tft.setRotation(0);  // Portrait 80x160
     tft.fillScreen(COLOR_BG);
@@ -42,16 +74,19 @@ void Display::init() {
     initialized = true;
     lastUpdate = millis();
     Debug::println(F("[DISP] TFT display initialized"));
+#endif
 }
 
 void Display::update() {
+#if ROOT_DISABLE_TFT
+    return;
+#else
     if (!initialized) return;
 
     unsigned long now = millis();
     if (now - lastUpdate < DISPLAY_UPDATE_INTERVAL_MS) return;
     lastUpdate = now;
 
-    // Load device config for display
     DeviceConfig cfg;
     Storage::loadDeviceConfig(cfg);
 
@@ -59,14 +94,12 @@ void Display::update() {
 
     int y = 2;
 
-    // Title
     tft.setTextColor(COLOR_TITLE);
     tft.setTextSize(1);
     tft.setCursor(2, y);
     tft.println("ROOT NODE");
     y += 12;
 
-    // Device ID
     tft.setTextColor(COLOR_LABEL);
     tft.setCursor(2, y);
     tft.print("ID:");
@@ -74,77 +107,37 @@ void Display::update() {
     tft.println(cfg.device_id);
     y += 10;
 
-    // Mesh status
     tft.setTextColor(COLOR_LABEL);
     tft.setCursor(2, y);
     tft.print("Mesh:");
     bool meshOk = MeshComm::isConnected();
     tft.setTextColor(meshOk ? COLOR_OK : COLOR_FAIL);
-    tft.println(meshOk ? "OK" : "WAIT");
+    tft.println(meshOk ? "UP" : "DOWN");
     y += 10;
 
-    // Cabinet count (child nodes)
     tft.setTextColor(COLOR_LABEL);
     tft.setCursor(2, y);
-    tft.print("Cab:");
+    tft.print("Kids:");
     tft.setTextColor(COLOR_TEXT);
-    tft.print(MeshComm::getChildCount());
-    tft.print("/");
-    tft.println(MeshBridge::getRouteCount());
+    tft.println(MeshComm::getChildCount());
     y += 10;
 
-    // Uplink status
     tft.setTextColor(COLOR_LABEL);
     tft.setCursor(2, y);
-    tft.print("Uplk:");
-    bool uplinkOk = MeshBridge::isUplinkConnected();
-    tft.setTextColor(uplinkOk ? COLOR_OK : COLOR_FAIL);
-    const char *uplinkName = "N/A";
-    UplinkMode um = MeshBridge::getUplinkMode();
-    if (um == UPLINK_USB) uplinkName = "USB";
-    else if (um == UPLINK_AP) uplinkName = "AP";
-    else if (um == UPLINK_STA) uplinkName = "STA";
-    tft.println(uplinkName);
+    tft.print("Up:");
+    bool uplink = MeshBridge::isUplinkConnected();
+    tft.setTextColor(uplink ? COLOR_OK : COLOR_FAIL);
+    tft.println(uplink ? "OK" : "--");
     y += 10;
 
-    // SD card status
+#ifdef ENABLE_SD_CARD
     tft.setTextColor(COLOR_LABEL);
     tft.setCursor(2, y);
     tft.print("SD:");
-#ifdef ENABLE_SD_CARD
-    bool sdOk = SdStorage::isReady();
-    tft.setTextColor(sdOk ? COLOR_OK : COLOR_FAIL);
-    tft.println(sdOk ? "OK" : "FAIL");
-#else
-    tft.setTextColor(COLOR_FAIL);
-    tft.println("N/A");
+    bool sd = SdStorage::isReady();
+    tft.setTextColor(sd ? COLOR_OK : COLOR_FAIL);
+    tft.println(sd ? "OK" : "NO");
+    y += 10;
 #endif
-    y += 10;
-
-    // MAC address
-    tft.setTextColor(COLOR_LABEL);
-    tft.setCursor(2, y);
-    tft.print("MAC:");
-    tft.setTextColor(COLOR_TEXT);
-    String mac = MeshComm::getMeshMac();
-    // Show last 8 chars to fit width
-    if (mac.length() > 14) mac = mac.substring(mac.length() - 14);
-    tft.println(mac);
-    y += 10;
-
-    // Uptime
-    tft.setTextColor(COLOR_LABEL);
-    tft.setCursor(2, y);
-    tft.print("UP:");
-    tft.setTextColor(COLOR_TEXT);
-    unsigned long upSec = millis() / 1000;
-    tft.printf("%lum", upSec / 60);
-    y += 10;
-
-    // Firmware version
-    tft.setTextColor(COLOR_LABEL);
-    tft.setCursor(2, y);
-    tft.print("FW:");
-    tft.setTextColor(COLOR_TEXT);
-    tft.println(FIRMWARE_VERSION);
+#endif
 }

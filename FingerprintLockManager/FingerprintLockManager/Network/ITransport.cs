@@ -12,11 +12,23 @@ namespace FingerprintLockManager
         /// <summary>是否已连接</summary>
         bool IsConnected { get; }
 
+        /// <summary>当前链路端点的可读说明。</summary>
+        string Description { get; }
+
+        /// <summary>最近一次传输层错误；无错误时为空。</summary>
+        string LastError { get; }
+
         /// <summary>收到一行 JSON 消息事件（已去除尾部换行）</summary>
         event Action<string>? LineReceived;
 
         /// <summary>物理链路连接状态变化</summary>
         event Action<bool>? ConnectionChanged;
+
+        /// <summary>连接、重连或异常等诊断信息。</summary>
+        event Action<string>? DiagnosticMessage;
+
+        /// <summary>未被协议帧解析器消费的原始数据，例如 ESP32 ROM 启动日志。</summary>
+        event Action<byte[]>? UnframedDataReceived;
 
         /// <summary>启动传输（建立连接/开始监听）</summary>
         void Start();

@@ -113,7 +113,7 @@ namespace FingerprintLockManager
                 return;
             }
 
-            bool sent;
+            BroadcastCommandResult sent;
             try
             {
                 sent = await Task.Run(App.CabinetSyncService.SyncAllPermissions);
@@ -121,12 +121,15 @@ namespace FingerprintLockManager
             catch (RootDataUnavailableException ex)
             {
                 PageStatusText.Text = ex.Message;
-                sent = false;
+                sent = BroadcastCommandResult.Failed(ex.Message);
             }
-            PageStatusText.Text = sent ? "角色权限已保存并广播" : "角色权限已保存，广播未发送";
-            MessageBox.Show(sent ? "角色权限已保存并广播到柜子" : "角色权限已保存，当前未完成广播",
-                sent ? "保存完成" : "同步提示", MessageBoxButton.OK,
-                sent ? MessageBoxImage.Information : MessageBoxImage.Warning);
+            string text = CabinetSyncService.FormatSyncResult(sent,
+                "角色权限已保存，所有在线柜子均已确认",
+                "角色权限已保存，但在线柜子未全部确认");
+            PageStatusText.Text = sent.Success ? "角色权限已保存，在线柜子均已确认" : "角色权限已保存，在线柜子未全部确认";
+            MessageBox.Show(text,
+                sent.Success ? "保存完成" : "同步提示", MessageBoxButton.OK,
+                sent.Success ? MessageBoxImage.Information : MessageBoxImage.Warning);
         }
 
         /// <summary>重新加载按钮</summary>

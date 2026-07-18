@@ -178,10 +178,13 @@ namespace FingerprintLockManager
             if (saved)
             {
                 await LoadUserPermissionsAsync(_selectedUser);
-                bool synced = await SyncPermissionsAsync();
-                MessageBox.Show(synced ? "权限已保存并广播到柜子" : "权限已保存，当前未完成广播",
-                    synced ? "保存完成" : "同步提示", MessageBoxButton.OK,
-                    synced ? MessageBoxImage.Information : MessageBoxImage.Warning);
+                BroadcastCommandResult synced = await SyncPermissionsAsync();
+                MessageBox.Show(
+                    CabinetSyncService.FormatSyncResult(synced,
+                        "权限已保存，所有在线柜子均已确认",
+                        "权限已保存，但在线柜子未全部确认"),
+                    synced.Success ? "保存完成" : "同步提示", MessageBoxButton.OK,
+                    synced.Success ? MessageBoxImage.Information : MessageBoxImage.Warning);
             }
             else
             {
@@ -221,10 +224,13 @@ namespace FingerprintLockManager
             if (reset)
             {
                 await LoadUserPermissionsAsync(_selectedUser);
-                bool synced = await SyncPermissionsAsync();
-                MessageBox.Show(synced ? "已恢复角色默认权限并广播" : "已恢复角色默认权限，广播未发送",
+                BroadcastCommandResult synced = await SyncPermissionsAsync();
+                MessageBox.Show(
+                    CabinetSyncService.FormatSyncResult(synced,
+                        "已恢复角色默认权限，所有在线柜子均已确认",
+                        "已恢复角色默认权限，但在线柜子未全部确认"),
                     "重置完成", MessageBoxButton.OK,
-                    synced ? MessageBoxImage.Information : MessageBoxImage.Warning);
+                    synced.Success ? MessageBoxImage.Information : MessageBoxImage.Warning);
             }
             else
             {
@@ -241,7 +247,7 @@ namespace FingerprintLockManager
             if (!string.IsNullOrEmpty(status)) PageStatusText.Text = status;
         }
 
-        private async Task<bool> SyncPermissionsAsync()
+        private async Task<BroadcastCommandResult> SyncPermissionsAsync()
         {
             try
             {
@@ -250,7 +256,7 @@ namespace FingerprintLockManager
             catch (RootDataUnavailableException ex)
             {
                 PageStatusText.Text = ex.Message;
-                return false;
+                return BroadcastCommandResult.Failed(ex.Message);
             }
         }
     }

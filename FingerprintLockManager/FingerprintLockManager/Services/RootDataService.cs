@@ -27,11 +27,22 @@ namespace FingerprintLockManager
         public JArray ReadArray(string table)
         {
             if (!App.SdStorageService.IsAvailable)
-                throw new RootDataUnavailableException("根节点数据服务未连接");
+            {
+                string reason = App.SdStorageService.IsRootConnected &&
+                    App.SdStorageService.IsStorageReady == false
+                    ? "根节点通讯正常，但 SD 卡未就绪，无法读取账号数据"
+                    : "根节点数据服务未连接";
+                throw new RootDataUnavailableException(reason);
+            }
 
             var snapshot = App.SdStorageService.QueryTableSnapshot(table);
             if (snapshot == null || string.IsNullOrWhiteSpace(snapshot.Json))
-                throw new RootDataUnavailableException($"读取根节点表 {table} 失败");
+            {
+                string detail = App.SdStorageService.LastError;
+                throw new RootDataUnavailableException(string.IsNullOrWhiteSpace(detail)
+                    ? $"读取根节点表 {table} 失败"
+                    : detail);
+            }
 
             try
             {

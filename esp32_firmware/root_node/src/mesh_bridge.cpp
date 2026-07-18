@@ -10,6 +10,9 @@
 #include "message_handler.h"
 #include "storage.h"
 #include "protocol_frame.h"
+#ifdef ENABLE_SD_CARD
+#include "sd_storage.h"
+#endif
 #include <ArduinoJson.h>
 #include <WiFi.h>
 
@@ -24,6 +27,9 @@ bool MeshBridge::initialized = false;
 static WiFiServer *bridgeServer = nullptr;   // AP 模式 TCP 服务端
 static WiFiClient  bridgeClient;             // 当前连接的客户端（AP）/ 上位机连接（STA）
 static unsigned long lastSTAReconnect = 0;   // STA 模式上次重连时刻
+static unsigned long lastRootAnnouncement = 0;
+static bool hostProtocolSeen = false;
+static const unsigned long ROOT_ANNOUNCE_INTERVAL_MS = 3000;
 
 static void announceRootToHost(const char *uplink) {
     DeviceConfig cfg;
@@ -32,8 +38,16 @@ static void announceRootToHost(const char *uplink) {
                   "\",\"is_root\":true,\"firmware_version\":\"" FIRMWARE_VERSION "\"";
     data += ",\"uplink\":\"";
     data += uplink;
-    data += "\"}";
+    data += "\"";
+#ifdef ENABLE_SD_CARD
+    data += ",\"sd_ready\":";
+    data += SdStorage::isReady() ? "true" : "false";
+#else
+    data += ",\"sd_ready\":false";
+#endif
+    data += "}";
     MeshBridge::sendToUplink(ProtocolFrame::buildMessage("REGISTER", cfg.device_id, data));
+    lastRootAnnouncement = millis();
 }
 
 // ====== 初始化 ======
@@ -57,19 +71,28 @@ void MeshBridge::init() {
     initialized = true;
 }
 
+void MeshBridge::announceRootStatus() {
+    const char *uplink = uplinkMode == UPLINK_USB ? "usb" :
+                         uplinkMode == UPLINK_AP ? "ap" : "sta";
+    announceRootToHost(uplink);
+}
+
 // ====== USB 串口上行 ======
 void MeshBridge::initUSB() {
-    // USB CDC 虚拟串口（或 UART0），高波特率降低传输延迟
+    // Host uplink is USB-Serial-JTAG (GPIO19/20) when CDC_ON_BOOT=1.
+    // Baud is host-side for CDC; keep Serial ready and announce root.
     Serial.flush();
-    Serial.updateBaudRate(UPLINK_USB_BAUD);
     uplinkConnected = true;
-    Debug::printf("[BRIDGE] USB serial ready @%d bps\n", UPLINK_USB_BAUD);
+    Debug::printf("[BRIDGE] USB-Serial-JTAG uplink ready (GPIO19/20)\n");
     announceRootToHost("usb");
 }
 
 void MeshBridge::updateUSB() {
     // 读取串口字节并送入协议帧解码器
     readUplink();
+    if (!hostProtocolSeen && millis() - lastRootAnnouncement >= ROOT_ANNOUNCE_INTERVAL_MS) {
+        announceRootToHost("usb");
+    }
 }
 
 // ====== WiFi AP TCP 上行 ======
@@ -102,6 +125,7 @@ void MeshBridge::updateAP() {
         readUplink();
     } else {
         uplinkConnected = false;
+        hostProtocolSeen = false;
         // 接受新连接
         bridgeClient = bridgeServer->accept();
         if (bridgeClient) {
@@ -129,6 +153,7 @@ void MeshBridge::updateSTA() {
     if (WiFi.localIP() == IPAddress(0, 0, 0, 0)) {
         if (uplinkConnected) {
             uplinkConnected = false;
+            hostProtocolSeen = false;
             bridgeClient.stop();
             Debug::println(F("[BRIDGE] STA failed to obtain IP, disconnect TCP"));
         }
@@ -141,6 +166,7 @@ void MeshBridge::updateSTA() {
     } else {
         if (uplinkConnected) {
             uplinkConnected = false;
+            hostProtocolSeen = false;
             Debug::println(F("[BRIDGE] TCP connection to host disconnected"));
         }
         // 按间隔重连
@@ -226,6 +252,7 @@ bool MeshBridge::sendToUplink(const String &json) {
     free(frameBuf);
     if (!ok && uplinkMode != UPLINK_USB) {
         uplinkConnected = false;
+        hostProtocolSeen = false;
     }
     return ok;
 }
@@ -250,13 +277,42 @@ bool MeshBridge::writeUplink(const uint8_t *data, int len) {
     return false;
 }
 
+// Plain-text probes for serial tools that cannot send binary frames yet.
+// Reply with "PONG" so the host can prove the correct COM port is open.
+static void handlePlainTextProbe(uint8_t b) {
+    static char line[16];
+    static uint8_t pos = 0;
+    if (b == '\r') return;
+    if (b == '\n') {
+        line[pos < sizeof(line) ? pos : (sizeof(line) - 1)] = 0;
+        if (strcasecmp(line, "PING") == 0 || strcasecmp(line, "AT") == 0) {
+            Serial.print("PONG\r\n");
+            Serial.flush();
+        } else if (strcasecmp(line, "HELP") == 0) {
+            Serial.print("OK REGISTER_FRAME=HEX baud=921600\r\n");
+            Serial.flush();
+        }
+        pos = 0;
+        return;
+    }
+    if (pos + 1 < sizeof(line) && b >= 0x20 && b < 0x7F) {
+        line[pos++] = (char)b;
+    } else {
+        pos = 0;
+    }
+}
+
 // ====== 读取上行链路字节并送入协议帧解码器 ======
 void MeshBridge::readUplink() {
     if (uplinkMode == UPLINK_USB) {
         while (Serial.available()) {
             uint8_t b = Serial.read();
+            // Frame decoder ignores non-A5 bytes while waiting for head, so
+            // plain-text probes can coexist with framed protocol traffic.
+            handlePlainTextProbe(b);
             String json;
             if (ProtocolFrame::decode(b, json)) {
+                hostProtocolSeen = true;
                 handleUplinkMessage(json);
             }
         }
@@ -264,12 +320,14 @@ void MeshBridge::readUplink() {
         // AP / STA 模式从 TCP 客户端读取
         if (!bridgeClient.connected()) {
             uplinkConnected = false;
+            hostProtocolSeen = false;
             return;
         }
         while (bridgeClient.available()) {
             uint8_t b = bridgeClient.read();
             String json;
             if (ProtocolFrame::decode(b, json)) {
+                hostProtocolSeen = true;
                 handleUplinkMessage(json);
             }
         }
@@ -426,6 +484,17 @@ int MeshBridge::getRouteCount() {
         if (isRouteFresh(i, now)) active++;
     }
     return active;
+}
+
+int MeshBridge::broadcastToCabinets(const String &json) {
+    expireStaleRoutes();
+    int sent = 0;
+    for (int i = 0; i < routeCount; i++) {
+        if (routeTable[i].valid && MeshComm::sendToNode(routeTable[i].mac, json)) {
+            sent++;
+        }
+    }
+    return sent;
 }
 
 bool MeshBridge::isRouteFresh(int index, unsigned long now) {

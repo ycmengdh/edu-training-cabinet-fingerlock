@@ -45,7 +45,14 @@
 
                     <StackPanel Grid.Row="1" Margin="0,12,0,0">
                         <TextBlock Text="管理" Foreground="#718087" FontSize="10" Margin="18,4,0,8"/>
-                        <Button x:Name="NavUserManage" Style="{StaticResource NavButton}" Tag="Active"
+                        <Button x:Name="NavDashboard" Style="{StaticResource NavButton}" Tag="Active"
+                                Click="NavDashboard_Click">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="&#xE80F;" FontFamily="Segoe MDL2 Assets" FontSize="15" Width="30" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                                <TextBlock Text="运行总览" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                            </StackPanel>
+                        </Button>
+                        <Button x:Name="NavUserManage" Style="{StaticResource NavButton}"
                                 Click="NavUserManage_Click">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="&#xE716;" FontFamily="Segoe MDL2 Assets" FontSize="15" Width="30" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
@@ -62,6 +69,12 @@
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="&#xE83D;" FontFamily="Segoe MDL2 Assets" FontSize="15" Width="30" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
                                 <TextBlock Text="角色权限" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                            </StackPanel>
+                        </Button>
+                        <Button x:Name="NavClassManage" Style="{StaticResource NavButton}" Click="NavClassManage_Click">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="&#xE8F1;" FontFamily="Segoe MDL2 Assets" FontSize="15" Width="30" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                                <TextBlock Text="班级管理" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
                             </StackPanel>
                         </Button>
                         <TextBlock Text="设备" Foreground="#718087" FontSize="10" Margin="18,18,0,8"/>
@@ -83,6 +96,12 @@
                                 <TextBlock Text="AP 配置" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
                             </StackPanel>
                         </Button>
+                        <Button x:Name="NavSettings" Style="{StaticResource NavButton}" Click="NavSettings_Click">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="&#xE90F;" FontFamily="Segoe MDL2 Assets" FontSize="15" Width="30" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                                <TextBlock Text="系统设置" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                            </StackPanel>
+                        </Button>
                     </StackPanel>
 
                     <Border Grid.Row="2" BorderBrush="#2A3A41" BorderThickness="0,1,0,0" Padding="18,0">
@@ -90,6 +109,8 @@
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="34"/>
                                 <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="30"/>
+                                <ColumnDefinition Width="30"/>
                             </Grid.ColumnDefinitions>
                             <Border Width="26" Height="26" CornerRadius="13" Background="#31444B">
                                 <TextBlock Text="&#xE77B;" FontFamily="Segoe MDL2 Assets" Foreground="#DDE5E7"
@@ -99,6 +120,10 @@
                                 <TextBlock x:Name="CurrentUserName" Text="管理员" Foreground="White" FontSize="12" FontWeight="SemiBold"/>
                                 <TextBlock x:Name="CurrentUserRole" Text="admin" Foreground="#829198" FontSize="10" Margin="0,2,0,0"/>
                             </StackPanel>
+                            <Button x:Name="ChangePasswordButton" Grid.Column="2" Style="{StaticResource SidebarIconButton}"
+                                    Content="&#xE72E;" ToolTip="修改密码" Click="ChangePasswordButton_Click"/>
+                            <Button x:Name="LogoutButton" Grid.Column="3" Style="{StaticResource SidebarIconButton}"
+                                    Content="&#xE8AC;" ToolTip="退出登录" Click="LogoutButton_Click"/>
                         </Grid>
                     </Border>
                 </Grid>

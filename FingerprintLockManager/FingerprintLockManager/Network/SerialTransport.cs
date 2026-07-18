@@ -23,12 +23,19 @@ namespace FingerprintLockManager
         private volatile bool _running;
         private readonly FrameStreamDecoder _decoder = new FrameStreamDecoder();
         private readonly byte[] _readBuffer = new byte[4096];
+        private string _activePortName = "";
+        private string _lastDiagnostic = "";
 
         /// <summary>串口名（如 COM3 / /dev/ttyUSB0）</summary>
         public string PortName { get; }
 
         /// <summary>波特率</summary>
         public int BaudRate { get; }
+
+        public string Description => $"USB 串口 {(string.IsNullOrWhiteSpace(_activePortName) ?
+            (string.IsNullOrWhiteSpace(PortName) ? "自动选择" : PortName) : _activePortName)} @ {BaudRate}";
+
+        public string LastError { get; private set; } = "";
 
         /// <summary>是否已连接</summary>
         public bool IsConnected
@@ -48,6 +55,10 @@ namespace FingerprintLockManager
         /// <summary>串口打开或断开事件</summary>
         public event Action<bool>? ConnectionChanged;
 
+        public event Action<string>? DiagnosticMessage;
+
+        public event Action<byte[]>? UnframedDataReceived;
+
         /// <summary>
         /// 构造串口传输
         /// </summary>
@@ -65,6 +76,7 @@ namespace FingerprintLockManager
             if (_running) return;
             _running = true;
             _cts = new CancellationTokenSource();
+            ReportDiagnostic($"正在打开 {Description}");
             _ = Task.Run(() => ConnectLoopAsync(_cts.Token));
         }
 
@@ -90,8 +102,9 @@ namespace FingerprintLockManager
                 }
                 return true;
             }
-            catch
+            catch (Exception ex)
             {
+                ReportError($"串口发送失败：{ex.Message}");
                 DisconnectPort();
                 return false;
             }
@@ -116,7 +129,11 @@ namespace FingerprintLockManager
         private void TryOpenPort()
         {
             string name = string.IsNullOrWhiteSpace(PortName) ? DetectFirstPort() : PortName;
-            if (string.IsNullOrWhiteSpace(name)) return;
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                ReportError("未发现可用串口，请检查 USB 连接并刷新串口列表");
+                return;
+            }
 
             var port = new SerialPort(name, BaudRate, Parity.None, 8, StopBits.One)
             {
@@ -137,14 +154,18 @@ namespace FingerprintLockManager
                         return;
                     }
                     _port = port;
+                    _activePortName = name;
                     _decoder.Reset();
                 }
+                LastError = "";
+                ReportDiagnostic($"串口 {name} 已打开，波特率 {BaudRate}", true);
                 ConnectionChanged?.Invoke(true);
             }
-            catch
+            catch (Exception ex)
             {
                 try { port.DataReceived -= OnDataReceived; } catch { }
                 try { port.Dispose(); } catch { }
+                ReportError($"打开串口 {name} 失败：{ex.Message}");
             }
         }
 
@@ -164,12 +185,14 @@ namespace FingerprintLockManager
                         int count = port.Read(_readBuffer, 0,
                             Math.Min(_readBuffer.Length, port.BytesToRead));
                         _decoder.Append(_readBuffer, 0, count,
-                            json => LineReceived?.Invoke(json));
+                            json => LineReceived?.Invoke(json),
+                            bytes => UnframedDataReceived?.Invoke(bytes));
                     }
                 }
             }
-            catch
+            catch (Exception ex)
             {
+                ReportError($"串口接收失败：{ex.Message}");
                 DisconnectPort();
             }
         }
@@ -192,6 +215,20 @@ namespace FingerprintLockManager
                 try { port.Dispose(); } catch { }
             }
             if (wasConnected) ConnectionChanged?.Invoke(false);
+            if (wasConnected) ReportDiagnostic("串口已断开，正在自动重连", true);
+        }
+
+        private void ReportError(string message)
+        {
+            LastError = message;
+            ReportDiagnostic(message);
+        }
+
+        private void ReportDiagnostic(string message, bool force = false)
+        {
+            if (!force && string.Equals(_lastDiagnostic, message, StringComparison.Ordinal)) return;
+            _lastDiagnostic = message;
+            DiagnosticMessage?.Invoke(message);
         }
 
         /// <summary>检测首个可用串口名</summary>

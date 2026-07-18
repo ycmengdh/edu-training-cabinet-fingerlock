@@ -4,6 +4,8 @@ VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FingerprintLockManager", "FingerprintLockManager\FingerprintLockManager.csproj", "{D4F5A6B7-C8E9-1234-5678-9ABCDEF01234}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FingerprintLockManager.Tests", "FingerprintLockManager.Tests\FingerprintLockManager.Tests.csproj", "{A8A68EC3-D60B-45E6-9F84-290CBEE52A52}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -14,6 +16,10 @@ Global
 		{D4F5A6B7-C8E9-1234-5678-9ABCDEF01234}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{D4F5A6B7-C8E9-1234-5678-9ABCDEF01234}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{D4F5A6B7-C8E9-1234-5678-9ABCDEF01234}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A8A68EC3-D60B-45E6-9F84-290CBEE52A52}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A8A68EC3-D60B-45E6-9F84-290CBEE52A52}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A8A68EC3-D60B-45E6-9F84-290CBEE52A52}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A8A68EC3-D60B-45E6-9F84-290CBEE52A52}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

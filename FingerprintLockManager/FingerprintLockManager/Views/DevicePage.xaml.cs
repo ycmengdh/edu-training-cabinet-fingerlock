@@ -5,7 +5,7 @@ namespace FingerprintLockManager
 {
     /// <summary>
     /// 设备管理页面
-    /// 设备列表展示（在线绿点/离线红点）、远程开锁、刷新
+    /// 设备列表展示（在线绿点/离线红点）、远程开锁、权限重同步、刷新
     /// </summary>
     public partial class DevicePage : Page
     {
@@ -25,13 +25,30 @@ namespace FingerprintLockManager
         /// <summary>加载设备列表</summary>
         private async Task LoadDevicesAsync()
         {
-            RefreshButton.IsEnabled = false;
-            PageStatusText.Text = "正在读取根节点数据";
+            SetBusy(true, "正在读取根节点数据");
             try
             {
                 var devices = await Task.Run(App.DeviceService.GetAllDevices);
-                DeviceDataGrid.ItemsSource = devices.Where(d => !d.IsRoot).ToList();
-                PageStatusText.Text = $"共 {DeviceDataGrid.Items.Count} 个柜子节点";
+                uint globalVersion = 0;
+                try
+                {
+                    var version = await Task.Run(() => App.SdStorageService.QueryVersion());
+                    if (version != null) globalVersion = version.GlobalVersion;
+                }
+                catch (RootDataUnavailableException)
+                {
+                    // 版本读失败时仍展示设备基础列表
+                }
+
+                var list = devices.Where(d => !d.IsRoot).ToList();
+                foreach (var device in list)
+                    device.RootPermissionVersion = globalVersion;
+
+                DeviceDataGrid.ItemsSource = list;
+                int lagging = list.Count(d => d.IsOnline && d.PermissionSyncText == "落后");
+                PageStatusText.Text = lagging > 0
+                    ? $"共 {list.Count} 个柜子节点，{lagging} 台权限版本落后"
+                    : $"共 {list.Count} 个柜子节点";
             }
             catch (RootDataUnavailableException ex)
             {
@@ -40,7 +57,7 @@ namespace FingerprintLockManager
             }
             finally
             {
-                RefreshButton.IsEnabled = true;
+                SetBusy(false);
             }
         }
 
@@ -48,6 +65,31 @@ namespace FingerprintLockManager
         private async void RefreshButton_Click(object sender, RoutedEventArgs e)
         {
             await LoadDevicesAsync();
+        }
+
+        private async void ResyncButton_Click(object sender, RoutedEventArgs e)
+        {
+            SetBusy(true, "正在向在线柜子同步权限");
+            try
+            {
+                BroadcastCommandResult result = await Task.Run(App.CabinetSyncService.SyncAllPermissions);
+                MessageBox.Show(
+                    CabinetSyncService.FormatSyncResult(result,
+                        "所有在线柜子均已确认权限同步",
+                        "权限同步未全部完成"),
+                    result.Success ? "同步完成" : "同步提示",
+                    MessageBoxButton.OK,
+                    result.Success ? MessageBoxImage.Information : MessageBoxImage.Warning);
+                await LoadDevicesAsync();
+            }
+            catch (RootDataUnavailableException ex)
+            {
+                MessageBox.Show(ex.Message, "根节点不可用", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+            finally
+            {
+                SetBusy(false);
+            }
         }
 
         /// <summary>远程开锁：向选中设备发送 CONTROL_LOCK 命令</summary>
@@ -113,6 +155,14 @@ namespace FingerprintLockManager
             // 开锁日志由柜子记录并上报根节点，上位机不重复写日志表。
             MessageBox.Show($"设备「{selected.DeviceName}」已确认 Lock {lockId} 开锁", "开锁完成",
                 MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+
+        private void SetBusy(bool busy, string? status = null)
+        {
+            RefreshButton.IsEnabled = !busy;
+            ResyncButton.IsEnabled = !busy;
+            RemoteUnlockButton.IsEnabled = !busy;
+            if (!string.IsNullOrEmpty(status)) PageStatusText.Text = status;
         }
     }
 }

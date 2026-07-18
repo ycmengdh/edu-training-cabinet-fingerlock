@@ -6,7 +6,9 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
         <Grid Grid.Row="0" Margin="0,0,0,16">
@@ -25,6 +27,8 @@
                         <TextBlock Text="导出 CSV"/>
                     </StackPanel>
                 </Button>
+                <Button x:Name="ArchiveButton" Style="{StaticResource SecondaryButton}" Margin="8,0,0,0"
+                        Content="归档并清空" Click="ArchiveButton_Click"/>
                 <Button x:Name="RefreshButton" Style="{StaticResource IconButton}" Content="&#xE72C;" ToolTip="刷新日志"
                         Margin="8,0,0,0" Click="RefreshButton_Click"/>
             </StackPanel>
@@ -41,6 +45,14 @@
                     <TextBox x:Name="UserIdFilter" Width="132"/>
                 </StackPanel>
                 <StackPanel Margin="0,0,12,0">
+                    <TextBlock Text="结果" Style="{StaticResource LabelText}" Margin="0,0,0,5"/>
+                    <ComboBox x:Name="ResultFilterBox" Width="110">
+                        <ComboBoxItem Content="全部" Tag="" IsSelected="True"/>
+                        <ComboBoxItem Content="成功" Tag="success"/>
+                        <ComboBoxItem Content="失败" Tag="fail"/>
+                    </ComboBox>
+                </StackPanel>
+                <StackPanel Margin="0,0,12,0">
                     <TextBlock Text="开始日期" Style="{StaticResource LabelText}" Margin="0,0,0,5"/>
                     <DatePicker x:Name="StartDatePicker" Width="132"/>
                 </StackPanel>
@@ -52,7 +64,12 @@
             </WrapPanel>
         </Border>
 
-        <Border Grid.Row="2" Style="{StaticResource Panel}">
+        <Border Grid.Row="2" Style="{StaticResource ToolbarPanel}" Margin="0,0,0,12" Padding="12,8">
+            <TextBlock x:Name="FailAggregateText" Text="失败原因聚合：-" FontSize="11"
+                       Foreground="{StaticResource SubTextBrush}" TextWrapping="Wrap"/>
+        </Border>
+
+        <Border Grid.Row="3" Style="{StaticResource Panel}">
             <DataGrid x:Name="LogDataGrid" BorderThickness="0" IsReadOnly="True" SelectionMode="Single">
                 <DataGrid.Columns>
                     <DataGridTextColumn Header="时间" Binding="{Binding CreateTime, StringFormat=yyyy-MM-dd HH:mm:ss}" Width="160"/>
@@ -65,5 +82,11 @@
                 </DataGrid.Columns>
             </DataGrid>
         </Border>
+
+        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
+            <Button x:Name="PrevPageButton" Style="{StaticResource SecondaryButton}" Content="上一页" Width="80" Click="PrevPageButton_Click"/>
+            <TextBlock x:Name="PageInfoText" Text="第 1 页" Margin="12,0" VerticalAlignment="Center" FontSize="11"/>
+            <Button x:Name="NextPageButton" Style="{StaticResource SecondaryButton}" Content="下一页" Width="80" Click="NextPageButton_Click"/>
+        </StackPanel>
     </Grid>
 </Page>

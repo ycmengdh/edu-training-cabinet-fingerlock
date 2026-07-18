@@ -17,6 +17,9 @@ public:
     // Refresh display with current status (called from main loop)
     static void update();
 
+    // True when TFT init completed (false when headless / disabled)
+    static bool isActive() { return initialized; }
+
 private:
     static bool initialized;
     static unsigned long lastUpdate;

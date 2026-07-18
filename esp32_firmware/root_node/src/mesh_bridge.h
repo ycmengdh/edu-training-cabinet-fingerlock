@@ -28,6 +28,9 @@ public:
     // 上行链路是否已连接
     static bool isUplinkConnected();
 
+    // 主动向上位机报告根节点与当前 SD 状态。
+    static void announceRootStatus();
+
     // 获取当前上行链路模式
     static UplinkMode getUplinkMode();
 
@@ -38,6 +41,9 @@ public:
     static bool lookupRoute(const String &deviceId, uint8_t *mac);
     // 获取路由表条目数
     static int getRouteCount();
+
+    // 向所有当前有效柜子路由广播业务 JSON
+    static int broadcastToCabinets(const String &json);
 
 private:
     // 路由表条目

@@ -32,6 +32,9 @@ public:
     // 获取已存储指纹数量
     static int getFingerprintCount();
 
+    // 检查 AS608 模板库中的指定位置是否已有模板
+    static bool templateExists(int id);
+
     // 读取指定 ID 的模板数据（用于上传到 SD 卡备份）
     // id: AS608 中的指纹 ID
     // outBuf: 输出缓冲，至少 FP_TEMPLATE_SIZE 字节

@@ -103,10 +103,15 @@ bool MeshComm::initMesh() {
         Debug::printf("[MESH] Root STA uplink: router SSID=%s\n", devCfg.wifi_ssid.c_str());
     }
 
-    // Mesh AP 配置
+    // Mesh AP 配置：优先使用 NVS 中的 mesh_password，空则回退编译期默认值
     cfg.mesh_ap.max_connection = MESH_AP_MAX_CONNECTION;
     memset(cfg.mesh_ap.password, 0, sizeof(cfg.mesh_ap.password));
-    strncpy((char*)cfg.mesh_ap.password, MESH_PASSWORD, sizeof(cfg.mesh_ap.password) - 1);
+    const char *meshPass = (devCfg.mesh_password.length() > 0)
+        ? devCfg.mesh_password.c_str()
+        : MESH_PASSWORD;
+    strncpy((char*)cfg.mesh_ap.password, meshPass, sizeof(cfg.mesh_ap.password) - 1);
+    Debug::printf("[MESH] mesh AP password source=%s\n",
+                  devCfg.mesh_password.length() > 0 ? "nvs" : "default");
 
     esp_mesh_set_config(&cfg);
     // 设置 Mesh AP 认证模式（本版本 mesh_ap_cfg_t 无 authmode 字段，需单独设置）

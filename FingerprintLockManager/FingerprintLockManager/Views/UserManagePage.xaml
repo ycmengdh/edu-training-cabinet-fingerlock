@@ -25,12 +25,22 @@
                         <TextBlock Text="添加用户" Foreground="White"/>
                     </StackPanel>
                 </Button>
+                <Button x:Name="ImportCsvButton" Style="{StaticResource SecondaryButton}" Margin="8,0,0,0"
+                        Content="导入 CSV" Click="ImportCsvButton_Click"/>
                 <Button x:Name="AssignFingerprintButton" Style="{StaticResource SecondaryButton}" Margin="8,0,0,0" Click="AssignFingerprintButton_Click">
                     <StackPanel Orientation="Horizontal">
                         <TextBlock Text="&#xE928;" FontFamily="Segoe MDL2 Assets" Margin="0,0,8,0"/>
                         <TextBlock Text="录入指纹"/>
                     </StackPanel>
                 </Button>
+                <Button x:Name="RestoreFingerprintButton" Style="{StaticResource SecondaryButton}" Margin="8,0,0,0"
+                        Content="恢复到柜子" Click="RestoreFingerprintButton_Click"/>
+                <Button x:Name="EditUserButton" Style="{StaticResource SecondaryButton}" Margin="8,0,0,0"
+                        Content="编辑" Click="EditUserButton_Click"/>
+                <Button x:Name="ResetPasswordButton" Style="{StaticResource SecondaryButton}" Margin="8,0,0,0"
+                        Content="重置密码" Click="ResetPasswordButton_Click"/>
+                <Button x:Name="ToggleUserButton" Style="{StaticResource SecondaryButton}" Margin="8,0,0,0"
+                        Content="启用 / 停用" Click="ToggleUserButton_Click"/>
                 <Button x:Name="DeleteUserButton" Style="{StaticResource DangerButton}" Margin="8,0,0,0" Click="DeleteUserButton_Click">
                     <StackPanel Orientation="Horizontal">
                         <TextBlock Text="&#xE74D;" FontFamily="Segoe MDL2 Assets" Foreground="{StaticResource DangerBrush}" Margin="0,0,8,0"/>
@@ -59,7 +69,9 @@
                 <DataGrid.Columns>
                     <DataGridTextColumn Header="用户 ID" Binding="{Binding UserId}" Width="170"/>
                     <DataGridTextColumn Header="姓名" Binding="{Binding Name}" Width="140"/>
-                    <DataGridTextColumn Header="角色" Binding="{Binding Role}" Width="110"/>
+                    <DataGridTextColumn Header="角色" Binding="{Binding Role}" Width="90"/>
+                    <DataGridTextColumn Header="班级" Binding="{Binding ClassId}" Width="110"/>
+                    <DataGridTextColumn Header="状态" Binding="{Binding StatusText}" Width="72"/>
                     <DataGridTextColumn Header="指纹 ID" Binding="{Binding FingerprintId}" Width="100"/>
                     <DataGridTextColumn Header="创建时间" Binding="{Binding CreateTime, StringFormat=yyyy-MM-dd HH:mm}" Width="*"/>
                 </DataGrid.Columns>

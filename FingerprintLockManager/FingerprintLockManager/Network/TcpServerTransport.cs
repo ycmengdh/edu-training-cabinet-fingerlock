@@ -23,6 +23,10 @@ namespace FingerprintLockManager
         /// <summary>监听端口</summary>
         public int Port { get; }
 
+        public string Description => $"TCP 服务端 0.0.0.0:{Port}";
+
+        public string LastError { get; private set; } = "";
+
         /// <summary>是否已连接（至少有一个客户端连接即视为已连接）</summary>
         public bool IsConnected
         {
@@ -41,6 +45,10 @@ namespace FingerprintLockManager
         /// <summary>客户端连接状态变化事件（参数为是否至少有一个连接）</summary>
         public event Action<bool>? ConnectionChanged;
 
+        public event Action<string>? DiagnosticMessage;
+
+        public event Action<byte[]>? UnframedDataReceived;
+
         /// <summary>
         /// 构造 TCP 服务端传输
         /// </summary>
@@ -58,6 +66,8 @@ namespace FingerprintLockManager
             _cts = new CancellationTokenSource();
             _listener = new TcpListener(IPAddress.Any, Port);
             _listener.Start();
+            LastError = "";
+            DiagnosticMessage?.Invoke($"正在监听 {Description}");
             _ = Task.Run(() => AcceptLoopAsync(_cts.Token));
         }
 
@@ -89,7 +99,11 @@ namespace FingerprintLockManager
             {
                 snapshot = new List<TcpClientState>(_clients);
             }
-            if (snapshot.Count == 0) return false;
+            if (snapshot.Count == 0)
+            {
+                LastError = "尚无根节点连接到 TCP 服务端";
+                return false;
+            }
 
             byte[]? frame = FrameCodec.Encode(jsonLine.TrimEnd('\n', '\r'));
             if (frame == null) return false;
@@ -130,6 +144,7 @@ namespace FingerprintLockManager
                     _clients.Add(state);
                 }
                 if (wasEmpty) ConnectionChanged?.Invoke(true);
+                DiagnosticMessage?.Invoke($"根节点已连接：{client.Client.RemoteEndPoint}");
 
                 _ = Task.Run(() => ReceiveLoopAsync(state, token));
             }
@@ -146,7 +161,8 @@ namespace FingerprintLockManager
                     int count = await state.Stream.ReadAsync(buffer, 0, buffer.Length, token);
                     if (count == 0) break;
                     state.Decoder.Append(buffer, 0, count,
-                        json => LineReceived?.Invoke(json));
+                        json => LineReceived?.Invoke(json),
+                        bytes => UnframedDataReceived?.Invoke(bytes));
                 }
             }
             catch
@@ -162,7 +178,11 @@ namespace FingerprintLockManager
                     if (_clients.Count == 0) nowEmpty = true;
                 }
                 CleanupClient(state);
-                if (nowEmpty) ConnectionChanged?.Invoke(false);
+                if (nowEmpty)
+                {
+                    ConnectionChanged?.Invoke(false);
+                    DiagnosticMessage?.Invoke("TCP 客户端已断开，继续等待根节点连接");
+                }
             }
         }
 
@@ -178,8 +198,10 @@ namespace FingerprintLockManager
                 }
                 return true;
             }
-            catch
+            catch (Exception ex)
             {
+                LastError = $"TCP 发送失败：{ex.Message}";
+                DiagnosticMessage?.Invoke(LastError);
                 return false;
             }
         }

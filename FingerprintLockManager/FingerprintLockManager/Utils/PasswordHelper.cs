@@ -1,17 +1,19 @@
 using System.Security.Cryptography;
-using System.Text;
 
 namespace FingerprintLockManager
 {
     /// <summary>
     /// 密码工具类
-    /// 使用 SHA256 + 随机盐值对密码进行加盐哈希存储与校验，抵御彩虹表攻击。
-    /// 哈希算法：SHA256(password + salt)
+    /// 新密码使用 PBKDF2-SHA256；仍可验证旧版 SHA256(password + salt)，
+    /// 登录成功后由 AuthService 自动迁移旧哈希。
     /// </summary>
     public static class PasswordHelper
     {
-        /// <summary>盐值字节数</summary>
         private const int SaltBytes = 16;
+        private const int HashBytes = 32;
+        private const int Pbkdf2Iterations = 210_000;
+        private const int MinimumPasswordLength = 8;
+        private const string Pbkdf2Prefix = "pbkdf2-sha256";
 
         /// <summary>
         /// 生成随机盐值（16 字节十六进制字符串）
@@ -19,22 +21,11 @@ namespace FingerprintLockManager
         /// <returns>32 位十六进制盐值字符串</returns>
         public static string GenerateSalt()
         {
-            byte[] salt = new byte[SaltBytes];
-            using (var rng = RandomNumberGenerator.Create())
-            {
-                rng.GetBytes(salt);
-            }
-            var sb = new StringBuilder(salt.Length * 2);
-            foreach (byte b in salt)
-            {
-                sb.Append(b.ToString("x2"));
-            }
-            return sb.ToString();
+            return Convert.ToHexString(RandomNumberGenerator.GetBytes(SaltBytes)).ToLowerInvariant();
         }
 
         /// <summary>
-        /// 对明文密码进行加盐 SHA256 哈希计算
-        /// 算法：SHA256(password + salt)
+        /// 生成带算法与迭代次数标识的 PBKDF2-SHA256 哈希。
         /// </summary>
         /// <param name="password">明文密码</param>
         /// <param name="salt">盐值（GenerateSalt 产生的十六进制字符串）</param>
@@ -42,20 +33,12 @@ namespace FingerprintLockManager
         public static string HashPassword(string password, string salt)
         {
             if (string.IsNullOrEmpty(password)) return string.Empty;
-            salt = salt ?? string.Empty;
+            if (!TryDecodeSalt(salt, out byte[] saltBytes)) return string.Empty;
 
-            using (var sha256 = SHA256.Create())
-            {
-                byte[] bytes = Encoding.UTF8.GetBytes(password + salt);
-                byte[] hash = sha256.ComputeHash(bytes);
-
-                var sb = new StringBuilder(hash.Length * 2);
-                foreach (byte b in hash)
-                {
-                    sb.Append(b.ToString("x2"));
-                }
-                return sb.ToString();
-            }
+            byte[] hash = Rfc2898DeriveBytes.Pbkdf2(
+                password, saltBytes, Pbkdf2Iterations,
+                HashAlgorithmName.SHA256, HashBytes);
+            return $"{Pbkdf2Prefix}${Pbkdf2Iterations}${Convert.ToBase64String(hash)}";
         }
 
         /// <summary>
@@ -68,9 +51,77 @@ namespace FingerprintLockManager
         public static bool VerifyPassword(string input, string salt, string hash)
         {
             if (string.IsNullOrEmpty(input) || string.IsNullOrEmpty(hash)) return false;
+            if (!TryDecodeSalt(salt, out byte[] saltBytes)) return false;
 
-            string inputHash = HashPassword(input, salt);
-            return string.Equals(inputHash, hash, StringComparison.OrdinalIgnoreCase);
+            if (hash.StartsWith(Pbkdf2Prefix + "$", StringComparison.Ordinal))
+            {
+                string[] parts = hash.Split('$');
+                if (parts.Length != 3 || !int.TryParse(parts[1], out int iterations) ||
+                    iterations < 100_000 || iterations > 2_000_000)
+                {
+                    return false;
+                }
+
+                byte[] expected;
+                try
+                {
+                    expected = Convert.FromBase64String(parts[2]);
+                }
+                catch (FormatException)
+                {
+                    return false;
+                }
+                if (expected.Length != HashBytes) return false;
+
+                byte[] actual = Rfc2898DeriveBytes.Pbkdf2(
+                    input, saltBytes, iterations,
+                    HashAlgorithmName.SHA256, expected.Length);
+                return CryptographicOperations.FixedTimeEquals(actual, expected);
+            }
+
+            // Legacy v1 format: lowercase SHA256(password + hex salt).
+            byte[] legacyExpected;
+            try
+            {
+                legacyExpected = Convert.FromHexString(hash);
+            }
+            catch (FormatException)
+            {
+                return false;
+            }
+            byte[] legacyActual = SHA256.HashData(
+                System.Text.Encoding.UTF8.GetBytes(input + salt));
+            return legacyExpected.Length == legacyActual.Length &&
+                   CryptographicOperations.FixedTimeEquals(legacyActual, legacyExpected);
+        }
+
+        public static bool NeedsRehash(string? hash)
+        {
+            if (string.IsNullOrWhiteSpace(hash)) return true;
+            string[] parts = hash.Split('$');
+            return parts.Length != 3 || parts[0] != Pbkdf2Prefix ||
+                   !int.TryParse(parts[1], out int iterations) ||
+                   iterations < Pbkdf2Iterations;
+        }
+
+        public static bool IsPasswordAcceptable(string? password) =>
+            !string.IsNullOrWhiteSpace(password) && password.Length >= MinimumPasswordLength;
+
+        public static string PasswordRequirement => $"密码至少需要 {MinimumPasswordLength} 个字符";
+
+        private static bool TryDecodeSalt(string? salt, out byte[] bytes)
+        {
+            bytes = Array.Empty<byte>();
+            if (string.IsNullOrWhiteSpace(salt)) return false;
+            try
+            {
+                bytes = Convert.FromHexString(salt);
+                return bytes.Length >= SaltBytes;
+            }
+            catch (FormatException)
+            {
+                return false;
+            }
         }
     }
 }

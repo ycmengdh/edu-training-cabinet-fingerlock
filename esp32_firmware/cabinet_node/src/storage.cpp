@@ -401,6 +401,8 @@ bool Storage::loadDeviceConfig(DeviceConfig &cfg) {
     cfg.server_port      = prefs.getUShort("server_port", UPLINK_TCP_PORT);
     cfg.fingerprint_count = prefs.getUChar("fp_count", 0);
     cfg.perm_version     = prefs.getUInt("perm_ver", 0);
+    cfg.hmac_enabled     = prefs.getBool("hmac_enabled", false);
+    cfg.hmac_key         = prefs.getString("hmac_key", "");
 
     bool hasRecord = prefs.isKey("device_id");
     if (!hasRecord) {
@@ -430,6 +432,8 @@ bool Storage::saveDeviceConfig(const DeviceConfig &cfg) {
     prefs.putUShort("server_port", cfg.server_port);
     prefs.putUChar("fp_count", cfg.fingerprint_count);
     prefs.putUInt("perm_ver", cfg.perm_version);
+    prefs.putBool("hmac_enabled", cfg.hmac_enabled);
+    prefs.putString("hmac_key", cfg.hmac_key);
     Debug::println(F("[STORAGE] Device config saved"));
     return true;
 }

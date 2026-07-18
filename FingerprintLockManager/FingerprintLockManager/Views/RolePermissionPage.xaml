@@ -49,20 +49,23 @@
 
                 <Border Grid.Row="1" Grid.ColumnSpan="5" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1"/>
                 <TextBlock Grid.Row="1" Grid.Column="0" Text="管理员  admin" FontWeight="SemiBold" Margin="16,0" VerticalAlignment="Center"/>
-                <CheckBox Grid.Row="1" Grid.Column="1" x:Name="AdminLock0" HorizontalAlignment="Left" VerticalAlignment="Center"/>
+                <CheckBox Grid.Row="1" Grid.Column="1" x:Name="AdminLock0" HorizontalAlignment="Left" VerticalAlignment="Center"
+                          ToolTip="系统锁仅管理员可以获得权限"/>
                 <CheckBox Grid.Row="1" Grid.Column="2" x:Name="AdminLock1" HorizontalAlignment="Left" VerticalAlignment="Center"/>
                 <CheckBox Grid.Row="1" Grid.Column="3" x:Name="AdminLock2" HorizontalAlignment="Left" VerticalAlignment="Center"/>
                 <CheckBox Grid.Row="1" Grid.Column="4" x:Name="AdminLock3" HorizontalAlignment="Left" VerticalAlignment="Center"/>
 
                 <Border Grid.Row="2" Grid.ColumnSpan="5" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1"/>
                 <TextBlock Grid.Row="2" Grid.Column="0" Text="老师  teacher" FontWeight="SemiBold" Margin="16,0" VerticalAlignment="Center"/>
-                <CheckBox Grid.Row="2" Grid.Column="1" x:Name="TeacherLock0" HorizontalAlignment="Left" VerticalAlignment="Center"/>
+                <CheckBox Grid.Row="2" Grid.Column="1" x:Name="TeacherLock0" HorizontalAlignment="Left" VerticalAlignment="Center"
+                          IsEnabled="False" ToolTip="系统锁不允许授予非管理员"/>
                 <CheckBox Grid.Row="2" Grid.Column="2" x:Name="TeacherLock1" HorizontalAlignment="Left" VerticalAlignment="Center"/>
                 <CheckBox Grid.Row="2" Grid.Column="3" x:Name="TeacherLock2" HorizontalAlignment="Left" VerticalAlignment="Center"/>
                 <CheckBox Grid.Row="2" Grid.Column="4" x:Name="TeacherLock3" HorizontalAlignment="Left" VerticalAlignment="Center"/>
 
                 <TextBlock Grid.Row="3" Grid.Column="0" Text="学生  student" FontWeight="SemiBold" Margin="16,0" VerticalAlignment="Center"/>
-                <CheckBox Grid.Row="3" Grid.Column="1" x:Name="StudentLock0" HorizontalAlignment="Left" VerticalAlignment="Center"/>
+                <CheckBox Grid.Row="3" Grid.Column="1" x:Name="StudentLock0" HorizontalAlignment="Left" VerticalAlignment="Center"
+                          IsEnabled="False" ToolTip="系统锁不允许授予非管理员"/>
                 <CheckBox Grid.Row="3" Grid.Column="2" x:Name="StudentLock1" HorizontalAlignment="Left" VerticalAlignment="Center"/>
                 <CheckBox Grid.Row="3" Grid.Column="3" x:Name="StudentLock2" HorizontalAlignment="Left" VerticalAlignment="Center"/>
                 <CheckBox Grid.Row="3" Grid.Column="4" x:Name="StudentLock3" HorizontalAlignment="Left" VerticalAlignment="Center"/>
