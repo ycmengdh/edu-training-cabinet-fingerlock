@@ -49,8 +49,11 @@ namespace FingerprintLockManager
             }
         }
 
-        /// <summary>收到一条 JSON 消息事件</summary>
+        /// <summary>收到一条 JSON 消息事件（过渡兼容）</summary>
         public event Action<string>? LineReceived;
+
+        /// <summary>收到完整应用层负载字节</summary>
+        public event Action<byte[]>? PayloadReceived;
 
         /// <summary>串口打开或断开事件</summary>
         public event Action<bool>? ConnectionChanged;
@@ -88,13 +91,26 @@ namespace FingerprintLockManager
             DisconnectPort();
         }
 
-        /// <summary>发送一条 JSON 消息（编码为 ESP 二进制协议帧）</summary>
+        /// <summary>发送一条 JSON 消息（编码为 ESP 二进制协议帧，过渡兼容）</summary>
         public bool Send(string jsonLine)
         {
+            byte[]? frame = FrameCodec.Encode(jsonLine.TrimEnd('\n', '\r'));
+            return WriteFrame(frame);
+        }
+
+        /// <summary>发送应用层负载字节（内部封帧）</summary>
+        public bool SendPayload(byte[] appPayload)
+        {
+            if (appPayload == null || appPayload.Length == 0) return false;
+            byte[]? frame = FrameCodec.Encode(appPayload);
+            return WriteFrame(frame);
+        }
+
+        private bool WriteFrame(byte[]? frame)
+        {
+            if (frame == null) return false;
             try
             {
-                byte[]? frame = FrameCodec.Encode(jsonLine.TrimEnd('\n', '\r'));
-                if (frame == null) return false;
                 lock (_sendLock)
                 {
                     if (_port?.IsOpen != true) return false;
@@ -184,8 +200,20 @@ namespace FingerprintLockManager
                     {
                         int count = port.Read(_readBuffer, 0,
                             Math.Min(_readBuffer.Length, port.BytesToRead));
-                        _decoder.Append(_readBuffer, 0, count,
-                            json => LineReceived?.Invoke(json),
+                        _decoder.AppendBytes(_readBuffer, 0, count,
+                            payload =>
+                            {
+                                PayloadReceived?.Invoke(payload);
+                                // 遗留 JSON 负载仍触发 LineReceived
+                                if (payload.Length > 0 && (payload[0] == (byte)'{' || payload[0] == (byte)'['))
+                                {
+                                    try
+                                    {
+                                        LineReceived?.Invoke(System.Text.Encoding.UTF8.GetString(payload));
+                                    }
+                                    catch { }
+                                }
+                            },
                             bytes => UnframedDataReceived?.Invoke(bytes));
                     }
                 }

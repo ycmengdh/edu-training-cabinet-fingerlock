@@ -1,7 +1,8 @@
 /**
  * protocol_frame.h - 协议帧解析器
- * 帧格式：帧头0xA5 0x5A + 版本1B + 长度2B(大端) + JSON负载 + CRC16 2B
+ * 帧格式：帧头0xA5 0x5A + 版本1B + 长度2B(大端) + JSON/binary负载 + CRC16 2B
  * 支持 CRC-16/MODBUS 校验和大消息分片（Payload>1400B）
+ * Phase 0: dual-slot PSRAM reassembly + byte encode/decode API
  */
 #ifndef PROTOCOL_FRAME_H
 #define PROTOCOL_FRAME_H
@@ -14,7 +15,7 @@ public:
     // 接收回调函数类型：收到完整JSON时调用
     typedef void (*FrameCallback)(const String &json);
 
-    // 初始化帧解析器
+    // 初始化帧解析器（also MemPool::init）
     static void init();
 
     // ====== 编码 ======
@@ -26,9 +27,17 @@ public:
     // 返回 encode 所需的输出缓冲区容量，-1 表示消息超过重组上限。
     static int getEncodedCapacity(const String &json);
 
+    // Byte-level encode API (preferred; String wrappers call these)
+    static int getEncodedCapacityBytes(size_t payloadLen);
+    static int encodeBytes(const uint8_t *payload, size_t len, uint8_t *outBuf, int outBufSize, uint8_t msgId = 0);
+
     // ====== 解码（逐字节状态机） ======
     // 喂入一个字节，返回 true 表示收到完整帧（jsonOut 输出JSON）
     static bool decode(uint8_t byte, String &jsonOut);
+
+    // Byte decode: fills outBuf/outLen instead of String. outBuf may be nullptr to only
+    // signal completion readiness (not used); typically provide FRAGMENT_REASSEMBLY_BUF.
+    static bool decodeBytes(uint8_t byte, uint8_t *outBuf, int outBufSize, int &outLen);
 
     // 批量解码：喂入数据块，对每个完整帧调用回调
     static void decode(const uint8_t *data, int len, FrameCallback cb);
@@ -39,6 +48,8 @@ public:
     // ====== CRC16 ======
     // CRC-16/MODBUS 计算（多项式 0xA001）
     static uint16_t crc16(const uint8_t *data, size_t len);
+    // CRC-16 增量计算：从上一步的 crc 继续处理新数据
+    static uint16_t crc16_buf_step(uint16_t crc, const uint8_t *data, size_t len);
 
     // ====== 统计 ======
     static int getCrcErrorCount();
@@ -70,24 +81,31 @@ private:
     static uint8_t *decPayload;
     static int      crcErrorCount;
 
-    // 分片重组缓冲
+    // 分片重组缓冲（multi-slot）
     struct FragmentReassembly {
         uint8_t  msgId;
         uint8_t  total;
-        uint8_t  receivedMask[32];   // 位图：最多255分片
+        uint8_t  receivedMask[32];   // 位图：最多255分片（we cap at FRAGMENT_MAX_TOTAL=16)
         uint8_t *data;
         uint16_t lengths[FRAGMENT_MAX_TOTAL];
         int      receivedCount;
         unsigned long startTime;
         bool     active;
     };
-    static FragmentReassembly fragBuf;
+    static FragmentReassembly fragSlots[FRAGMENT_SLOT_COUNT];
     static uint8_t  nextMsgId;
 
     // 处理解码后的负载（区分正常帧和分片帧）
+    // Returns length written into outBuf, or 0 if incomplete/error.
+    static int processPayloadBytes(uint8_t version, const uint8_t *data, uint16_t len,
+                                   uint8_t *outBuf, int outBufSize);
+
+    // String path (wrapper)
     static String processPayload(uint8_t version, const uint8_t *data, uint16_t len);
 
-    // 处理分片重组
+    // 处理分片重组（multi-slot）
+    static int handleFragmentBytes(const uint8_t *data, uint16_t len,
+                                   uint8_t *outBuf, int outBufSize);
     static String handleFragment(const uint8_t *data, uint16_t len);
 
     // 检查分片超时

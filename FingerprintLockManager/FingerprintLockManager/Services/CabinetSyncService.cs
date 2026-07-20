@@ -3,9 +3,16 @@ namespace FingerprintLockManager
     /// <summary>
     /// 将根节点上的权限配置下发到柜子。柜子收到后写入本地 Flash，
     /// 后续指纹鉴权完全以本地缓存为准。
+    /// 40 柜场景：按柜 unicast + 行间 pacing，避免 Mesh 广播风暴。
     /// </summary>
     public class CabinetSyncService
     {
+        /// <summary>单柜 SYNC 行间隔（毫秒），与固件 PERM_SYNC_INTER_ROW_MS 对齐量级。</summary>
+        private const int InterRowDelayMs = 40;
+
+        /// <summary>柜与柜之间的间隔（毫秒）。</summary>
+        private const int InterNodeDelayMs = 100;
+
         public BroadcastCommandResult SyncAllPermissions()
         {
             // Read the three authority tables from one stable users/permissions
@@ -29,7 +36,7 @@ namespace FingerprintLockManager
                     continue;
                 }
 
-                return BroadcastTransaction(BuildRows(users, roles, overrides), after.GlobalVersion);
+                return SyncTransactionPaced(BuildRows(users, roles, overrides), after.GlobalVersion);
             }
             return BroadcastCommandResult.Failed("权限数据在读取过程中被并发修改，请重试");
         }
@@ -67,7 +74,11 @@ namespace FingerprintLockManager
             return rows;
         }
 
-        private static BroadcastCommandResult BroadcastTransaction(
+        /// <summary>
+        /// 按在线柜子 unicast 事务：BEGIN → N×SYNC（pacing）→ COMMIT（等 SYNC_ACK）。
+        /// 失败柜单独汇总，不因单柜失败中止全部。
+        /// </summary>
+        private static BroadcastCommandResult SyncTransactionPaced(
             List<Dictionary<string, object>> rows, uint version)
         {
             string[] expectedDevices = App.MeshBridge.GetOnlineDevices()
@@ -79,24 +90,77 @@ namespace FingerprintLockManager
             if (expectedDevices.Length == 0)
                 return BroadcastCommandResult.Failed("没有在线柜子可确认同步");
 
-            bool sent = App.MeshBridge.Broadcast(Message.Create(
-                Protocol.CmdBeginPermissionSync, "", new { version, total = rows.Count }));
+            var confirmed = new List<string>();
+            var failed = new List<string>();
+            string lastError = "";
+
+            foreach (string deviceId in expectedDevices)
+            {
+                try
+                {
+                    bool ok = SyncOneCabinet(deviceId, rows, version);
+                    if (ok) confirmed.Add(deviceId);
+                    else
+                    {
+                        failed.Add(deviceId);
+                        lastError = $"柜子 {deviceId} 权限同步失败";
+                    }
+                }
+                catch (Exception ex)
+                {
+                    failed.Add(deviceId);
+                    lastError = ex.Message;
+                }
+                Thread.Sleep(InterNodeDelayMs);
+            }
+
+            if (failed.Count == 0)
+                return BroadcastCommandResult.Succeeded(confirmed.ToArray());
+
+            return new BroadcastCommandResult
+            {
+                Success = false,
+                ErrorMessage = string.IsNullOrEmpty(lastError)
+                    ? "部分柜子权限同步失败"
+                    : lastError,
+                ConfirmedDeviceIds = confirmed.ToArray(),
+                FailedDeviceIds = failed.ToArray(),
+                MissingDeviceIds = Array.Empty<string>(),
+            };
+        }
+
+        private static bool SyncOneCabinet(
+            string deviceId, List<Dictionary<string, object>> rows, uint version)
+        {
+            // BEGIN
+            if (!App.MeshBridge.SendToDevice(deviceId, Message.Create(
+                    Protocol.CmdBeginPermissionSync, deviceId,
+                    new { version, total = rows.Count })))
+                return false;
+
+            Thread.Sleep(InterRowDelayMs);
+
+            // SYNC rows (unicast, paced)
             for (int sequence = 0; sequence < rows.Count; sequence++)
             {
-                var row = rows[sequence];
-                row["version"] = version;
-                row["total"] = rows.Count;
-                row["sequence"] = sequence;
-                sent = App.MeshBridge.Broadcast(Message.Create(
-                    Protocol.CmdSyncPermission, "", row)) && sent;
+                var row = new Dictionary<string, object>(rows[sequence])
+                {
+                    ["version"] = version,
+                    ["total"] = rows.Count,
+                    ["sequence"] = sequence
+                };
+                if (!App.MeshBridge.SendToDevice(deviceId, Message.Create(
+                        Protocol.CmdSyncPermission, deviceId, row)))
+                    return false;
+                Thread.Sleep(InterRowDelayMs);
             }
-            if (!sent)
-                return BroadcastCommandResult.Failed("权限广播发送失败", expectedDevices);
 
-            var commit = Message.Create(Protocol.CmdCommitPermissionSync, "",
+            // COMMIT unicast — wait for SYNC_ACK (CommandService supports unicast when DeviceId set)
+            var commit = Message.Create(Protocol.CmdCommitPermissionSync, deviceId,
                 new { version, total = rows.Count });
-            return App.CommandService.SendBroadcastAsync(
-                commit, expectedDevices).GetAwaiter().GetResult();
+            BroadcastCommandResult result = App.CommandService.SendBroadcastAsync(
+                commit, new[] { deviceId }, 15_000).GetAwaiter().GetResult();
+            return result.Success;
         }
 
         public bool StartEnrollment(string deviceId, User user)

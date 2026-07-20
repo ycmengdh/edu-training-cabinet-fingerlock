@@ -52,8 +52,27 @@ namespace FingerprintLockManager
         /// <summary>指纹录入最终结果事件。</summary>
         public event Action<string, FingerprintEnrollmentResult>? OnFingerprintEnrollmentResult;
 
+        /// <summary>指纹录入过程提示：msgId, phase, step, total, hint。</summary>
+        public event Action<string, string, int, int, string>? OnEnrollProgress;
+
         /// <summary>权限事务提交结果事件：deviceId, msgId, result。</summary>
         public event Action<string, string, string>? OnPermissionSyncResult;
+
+        /// <summary>
+        /// V2.7 验证窗口事件：deviceId, event(enter/timeout/cancel/unlocked), userId, lockId(-1 表示无)。
+        /// 用于 UI 实时显示柜子当前验证状态。
+        /// </summary>
+        public event Action<string, string, string, int>? OnVerifyWindowEvent;
+
+        /// <summary>
+        /// V2.7 本机副指纹清单响应：deviceId, json（含 count + backups 数组）。
+        /// </summary>
+        public event Action<string, string>? OnBackupFpList;
+
+        /// <summary>
+        /// V2.7 删除副指纹结果：deviceId, userId, result。
+        /// </summary>
+        public event Action<string, string, string>? OnBackupFingerprintDeleted;
 
         /// <summary>
         /// 处理收到的消息，根据 cmd 字段分发到对应处理方法
@@ -73,9 +92,10 @@ namespace FingerprintLockManager
             var cmdType = Protocol.ToCommandType(msg.Cmd);
             if (cmdType == null) return;
 
-            // SD_QUERY_PART intentionally reuses the request MsgId for every
-            // part. Deduplicating it would discard all parts after the first.
-            if (cmdType != CommandType.SdQueryPart && !string.IsNullOrEmpty(msg.MsgId))
+            // SD_QUERY_PART / ENROLL_PROGRESS 复用同一 msg_id，禁止去重否则只剩第一条
+            if (cmdType != CommandType.SdQueryPart &&
+                cmdType != CommandType.EnrollProgress &&
+                !string.IsNullOrEmpty(msg.MsgId))
             {
                 string sourceId = device?.DeviceId ?? msg.SourceDeviceId ?? msg.DeviceId;
                 if (IsDuplicate($"{sourceId}|{msg.Cmd}|{msg.MsgId}")) return;
@@ -107,11 +127,23 @@ namespace FingerprintLockManager
                 case CommandType.AddFingerprintResult:
                     HandleFingerprintEnrollmentResult(device, msg);
                     break;
+                case CommandType.EnrollProgress:
+                    HandleEnrollProgress(device, msg);
+                    break;
                 case CommandType.SyncAck:
                     HandlePermissionSyncResult(device, msg);
                     break;
+                case CommandType.VerifyWindowEvent:
+                    HandleVerifyWindowEvent(device, msg);
+                    break;
+                case CommandType.BackupFpList:
+                    HandleBackupFpList(device, msg);
+                    break;
+                case CommandType.DeleteBackupFingerprintResult:
+                    HandleBackupFingerprintDeleted(device, msg);
+                    break;
                 case CommandType.Heartbeat:
-                    // 心跳包：仅维持连接，无需业务处理
+                    // 心跳包：仅维持连接（LastSeen 已在 MeshBridge 更新），无需业务处理
                     break;
                 // SD 卡集中存储响应（交给 SdStorageService 处理请求-响应匹配）
                 case CommandType.SdQueryResponse:
@@ -126,6 +158,9 @@ namespace FingerprintLockManager
                 case CommandType.Error:
                     App.SdStorageService.HandleResponse(msg);
                     HandleError(msg);
+                    break;
+                default:
+                    // HEARTBEAT_ACK / 未知命令：忽略
                     break;
             }
         }
@@ -251,7 +286,10 @@ namespace FingerprintLockManager
         /// </summary>
         private void HandleAck(DeviceClient? device, Message msg)
         {
+            // 二进制 ACK：信封 msg_id 与 data.ref_msg_id 通常相同；优先信封，回退 ref_msg_id
             var msgId = msg.MsgId;
+            if (string.IsNullOrEmpty(msgId))
+                msgId = TryGetStringData(msg, "ref_msg_id") ?? "";
             var result = TryGetStringData(msg, "result")
                 ?? TryGetStringData(msg, "code")
                 ?? Protocol.ErrOk;
@@ -263,9 +301,26 @@ namespace FingerprintLockManager
 
         private void HandleError(Message msg)
         {
+            // error_code 可能是数字（二进制解包）或字符串（旧 JSON）
             string code = TryGetStringData(msg, "error_code") ?? Protocol.ErrUnknown;
             string message = TryGetStringData(msg, "message") ?? "设备处理命令失败";
-            OnErrorReceived?.Invoke(msg.MsgId, code, message);
+            string msgId = msg.MsgId;
+            if (string.IsNullOrEmpty(msgId))
+                msgId = TryGetStringData(msg, "ref_msg_id") ?? "";
+            OnErrorReceived?.Invoke(msgId, code, message);
+        }
+
+        private void HandleEnrollProgress(DeviceClient? device, Message msg)
+        {
+            var data = msg.Data as JObject;
+            string phase = data?["phase"]?.ToString() ?? "";
+            int step = 0;
+            int total = 6;
+            if (data?["step"] != null) int.TryParse(data["step"]!.ToString(), out step);
+            if (data?["total"] != null) int.TryParse(data["total"]!.ToString(), out total);
+            if (total <= 0) total = 6;
+            string hint = data?["hint"]?.ToString() ?? phase;
+            OnEnrollProgress?.Invoke(msg.MsgId ?? "", phase, step, total, hint);
         }
 
         private void HandleFingerprintEnrollmentResult(DeviceClient? device, Message msg)
@@ -306,6 +361,43 @@ namespace FingerprintLockManager
             string deviceId = device?.DeviceId ?? msg.SourceDeviceId ?? msg.DeviceId;
             string result = TryGetStringData(msg, "result") ?? "fail";
             OnPermissionSyncResult?.Invoke(deviceId, msg.MsgId, result);
+        }
+
+        /// <summary>
+        /// V2.7 处理验证窗口事件（柜子上报进入/退出/超时/取消/开锁）
+        /// </summary>
+        private void HandleVerifyWindowEvent(DeviceClient? device, Message msg)
+        {
+            string deviceId = device?.DeviceId ?? msg.SourceDeviceId ?? msg.DeviceId;
+            string evt = TryGetStringData(msg, "event") ?? "";
+            string userId = TryGetStringData(msg, "user_id") ?? "";
+            int lockId = -1;
+            try
+            {
+                if (msg?.Data is JObject jobj && jobj["lock_id"] != null)
+                {
+                    lockId = (int)jobj["lock_id"]!;
+                }
+            }
+            catch { /* lock_id 可选字段 */ }
+            OnVerifyWindowEvent?.Invoke(deviceId, evt, userId, lockId);
+        }
+
+        /// <summary>V2.7 处理本机副指纹清单响应</summary>
+        private void HandleBackupFpList(DeviceClient? device, Message msg)
+        {
+            string deviceId = device?.DeviceId ?? msg.SourceDeviceId ?? msg.DeviceId;
+            string json = msg?.Data == null ? "{}" : JsonHelper.Serialize(msg.Data);
+            OnBackupFpList?.Invoke(deviceId, json);
+        }
+
+        /// <summary>V2.7 处理删除副指纹结果</summary>
+        private void HandleBackupFingerprintDeleted(DeviceClient? device, Message msg)
+        {
+            string deviceId = device?.DeviceId ?? msg.SourceDeviceId ?? msg.DeviceId;
+            string userId = TryGetStringData(msg, "user_id") ?? "";
+            string result = TryGetStringData(msg, "result") ?? "fail";
+            OnBackupFingerprintDeleted?.Invoke(deviceId, userId, result);
         }
 
         /// <summary>

@@ -4,8 +4,9 @@ using System.Collections.Concurrent;
 namespace FingerprintLockManager
 {
     /// <summary>
-    /// Root SD data gateway. It intentionally has no local cache or file
-    /// fallback: the root node is the only business-data authority.
+    /// Root SD data gateway. SD 卡是业务数据的主权威，但当 SD 不可用时，
+    /// 自动降级到本地磁盘缓存（LocalCacheService），保证 UI 与命令下发不中断；
+    /// SD 恢复后由 App 层负责将本地缓存回传到 SD 卡。
     /// </summary>
     public class RootDataService
     {
@@ -26,8 +27,15 @@ namespace FingerprintLockManager
 
         public JArray ReadArray(string table)
         {
+            // 路径 1：SD 不可用 —— 直接读本地缓存
             if (!App.SdStorageService.IsAvailable)
             {
+                var cached = LocalCacheService.ReadTable(table);
+                if (cached != null)
+                {
+                    _readVersions[table] = LocalCacheService.ReadTableVersion(table);
+                    return cached;
+                }
                 string reason = App.SdStorageService.IsRootConnected &&
                     App.SdStorageService.IsStorageReady == false
                     ? "根节点通讯正常，但 SD 卡未就绪，无法读取账号数据"
@@ -35,9 +43,17 @@ namespace FingerprintLockManager
                 throw new RootDataUnavailableException(reason);
             }
 
+            // 路径 2：SD 可用 —— 读取并同步到本地缓存
             var snapshot = App.SdStorageService.QueryTableSnapshot(table);
             if (snapshot == null || string.IsNullOrWhiteSpace(snapshot.Json))
             {
+                // SD 读取失败：用本地缓存兜底，避免界面空白
+                var fallback = LocalCacheService.ReadTable(table);
+                if (fallback != null)
+                {
+                    _readVersions[table] = LocalCacheService.ReadTableVersion(table);
+                    return fallback;
+                }
                 string detail = App.SdStorageService.LastError;
                 throw new RootDataUnavailableException(string.IsNullOrWhiteSpace(detail)
                     ? $"读取根节点表 {table} 失败"
@@ -51,6 +67,9 @@ namespace FingerprintLockManager
                 if (array == null)
                     throw new RootDataUnavailableException($"根节点表 {table} 格式无效");
                 _readVersions[table] = snapshot.Version;
+                // 同步到本地缓存（失败不影响主流程）
+                LocalCacheService.WriteTable(table, array);
+                LocalCacheService.WriteTableVersion(table, snapshot.Version);
                 return array;
             }
             catch (RootDataUnavailableException)
@@ -70,11 +89,31 @@ namespace FingerprintLockManager
 
         public bool SaveArray(string table, JArray array)
         {
-            if (!App.SdStorageService.IsAvailable || array == null) return false;
+            if (array == null) return false;
+
+            // 路径 1：SD 不可用 —— 仅写本地缓存
+            if (!App.SdStorageService.IsAvailable)
+            {
+                uint v = LocalCacheService.ReadTableVersion(table) + 1;
+                LocalCacheService.WriteTable(table, array);
+                LocalCacheService.WriteTableVersion(table, v);
+                _readVersions[table] = v;
+                return true;
+            }
+
+            // 路径 2：SD 可用 —— 写 SD，成功后同步到本地缓存
             if (!_readVersions.TryRemove(table, out uint baseVersion)) return false;
 
-            return App.SdStorageService.SaveTable(
+            bool saved = App.SdStorageService.SaveTable(
                 table, array.ToString(Newtonsoft.Json.Formatting.None), baseVersion);
+            if (saved)
+            {
+                // SD 保存成功后同步到本地缓存（失败不影响主流程）
+                LocalCacheService.WriteTable(table, array);
+                LocalCacheService.WriteTableVersion(table, baseVersion + 1);
+                _readVersions[table] = baseVersion + 1;
+            }
+            return saved;
         }
 
         public static uint GetTableVersion(string table, SdVersionInfo? version)

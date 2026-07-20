@@ -1,9 +1,13 @@
 /**
- * message_handler.h - 消息处理模块（V2.0 Mesh版本）
- * 状态机：STATE_IDLE/WAIT_FINGER/ENROLLING；开锁鉴权只读取本地权限缓存
- * 传 JsonObject 引用避免两次解析
- * 新增 ACK 确认机制（msg_id 原样回传）和错误码处理
- * 适配新命令：REGISTER/TIME_SYNC/PERM_LOST/LOG_REPORT_ACK/SYNC_PERMISSIONS
+ * message_handler.h - 消息处理模块（V2.7 窗口化验证版本）
+ * 状态机：STATE_IDLE / STATE_WAIT_FINGER(常态轮询) / STATE_VERIFIED_WINDOW(10s) / STATE_ENROLLING
+ *
+ * V2.7 流程反转：先验证指纹 -> 10 秒操作窗口 -> 按键开锁
+ *   - STATE_WAIT_FINGER: 常态轮询 AS608，匹配成功则载入权限进入窗口态
+ *   - STATE_VERIFIED_WINDOW: 10s 内按键开锁；超时/取消回 IDLE
+ *   - STATE_ENROLLING: 主/副指纹录入
+ *
+ * 开锁鉴权只读取本地权限缓存；网络仅用于管理/同步。
  */
 #ifndef MESSAGE_HANDLER_H
 #define MESSAGE_HANDLER_H
@@ -11,6 +15,7 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include "config.h"
+#include "app_protocol.h"
 
 class MessageHandler {
 public:
@@ -20,21 +25,25 @@ public:
     // 处理收到的消息（JSON 字符串，解析一次后传 JsonObject 引用）
     static void handleIncoming(const String &message);
 
+    // Binary app envelope (hybrid: complex payloads may still be JSON data)
+    static void handleIncomingApp(const AppMessageView &view);
+
     // 主循环调用，处理本机事件（按键、指纹验证、状态机推进）
     static void update();
 
     // ====== 本机事件触发 ======
-    // 按键按下：记录待开锁 ID，进入指纹验证流程
+    // 按键按下：在 STATE_VERIFIED_WINDOW 中开锁；其他状态忽略（V2.7 流程反转）
     static void onKeyPressed(int lockId);
 
-    // 取消键按下：中止当前指纹验证流程，回到 IDLE
+    // 取消键按下：中止当前指纹验证窗口或录入流程，回到 IDLE
     static void onCancel();
 
     // 指纹验证流程的状态
     enum VerifyState {
-        STATE_IDLE = 0,         // 空闲
-        STATE_WAIT_FINGER,      // 等待指纹（已按键）
-        STATE_ENROLLING         // 正在录入指纹
+        STATE_IDLE = 0,           // 空闲（初始态，立即进入 WAIT_FINGER）
+        STATE_WAIT_FINGER,        // 常态轮询指纹（V2.7：不再由按键触发）
+        STATE_VERIFIED_WINDOW,    // 验证成功后的 10s 操作窗口
+        STATE_ENROLLING           // 正在录入指纹（主/副）
     };
 
     static VerifyState getState();
@@ -81,6 +90,10 @@ private:
     static void cmdRegister(const String &msgId);
     static void cmdReadPermissions(const String &msgId);
     static void cmdDeleteAllFingerprints(const String &msgId);
+    // V2.7 副指纹命令
+    static void cmdAddBackupFingerprint(const JsonObject &data, const String &msgId);
+    static void cmdDeleteBackupFingerprint(const JsonObject &data, const String &msgId);
+    static void cmdBackupFpListRequest(const String &msgId);
 
     // ====== SD 卡集中存储命令（仅根节点响应） ======
 #ifdef ENABLE_SD_CARD
@@ -99,9 +112,12 @@ private:
 #endif // ENABLE_SD_CARD
 
     // ====== 辅助方法 ======
-    // 检查本地缓存权限并开锁（离线模式）
-    // 返回 true 表示已用本地缓存处理（成功或失败）
-    static bool tryLocalPermission(int fingerprintId, int lockId);
+    // V2.7：验证成功后载入权限到窗口态（不立即开锁）
+    static bool loadVerifiedPermission(int as608Id);
+    // V2.7：在窗口态按键时尝试开锁
+    static bool openIfPermitted(int lockId);
+    // 上报验证窗口事件（进入/退出/超时/取消）
+    static void sendVerifyWindowEvent(const char *event, int lockId = -1);
 
     // 状态机超时检查
     static void checkTimeout();
@@ -114,7 +130,7 @@ private:
     static bool parsePermission(const JsonObject &data, UserPermission &perm);
     static void resetPermissionSync();
 
-    // 待开锁 ID
+    // 待开锁 ID（V2.7：仅录入流程复用，验证窗口改用 verifiedPerms）
     static int pendingLockId;
     // 待验证指纹 ID
     static int pendingFingerprintId;
@@ -122,10 +138,16 @@ private:
     static VerifyState state;
     // 状态进入时刻
     static unsigned long stateEnterTime;
+    // V2.7：验证窗口期内已验证的权限记录
+    static UserPermission verifiedPerms;
+    static bool verifiedPermsValid;
     // 录入指纹相关
     static int enrollFingerprintId;
     static String enrollUserId;
     static String enrollRequestMsgId;
+    static String enrollLastPhaseCode; // 避免重复上报同一阶段
+    // V2.7：录入是否为副指纹
+    static bool enrollIsBackup;
     // 指纹验证失败次数（用于告警）
     static int verifyFailCount;
     // 权限丢失待上报标志

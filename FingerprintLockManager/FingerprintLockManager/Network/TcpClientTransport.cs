@@ -37,8 +37,11 @@ namespace FingerprintLockManager
         /// <summary>是否已连接</summary>
         public bool IsConnected => _connected;
 
-        /// <summary>收到一条完整 JSON 消息事件</summary>
+        /// <summary>收到一条完整 JSON 消息事件（过渡兼容）</summary>
         public event Action<string>? LineReceived;
+
+        /// <summary>收到完整应用层负载字节</summary>
+        public event Action<byte[]>? PayloadReceived;
 
         /// <summary>连接状态变化事件（参数为是否已连接）</summary>
         public event Action<bool>? ConnectionChanged;
@@ -76,14 +79,26 @@ namespace FingerprintLockManager
             DisconnectInternal();
         }
 
-        /// <summary>发送一条 JSON 消息（编码为 ESP 二进制协议帧）</summary>
+        /// <summary>发送一条 JSON 消息（编码为 ESP 二进制协议帧，过渡兼容）</summary>
         public bool Send(string jsonLine)
         {
-            if (!_connected || _stream == null) return false;
+            byte[]? frame = FrameCodec.Encode(jsonLine.TrimEnd('\n', '\r'));
+            return WriteFrame(frame);
+        }
+
+        /// <summary>发送应用层负载字节（内部封帧）</summary>
+        public bool SendPayload(byte[] appPayload)
+        {
+            if (appPayload == null || appPayload.Length == 0) return false;
+            byte[]? frame = FrameCodec.Encode(appPayload);
+            return WriteFrame(frame);
+        }
+
+        private bool WriteFrame(byte[]? frame)
+        {
+            if (!_connected || _stream == null || frame == null) return false;
             try
             {
-                byte[]? frame = FrameCodec.Encode(jsonLine.TrimEnd('\n', '\r'));
-                if (frame == null) return false;
                 lock (_sendLock)
                 {
                     _stream.Write(frame, 0, frame.Length);
@@ -154,8 +169,19 @@ namespace FingerprintLockManager
                 {
                     int count = await _stream!.ReadAsync(buffer, 0, buffer.Length, token);
                     if (count == 0) break;
-                    _decoder.Append(buffer, 0, count,
-                        json => LineReceived?.Invoke(json),
+                    _decoder.AppendBytes(buffer, 0, count,
+                        payload =>
+                        {
+                            PayloadReceived?.Invoke(payload);
+                            if (payload.Length > 0 && (payload[0] == (byte)'{' || payload[0] == (byte)'['))
+                            {
+                                try
+                                {
+                                    LineReceived?.Invoke(System.Text.Encoding.UTF8.GetString(payload));
+                                }
+                                catch { }
+                            }
+                        },
                         bytes => UnframedDataReceived?.Invoke(bytes));
                 }
             }

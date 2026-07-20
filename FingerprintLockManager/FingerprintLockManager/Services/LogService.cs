@@ -41,6 +41,101 @@ namespace FingerprintLockManager
             return Filter(deviceId, userId, startTime, endTime, result).Count();
         }
 
+        /// <summary>
+        /// V2.7：查询当前用户可见范围内的日志。
+        /// Admin 全部；Teacher 仅本班学生 + 自己的日志；Student 仅自己的日志。
+        /// 设备维度不限制（教师可看到所有柜子的日志，但只能看到本班学生的操作）。
+        /// </summary>
+        public List<LogEntry> QueryVisibleLogs(string? deviceId = null, string? userId = null,
+            DateTime? startTime = null, DateTime? endTime = null, string? result = null,
+            int limit = 1000, int offset = 0, string? keyword = null)
+        {
+            var query = VisibleFilter(deviceId, userId, startTime, endTime, result, keyword);
+            if (offset > 0) query = query.Skip(offset);
+            return query.Take(limit > 0 ? limit : 1000).ToList();
+        }
+
+        /// <summary>
+        /// V2.7：统计当前用户可见范围内的日志总数（与 QueryVisibleLogs 配套用于分页）。
+        /// </summary>
+        public int CountVisibleLogs(string? deviceId = null, string? userId = null,
+            DateTime? startTime = null, DateTime? endTime = null, string? result = null,
+            string? keyword = null)
+        {
+            return VisibleFilter(deviceId, userId, startTime, endTime, result, keyword).Count();
+        }
+
+        private IEnumerable<LogEntry> VisibleFilter(string? deviceId, string? userId,
+            DateTime? startTime, DateTime? endTime, string? result, string? keyword)
+        {
+            var scope = DataScopeContext.Instance;
+            var current = scope.CurrentUser;
+            if (current == null) return Enumerable.Empty<LogEntry>();
+
+            HashSet<string>? visibleUserIds = null;
+            if (!scope.IsAdmin)
+            {
+                var visibleUsers = App.UserService.GetVisibleUsers();
+                visibleUserIds = new HashSet<string>(
+                    visibleUsers.Select(u => u.UserId), StringComparer.OrdinalIgnoreCase);
+            }
+
+            var query = Filter(deviceId, userId, startTime, endTime, result);
+            if (visibleUserIds != null)
+            {
+                // 仅保留可见用户的日志（user_id 为空的开锁失败日志也保留，便于教师看到异常）
+                query = query.Where(l => string.IsNullOrEmpty(l.UserId) || visibleUserIds.Contains(l.UserId));
+            }
+            if (!string.IsNullOrWhiteSpace(keyword))
+            {
+                string k = keyword.Trim();
+                query = query.Where(l =>
+                    ContainsIgnoreCase(l.DeviceId, k) ||
+                    ContainsIgnoreCase(l.UserId, k) ||
+                    ContainsIgnoreCase(l.Action, k) ||
+                    ContainsIgnoreCase(l.Result, k) ||
+                    ContainsIgnoreCase(l.Reason, k) ||
+                    l.LockId.ToString().Contains(k, StringComparison.OrdinalIgnoreCase));
+            }
+            return query;
+        }
+
+        private static bool ContainsIgnoreCase(string? value, string keyword) =>
+            !string.IsNullOrEmpty(value) &&
+            value.Contains(keyword, StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// V2.7：聚合当前用户可见范围内的失败日志原因。
+        /// </summary>
+        public List<(string Reason, int Count)> AggregateVisibleFailReasons(
+            string? deviceId = null, string? userId = null,
+            DateTime? startTime = null, DateTime? endTime = null, int top = 5)
+        {
+            var scope = DataScopeContext.Instance;
+            var current = scope.CurrentUser;
+            if (current == null) return new List<(string, int)>();
+
+            HashSet<string>? visibleUserIds = null;
+            if (!scope.IsAdmin)
+            {
+                var visibleUsers = App.UserService.GetVisibleUsers();
+                visibleUserIds = new HashSet<string>(
+                    visibleUsers.Select(u => u.UserId), StringComparer.OrdinalIgnoreCase);
+            }
+
+            var query = Filter(deviceId, userId, startTime, endTime, "fail");
+            if (visibleUserIds != null)
+            {
+                query = query.Where(l => string.IsNullOrEmpty(l.UserId) || visibleUserIds.Contains(l.UserId));
+            }
+            return query
+                .GroupBy(l => string.IsNullOrWhiteSpace(l.Reason) ? "(无原因)" : l.Reason)
+                .Select(g => (Reason: g.Key, Count: g.Count()))
+                .OrderByDescending(x => x.Count)
+                .Take(top > 0 ? top : 5)
+                .ToList();
+        }
+
         public List<(string Reason, int Count)> AggregateFailReasons(
             string? deviceId = null, string? userId = null,
             DateTime? startTime = null, DateTime? endTime = null, int top = 5)

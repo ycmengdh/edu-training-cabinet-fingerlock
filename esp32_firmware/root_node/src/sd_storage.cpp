@@ -11,32 +11,65 @@
 #include <ArduinoJson.h>
 
 bool SdStorage::mounted = false;
+String SdStorage::lastError = "";
 
 bool SdStorage::init() {
     if (mounted) return true;
 
     Debug::println(F("[SD] Init SD card (SD_MMC 1-bit mode)..."));
 
+    // V2.7: 详细诊断 SD 失败原因（推送至 host 便于排查）
+    auto reportFail = [](const char *stage, const char *detail) {
+        String msg = String("[SD FAIL] ") + stage + ": " + detail;
+        Debug::println(msg.c_str());
+        // 同步推送到 host（USB-CDC 串口）
+        Serial.printf("\r\n[ROOT_SD_FAIL] stage=%s detail=%s\r\n", stage, detail);
+        Serial.flush();
+        // 保存错误状态供显示
+        SdStorage::lastError = msg;
+    };
+
     // Configure SD_MMC pins for 1-bit mode (CLK, CMD, D0)
     if (!SD_MMC.setPins(SD_SCLK_PIN, SD_MOSI_PIN, SD_MISO_PIN)) {
-        Debug::println(F("[SD] SD_MMC setPins failed! Check pin configuration"));
+        reportFail("setPins",
+            "GPIO16/17/18 may be in use or invalid for SD_MMC 1-bit");
         mounted = false;
         return false;
+    }
+    Debug::printf("[SD] setPins ok: CLK=GPIO%d CMD=GPIO%d D0=GPIO%d\n",
+                  SD_SCLK_PIN, SD_MOSI_PIN, SD_MISO_PIN);
+
+    // V2.7: 显式指定时钟频率以兼容更多 SD 卡（与参考示例 ImageDemo 一致）
+    // 一些低速/老旧/劣质 SD 卡在默认 20MHz 下时序违例，需要降至 4MHz 甚至 1MHz。
+    // 首次失败时自动重试更慢的频率（覆盖率高、绝不格式化用户数据）。
+    const uint32_t kSdClockCandidates[] = { 20000000, 4000000, 1000000 };
+    bool beginOk = false;
+    uint32_t usedClock = 0;
+    const char *failStage = "mount";
+
+    for (uint32_t clockHz : kSdClockCandidates) {
+        Debug::printf("[SD] trying mount 1bit=true clock=%luHz\n", (unsigned long)clockHz);
+        // mode1bit=true, format_if_mount_failed=false（绝不格式化，保护用户数据）
+        if (SD_MMC.begin(SD_MOUNT_POINT, true, false, clockHz)) {
+            beginOk = true;
+            usedClock = clockHz;
+            break;
+        }
+        Debug::printf("[SD] mount failed at %luHz, retrying slower...\n", (unsigned long)clockHz);
     }
 
-    // Mount SD card in 1-bit mode. Never auto-format: missing card is a normal
-    // offline condition and must not wipe or crash the root node.
-    // mode1bit=true, format_if_mount_failed=false
-    if (!SD_MMC.begin(SD_MOUNT_POINT, true, false)) {
-        Debug::println(F("[SD] SD card mount failed (no card / wiring). Root continues without storage."));
+    if (!beginOk) {
+        reportFail(failStage,
+            "no card / wiring / wrong pin assignment / card incompatible even at 1MHz");
         mounted = false;
         return false;
     }
+    Debug::printf("[SD] begin(1bit=true) returned ok at %luHz\n", (unsigned long)usedClock);
 
     // Detect card type
     uint8_t cardType = SD_MMC.cardType();
     if (cardType == CARD_NONE) {
-        Debug::println(F("[SD] SD card not detected"));
+        reportFail("cardType", "cardType == CARD_NONE after begin()");
         mounted = false;
         return false;
     }
@@ -48,10 +81,56 @@ bool SdStorage::init() {
 
     // Mark the volume ready before reading/writing the initial tables.
     mounted = true;
+    lastError = "";
 
     // Create directory structure
     ensureDir(SD_DATA_DIR);
     ensureDir(SD_FP_DIR);
+
+    // V2.7: SD 上"已知用户表"中是否有 admin 账号的检查 + 强补全
+    // 原因：旧版路径重复 bug (/sdcard/sdcard/data/...) 导致首次 mount 时
+    // users.json 写入失败，SD 卡上"看似空表"。新固件修复路径后要主动
+    // 补全 admin 账号，避免用户无法登录。
+    const char kAdminSalt[] = "000102030405060708090a0b0c0d0e0f";
+    const char kAdminHash[] = "eb427d2e310382de4e4bf02b93005681040294011a20356bb0348fc49ad70a8f";
+    auto ensureAdminExists = [&]() -> bool {
+        String usersJson;
+        if (!readTable("users", usersJson) || usersJson.length() == 0) {
+            // 文件不存在或读失败：直接创建含 admin 的新表
+            String initJson = String("[{\"user_id\":\"admin\",\"name\":\"系统管理员\",\"role\":\"admin\","
+                "\"fingerprint_id\":null,\"password_salt\":\"") + kAdminSalt +
+                "\",\"password_hash\":\"" + kAdminHash +
+                "\",\"enabled\":true}]";
+            String path = tablePath("users");
+            if (atomicWrite(path, (const uint8_t *)initJson.c_str(), initJson.length())) {
+                Debug::println(F("[SD] admin account bootstrapped (no users.json)"));
+                return true;
+            }
+            return false;
+        }
+        // 文件存在但可能不含 admin：检查并补全
+        if (usersJson.indexOf("\"user_id\":\"admin\"") < 0) {
+            // 简单字符串判断（避免引入 ArduinoJson 解析开销）。如果没有 admin
+            // 就在数组开头插入。注意：原子写 = 写 .tmp + rename，不会损坏。
+            String insert = String("{\"user_id\":\"admin\",\"name\":\"系统管理员\",\"role\":\"admin\","
+                "\"fingerprint_id\":null,\"password_salt\":\"") + kAdminSalt +
+                "\",\"password_hash\":\"" + kAdminHash +
+                "\",\"enabled\":true},";
+            // usersJson 形如 [{...}, {...}]
+            int pos = usersJson.indexOf('[');
+            if (pos >= 0) {
+                String newJson = usersJson.substring(0, pos + 1) + insert + usersJson.substring(pos + 1);
+                String path = tablePath("users");
+                if (atomicWrite(path, (const uint8_t *)newJson.c_str(), newJson.length())) {
+                    Debug::println(F("[SD] admin account injected into existing users.json"));
+                    return true;
+                }
+            }
+            return false;
+        }
+        Debug::println(F("[SD] admin account already present"));
+        return true;
+    };
 
     // These files are the root node database. The PC only accesses them via
     // SD_QUERY/SD_SAVE and must not create a second business database.
@@ -75,6 +154,12 @@ bool SdStorage::init() {
             }
             Debug::printf("[SD] initialized table: %s\n", table.name);
         }
+    }
+
+    // V2.7: 补全 admin 账号（兼容旧 SD 卡或新分区）
+    if (!ensureAdminExists()) {
+        Debug::println(F("[SD] WARNING: failed to bootstrap admin account"));
+        // 不视为致命错误：上层仍可走内置 admin 兜底
     }
 
     return true;

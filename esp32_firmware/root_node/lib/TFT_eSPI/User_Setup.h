@@ -47,6 +47,9 @@
 
 #define TFT_INVERSION_ON
 
+// Built-in 6x8 font used by the root status screen.
+#define LOAD_GLCD
+
 // ##################################################################################
 //
 // Section 6. ESP32 pins used for SPI interface

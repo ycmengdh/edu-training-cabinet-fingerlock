@@ -13,6 +13,33 @@ void Storage::begin() {
     if (!initialized) {
         prefs.begin("esp32_cfg", false);
         initialized = true;
+
+        // 首次启动时所有字符串键都不存在，ESP32 Arduino Preferences::getString()
+        // 即使有默认值 fallback 也会通过 log_e() 输出 "nvs_get_str len fail: ... NOT_FOUND"
+        // 错误日志。这里通过哨兵键检测首次启动，一次性把所有字段写入默认值，
+        // 后续启动 getString 即可命中 NVS，不再报 NOT_FOUND 警告。
+        if (!prefs.isKey("cfg_init_done")) {
+            DeviceConfig def;
+            def.device_id      = "ROOT_001";
+            def.device_name    = "Root Node";
+            def.work_mode      = MODE_MESH;
+            def.is_root        = true;
+            def.uplink_mode    = UPLINK_USB;
+            def.mesh_channel   = MESH_CHANNEL;
+            def.mesh_password  = MESH_PASSWORD;
+            def.wifi_ssid      = "";
+            def.wifi_password  = "";
+            def.server_ip      = UPLINK_SERVER_IP_DEFAULT;
+            def.server_port    = UPLINK_TCP_PORT;
+            def.fingerprint_count = 0;
+            def.perm_version   = 0;
+            def.hmac_enabled   = false;
+            def.hmac_key       = "";
+            saveDeviceConfig(def);
+            prefs.putBool("cfg_init_done", true);
+            Debug::println(F("[STORAGE] first boot: defaults written to NVS"));
+        }
+
         Debug::println(F("[STORAGE] Storage init done (NVS)"));
     }
 }
@@ -20,10 +47,14 @@ void Storage::begin() {
 bool Storage::loadDeviceConfig(DeviceConfig &cfg) {
     if (!initialized) begin();
 
-    cfg.device_id    = prefs.getString("device_id", DEVICE_ID_DEFAULT);
+    cfg.device_id    = prefs.getString("device_id", "ROOT_001");
     cfg.device_name  = prefs.getString("device_name", "Root Node");
     cfg.work_mode    = (WorkMode)prefs.getUChar("work_mode", MODE_MESH);
+    // 根节点固件默认永远是 Root
     cfg.is_root      = prefs.getBool("is_root", true);
+    if (!cfg.is_root) {
+        cfg.is_root = true;
+    }
     cfg.uplink_mode  = (UplinkMode)prefs.getUChar("uplink_mode", UPLINK_USB);
     cfg.mesh_channel = prefs.getUChar("mesh_channel", MESH_CHANNEL);
     cfg.mesh_password = prefs.getString("mesh_password", MESH_PASSWORD);

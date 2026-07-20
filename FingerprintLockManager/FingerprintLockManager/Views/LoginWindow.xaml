@@ -4,74 +4,152 @@
         Title="登录 - 实训柜指纹权限管理系统"
         Height="460" Width="760" MinHeight="460" MinWidth="760"
         WindowStartupLocation="CenterScreen" ResizeMode="NoResize"
-        Background="White">
+        Background="{StaticResource BackgroundBrush}"
+        UseLayoutRounding="True" SnapsToDevicePixels="True">
+    <Window.Resources>
+        <Style x:Key="LoginTextBox" TargetType="TextBox" BasedOn="{StaticResource {x:Type TextBox}}">
+            <Setter Property="Height" Value="40" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Padding" Value="30,4,10,4" />
+        </Style>
+        <Style x:Key="LoginPasswordBox" TargetType="PasswordBox" BasedOn="{StaticResource {x:Type PasswordBox}}">
+            <Setter Property="Height" Value="40" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Padding" Value="30,4,10,4" />
+        </Style>
+        <Style x:Key="LoginActionButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+            <Setter Property="Height" Value="40" />
+            <Setter Property="FontSize" Value="12" />
+        </Style>
+        <Style x:Key="LoginUtilityButton" TargetType="Button" BasedOn="{StaticResource SecondaryButton}">
+            <Setter Property="Height" Value="34" />
+            <Setter Property="FontWeight" Value="Normal" />
+            <Setter Property="Padding" Value="8,0" />
+            <Setter Property="FontSize" Value="11" />
+        </Style>
+    </Window.Resources>
+
     <Grid>
         <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="300"/>
-            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="275" />
+            <ColumnDefinition Width="*" />
         </Grid.ColumnDefinitions>
 
-        <Border Grid.Column="0" Background="{StaticResource SidebarBrush}">
-            <Grid Margin="32">
+        <Border Background="{StaticResource SidebarBrush}">
+            <Grid Margin="30,28,28,26">
                 <Grid.RowDefinitions>
-                    <RowDefinition Height="*"/>
-                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
-                <StackPanel VerticalAlignment="Center">
-                    <Border Width="48" Height="48" CornerRadius="4" Background="#2B8B77" HorizontalAlignment="Left">
-                        <TextBlock Text="&#xE8D7;" FontFamily="Segoe MDL2 Assets" FontSize="23" Foreground="White"
-                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+
+                <StackPanel Orientation="Horizontal">
+                    <Border Width="44" Height="44" CornerRadius="7" Background="{StaticResource PrimaryBrush}">
+                        <TextBlock Text="&#xE8D7;" FontFamily="Segoe MDL2 Assets" FontSize="21"
+                                   Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center" />
                     </Border>
-                    <TextBlock Text="实训柜" Foreground="White" FontSize="28" FontWeight="SemiBold" Margin="0,22,0,0"/>
-                    <TextBlock Text="指纹权限管理系统" Foreground="#C8D1D4" FontSize="16" Margin="0,5,0,0"/>
-                    <Rectangle Width="42" Height="3" Fill="{StaticResource AccentBrush}" HorizontalAlignment="Left" Margin="0,22,0,0"/>
-                </StackPanel>
-                <StackPanel Grid.Row="1">
-                    <StackPanel Orientation="Horizontal">
-                        <Ellipse x:Name="LinkStatusDot" Width="8" Height="8" Fill="{StaticResource DangerBrush}" VerticalAlignment="Center"/>
-                        <TextBlock x:Name="LinkStatusText" Text="等待根节点" Foreground="White" FontSize="12"
-                                   FontWeight="SemiBold" Margin="8,0,0,0"/>
+                    <StackPanel Margin="12,0,0,0" VerticalAlignment="Center">
+                        <TextBlock Text="实训中心" Foreground="White" FontSize="14" FontWeight="SemiBold" />
+                        <TextBlock Text="设备管理控制台" Foreground="#9FB0B2" FontSize="10" Margin="0,4,0,0" />
                     </StackPanel>
-                    <TextBlock x:Name="LinkStatusDetailText" Text="物理链路尚未连接" Foreground="#9EAAAE"
-                               FontSize="10" Margin="16,5,0,0" TextWrapping="Wrap"/>
                 </StackPanel>
+
+                <StackPanel Grid.Row="1" VerticalAlignment="Center">
+                    <TextBlock Text="实训柜" Foreground="White" FontSize="31" FontWeight="SemiBold" />
+                    <TextBlock Text="指纹权限管理系统" Foreground="#B8C8C9" FontSize="15" Margin="0,7,0,0" />
+                    <Border Width="38" Height="3" Background="{StaticResource AccentBrush}"
+                            HorizontalAlignment="Left" Margin="0,20,0,0" />
+                </StackPanel>
+
+                <Border Grid.Row="2" BorderBrush="#385057" BorderThickness="1" CornerRadius="6" Padding="11,9">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Ellipse x:Name="LinkStatusDot" Width="8" Height="8" Fill="{StaticResource DangerBrush}"
+                                 VerticalAlignment="Top" Margin="0,4,0,0" />
+                        <StackPanel Grid.Column="1" Margin="9,0,0,0">
+                            <TextBlock x:Name="LinkStatusText" Text="等待根节点" Foreground="White" FontSize="11"
+                                       FontWeight="SemiBold" />
+                            <TextBlock x:Name="LinkStatusDetailText" Text="物理链路尚未连接" Foreground="#9EAAAE"
+                                       FontSize="10" Margin="0,3,0,0" TextWrapping="Wrap" />
+                        </StackPanel>
+                    </Grid>
+                </Border>
             </Grid>
         </Border>
 
-        <Grid Grid.Column="1" Margin="64,52">
+        <Grid Grid.Column="1" Margin="48,32,48,28">
             <Grid.RowDefinitions>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="*"/>
-                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
+
             <StackPanel>
-                <TextBlock Text="系统登录" FontSize="22" FontWeight="SemiBold"/>
-                <TextBlock Text="ROOT ACCOUNT" Foreground="{StaticResource SubTextBrush}" FontSize="10" Margin="0,5,0,0"/>
+                <TextBlock Text="系统登录" FontSize="24" FontWeight="SemiBold" />
+                <TextBlock Text="请输入已授权的用户 ID 和密码" Foreground="{StaticResource SubTextBrush}"
+                           FontSize="11" Margin="0,6,0,0" />
             </StackPanel>
 
             <StackPanel Grid.Row="1" VerticalAlignment="Center">
-                <TextBlock Text="用户 ID" Style="{StaticResource LabelText}" Margin="0,0,0,7"/>
-                <TextBox x:Name="UserIdBox" Height="38"/>
-                <TextBlock Text="密码" Style="{StaticResource LabelText}" Margin="0,18,0,7"/>
-                <PasswordBox x:Name="PasswordBox" Height="38"/>
-                <Button x:Name="LoginButton" Content="登录" Height="38" Margin="0,24,0,0" Click="LoginButton_Click"/>
+                <TextBlock Text="用户 ID" Style="{StaticResource LabelText}" Margin="0,0,0,6" />
+                <Grid>
+                    <TextBox x:Name="UserIdBox" Style="{StaticResource LoginTextBox}" Text="admin" />
+                    <TextBlock Text="&#xE77B;" FontFamily="Segoe MDL2 Assets" FontSize="14"
+                               Foreground="#839195" Margin="12,0,0,0" HorizontalAlignment="Left"
+                               VerticalAlignment="Center" IsHitTestVisible="False" />
+                </Grid>
+
+                <TextBlock Text="密码" Style="{StaticResource LabelText}" Margin="0,15,0,6" />
+                <Grid>
+                    <PasswordBox x:Name="PasswordBox" Style="{StaticResource LoginPasswordBox}" />
+                    <TextBlock Text="&#xE72E;" FontFamily="Segoe MDL2 Assets" FontSize="13"
+                               Foreground="#839195" Margin="12,0,0,0" HorizontalAlignment="Left"
+                               VerticalAlignment="Center" IsHitTestVisible="False" />
+                </Grid>
+
+                <Button x:Name="LoginButton" Content="登录" Style="{StaticResource LoginActionButton}"
+                        Margin="0,18,0,0" Click="LoginButton_Click" />
+
                 <Grid Margin="0,10,0,0">
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="10"/>
-                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="10" />
+                        <ColumnDefinition Width="*" />
                     </Grid.ColumnDefinitions>
-                    <Button x:Name="ConnectionSettingsButton" Content="连接设置" Height="38"
-                            Style="{StaticResource SecondaryButton}" Click="ConnectionSettingsButton_Click"/>
-                    <Button x:Name="CommunicationTestButton" Grid.Column="2" Content="通讯测试" Height="38"
-                            Style="{StaticResource SecondaryButton}" Click="CommunicationTestButton_Click"/>
+                    <Button x:Name="ConnectionSettingsButton" Style="{StaticResource LoginUtilityButton}"
+                            Click="ConnectionSettingsButton_Click">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="&#xE713;" FontFamily="Segoe MDL2 Assets" FontSize="11"
+                                       VerticalAlignment="Center" Margin="0,0,6,0" />
+                            <TextBlock Text="连接设置" VerticalAlignment="Center" />
+                        </StackPanel>
+                    </Button>
+                    <Button x:Name="CommunicationTestButton" Grid.Column="2"
+                            Style="{StaticResource LoginUtilityButton}" Click="CommunicationTestButton_Click">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="&#xE9D9;" FontFamily="Segoe MDL2 Assets" FontSize="11"
+                                       VerticalAlignment="Center" Margin="0,0,6,0" />
+                            <TextBlock Text="通讯日志" VerticalAlignment="Center" />
+                        </StackPanel>
+                    </Button>
                 </Grid>
             </StackPanel>
 
-            <Border x:Name="HintBorder" Grid.Row="2" Background="{StaticResource BackgroundBrush}"
-                    BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="4" Padding="10,8">
-                <TextBlock x:Name="HintText" Text="请输入账号信息"
-                           Foreground="{StaticResource SubTextBrush}" FontSize="11" TextWrapping="Wrap"/>
+            <Border x:Name="HintBorder" Grid.Row="2" Background="#F4F8F6" BorderBrush="#DDE8E3"
+                    BorderThickness="1" CornerRadius="6" Padding="10,8" Margin="0,14,0,0">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="&#xE946;" FontFamily="Segoe MDL2 Assets" FontSize="12"
+                               Foreground="{StaticResource PrimaryBrush}" VerticalAlignment="Top" Margin="0,1,8,0" />
+                    <TextBlock x:Name="HintText" Grid.Column="1" Text="请输入账号信息"
+                               Foreground="{StaticResource SubTextBrush}" FontSize="10" TextWrapping="Wrap" />
+                </Grid>
             </Border>
         </Grid>
     </Grid>

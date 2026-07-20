@@ -5,10 +5,10 @@
     <Grid Margin="24,20,24,24">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
+        <!-- 顶部标题栏 -->
         <Grid Grid.Row="0" Margin="0,0,0,16">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
@@ -26,80 +26,151 @@
             </StackPanel>
         </Grid>
 
-        <Border Grid.Row="1" Style="{StaticResource ToolbarPanel}" Margin="0,0,0,12">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="160"/>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="*"/>
-                </Grid.ColumnDefinitions>
-                <TextBlock Text="远程开锁" Style="{StaticResource SectionTitleText}" VerticalAlignment="Center" Margin="0,0,16,0"/>
-                <ComboBox x:Name="LockSelectBox" Grid.Column="1">
-                    <ComboBoxItem Content="Lock 0  系统锁" Tag="0"/>
-                    <ComboBoxItem Content="Lock 1  实训柜 1" Tag="1"/>
-                    <ComboBoxItem Content="Lock 2  实训柜 2" Tag="2"/>
-                    <ComboBoxItem Content="Lock 3  实训柜 3" Tag="3"/>
-                </ComboBox>
-                <Button x:Name="RemoteUnlockButton" Grid.Column="2" Margin="10,0,0,0" Click="RemoteUnlockButton_Click">
-                    <StackPanel Orientation="Horizontal">
-                        <TextBlock Text="&#xE785;" FontFamily="Segoe MDL2 Assets" Foreground="White" Margin="0,0,8,0"/>
-                        <TextBlock Text="执行开锁" Foreground="White"/>
-                    </StackPanel>
-                </Button>
-            </Grid>
-        </Border>
+        <!-- 左设备列表 + 右操作面板 -->
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="380"/>
+                <ColumnDefinition Width="12"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
 
-        <Border Grid.Row="2" Style="{StaticResource Panel}">
-            <DataGrid x:Name="DeviceDataGrid" BorderThickness="0" IsReadOnly="True" SelectionMode="Single">
-                <DataGrid.Columns>
-                    <DataGridTemplateColumn Header="状态" Width="72">
-                        <DataGridTemplateColumn.CellTemplate>
-                            <DataTemplate>
-                                <StackPanel Orientation="Horizontal">
-                                    <Ellipse Width="8" Height="8" Margin="0,0,7,0">
-                                        <Ellipse.Style>
-                                            <Style TargetType="Ellipse">
-                                                <Setter Property="Fill" Value="{StaticResource DangerBrush}"/>
-                                                <Style.Triggers>
-                                                    <DataTrigger Binding="{Binding IsOnline}" Value="True">
-                                                        <Setter Property="Fill" Value="{StaticResource SuccessBrush}"/>
-                                                    </DataTrigger>
-                                                </Style.Triggers>
-                                            </Style>
-                                        </Ellipse.Style>
-                                    </Ellipse>
-                                    <TextBlock FontSize="11">
-                                        <TextBlock.Style>
-                                            <Style TargetType="TextBlock">
-                                                <Setter Property="Text" Value="离线"/>
-                                                <Setter Property="Foreground" Value="{StaticResource SubTextBrush}"/>
-                                                <Style.Triggers>
-                                                    <DataTrigger Binding="{Binding IsOnline}" Value="True">
-                                                        <Setter Property="Text" Value="在线"/>
-                                                        <Setter Property="Foreground" Value="{StaticResource SuccessBrush}"/>
-                                                    </DataTrigger>
-                                                </Style.Triggers>
-                                            </Style>
-                                        </TextBlock.Style>
-                                    </TextBlock>
+            <!-- 左：设备列表 -->
+            <Border Grid.Column="0" Style="{StaticResource Panel}">
+                <DataGrid x:Name="DeviceDataGrid" BorderThickness="0" IsReadOnly="True" SelectionMode="Single"
+                          SelectionChanged="DeviceDataGrid_SelectionChanged">
+                    <DataGrid.Columns>
+                        <DataGridTemplateColumn Header="状态" Width="72">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <StackPanel Orientation="Horizontal">
+                                        <Ellipse Width="8" Height="8" Margin="0,0,7,0">
+                                            <Ellipse.Style>
+                                                <Style TargetType="Ellipse">
+                                                    <Setter Property="Fill" Value="{StaticResource DangerBrush}"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding IsOnline}" Value="True">
+                                                            <Setter Property="Fill" Value="{StaticResource SuccessBrush}"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Ellipse.Style>
+                                        </Ellipse>
+                                        <TextBlock FontSize="11">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock">
+                                                    <Setter Property="Text" Value="离线"/>
+                                                    <Setter Property="Foreground" Value="{StaticResource SubTextBrush}"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding IsOnline}" Value="True">
+                                                            <Setter Property="Text" Value="在线"/>
+                                                            <Setter Property="Foreground" Value="{StaticResource SuccessBrush}"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
+                                    </StackPanel>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                        <DataGridTextColumn Header="设备 ID" Binding="{Binding DeviceId}" Width="110"/>
+                        <DataGridTextColumn Header="设备名称" Binding="{Binding DeviceName}" Width="100"/>
+                        <DataGridTextColumn Header="权限版本" Binding="{Binding Status.PermissionVersion}" Width="80"/>
+                        <DataGridTextColumn Header="指纹数" Binding="{Binding Status.FingerprintCount}" Width="*"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+            </Border>
+
+            <!-- 右：操作面板 -->
+            <Border Grid.Column="2" Style="{StaticResource Panel}">
+                <Grid Margin="16">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+
+                    <!-- 标题 -->
+                    <TextBlock Grid.Row="0" x:Name="PanelTitle" Text="设备操作面板 - （未选择设备）"
+                               Style="{StaticResource SectionTitleText}" Margin="0,0,0,16"/>
+
+                    <!-- 基本操作区 -->
+                    <Border Grid.Row="1" Style="{StaticResource ToolbarPanel}" Margin="0,0,0,16">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" Text="基本操作" Style="{StaticResource SectionTitleText}" Margin="0,0,0,10"/>
+                            <StackPanel Grid.Row="1" Orientation="Horizontal">
+                                <TextBlock Text="锁号：" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                <ComboBox x:Name="LockSelectBox" Width="160" Margin="0,0,10,0">
+                                    <ComboBoxItem Content="Lock 0  系统锁" Tag="0"/>
+                                    <ComboBoxItem Content="Lock 1  实训柜 1" Tag="1"/>
+                                    <ComboBoxItem Content="Lock 2  实训柜 2" Tag="2"/>
+                                    <ComboBoxItem Content="Lock 3  实训柜 3" Tag="3"/>
+                                </ComboBox>
+                                <Button x:Name="RemoteUnlockButton" Margin="0,0,10,0" Click="RemoteUnlockButton_Click">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="&#xE785;" FontFamily="Segoe MDL2 Assets" Foreground="White" Margin="0,0,8,0"/>
+                                        <TextBlock Text="执行开锁" Foreground="White"/>
+                                    </StackPanel>
+                                </Button>
+                                <Button x:Name="ReadStatusButton" Style="{StaticResource SecondaryButton}" Margin="0,0,10,0"
+                                        Content="读取设备状态" Click="ReadStatusButton_Click"/>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+
+                    <!-- 设备指纹清单区 -->
+                    <Border Grid.Row="2" Style="{StaticResource ToolbarPanel}" Margin="0,0,0,16">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <Grid Grid.Row="0" Margin="0,0,0,10">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="设备指纹清单" Style="{StaticResource SectionTitleText}" VerticalAlignment="Center"/>
+                                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                    <Button x:Name="RefreshFpListButton" Style="{StaticResource SecondaryButton}" Margin="0,0,8,0"
+                                            Content="刷新清单" Click="RefreshFpListButton_Click"/>
+                                    <Button x:Name="EnrollFingerprintButton" Click="EnrollFingerprintButton_Click">
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="&#xE928;" FontFamily="Segoe MDL2 Assets" Foreground="White" Margin="0,0,8,0"/>
+                                            <TextBlock Text="录入新指纹" Foreground="White"/>
+                                        </StackPanel>
+                                    </Button>
+                                    <Button x:Name="EnrollBackupFpButton" Style="{StaticResource SecondaryButton}" Margin="8,0,0,0"
+                                            Content="录入副指纹" Click="EnrollBackupFpButton_Click"/>
+                                    <Button x:Name="DeleteBackupFpButton" Style="{StaticResource SecondaryButton}" Margin="8,0,0,0"
+                                            Content="删除副指纹" Click="DeleteBackupFpButton_Click"/>
                                 </StackPanel>
-                            </DataTemplate>
-                        </DataGridTemplateColumn.CellTemplate>
-                    </DataGridTemplateColumn>
-                    <DataGridTextColumn Header="设备 ID" Binding="{Binding DeviceId}" Width="120"/>
-                    <DataGridTextColumn Header="设备名称" Binding="{Binding DeviceName}" Width="110"/>
-                    <DataGridTextColumn Header="权限同步" Binding="{Binding PermissionSyncText}" Width="80"/>
-                    <DataGridTextColumn Header="权限版本" Binding="{Binding Status.PermissionVersion}" Width="80"/>
-                    <DataGridTextColumn Header="待传日志" Binding="{Binding Status.PendingLogCount}" Width="70"/>
-                    <DataGridTextColumn Header="指纹数" Binding="{Binding Status.FingerprintCount}" Width="64"/>
-                    <DataGridTextColumn Header="时间同步" Binding="{Binding TimeSyncedText}" Width="70"/>
-                    <DataGridTextColumn Header="固件" Binding="{Binding FirmwareVersion}" Width="80"/>
-                    <DataGridTextColumn Header="Mesh 层" Binding="{Binding Status.MeshLayer}" Width="64"/>
-                    <DataGridTextColumn Header="运行时长" Binding="{Binding Status.UptimeText}" Width="90"/>
-                    <DataGridTextColumn Header="最后在线" Binding="{Binding LastSeenTime, StringFormat=yyyy-MM-dd HH:mm:ss}" Width="*"/>
-                </DataGrid.Columns>
-            </DataGrid>
-        </Border>
+                            </Grid>
+                            <TextBlock Grid.Row="1" x:Name="FpListStatusText"
+                                       Text="选择左侧设备后自动加载指纹清单"
+                                       Foreground="{StaticResource SubTextBrush}" FontSize="11"/>
+                        </Grid>
+                    </Border>
+
+                    <!-- 指纹清单 DataGrid -->
+                    <Border Grid.Row="3" Style="{StaticResource Panel}">
+                        <DataGrid x:Name="DeviceFpListGrid" BorderThickness="0" IsReadOnly="True" SelectionMode="Single">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="指纹 ID" Binding="{Binding FingerprintId}" Width="80"/>
+                                <DataGridTextColumn Header="用户 ID" Binding="{Binding UserId}" Width="160"/>
+                                <DataGridTextColumn Header="姓名" Binding="{Binding UserName}" Width="120"/>
+                                <DataGridTextColumn Header="角色" Binding="{Binding Role}" Width="80"/>
+                                <DataGridTextColumn Header="设备实际数量" Binding="{Binding DeviceReportedCount}" Width="*"/>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </Border>
+                </Grid>
+            </Border>
+        </Grid>
     </Grid>
 </Page>

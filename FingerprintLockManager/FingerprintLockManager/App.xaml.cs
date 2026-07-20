@@ -1,4 +1,5 @@
 using System.Windows;
+using Newtonsoft.Json.Linq;
 
 namespace FingerprintLockManager
 {
@@ -23,12 +24,16 @@ namespace FingerprintLockManager
         public static RolePermissionService RolePermissionService { get; } = new RolePermissionService();
         public static DeviceService DeviceService { get; } = new DeviceService();
         public static LogService LogService { get; } = new LogService();
+        public static OperationLogService OperationLogService { get; } = new OperationLogService();
         public static CabinetSyncService CabinetSyncService { get; } = new CabinetSyncService();
         public static CommandService CommandService { get; } = new CommandService();
         public static SystemHealthService SystemHealthService { get; } = new SystemHealthService();
 
         /// <summary>SD 卡集中存储服务（通过 Mesh 与根节点 SD 卡通信）</summary>
         public static SdStorageService SdStorageService { get; } = new SdStorageService();
+
+        /// <summary>指纹模板业务服务（采集-存储-分配解耦管理）</summary>
+        public static FingerprintTemplateService FingerprintTemplateService { get; } = new FingerprintTemplateService();
 
         /// <summary>当前登录用户（登录成功后赋值）</summary>
         public static User? CurrentUser { get; set; }
@@ -41,7 +46,14 @@ namespace FingerprintLockManager
             // 1. 绑定消息处理器业务事件
             WireUpMessageHandler();
 
-            // 2. 启动 Mesh 桥接器（默认 USB 串口，可配置切换）
+            // 2. 初始化本地缓存目录（即使 SD 可用，也用于写入镜像）
+            try { LocalCacheService.Initialize(); } catch { }
+
+            // 3. 订阅 SD 降级 / 恢复事件（SD 恢复后自动回传本地缓存）
+            SdStorageService.StorageDegraded += OnStorageDegraded;
+            SdStorageService.StorageRecovered += OnStorageRecovered;
+
+            // 4. 启动 Mesh 桥接器（默认 USB 串口，可配置切换）
             try
             {
                 MeshBridge.MessageReceived += OnMessageReceived;
@@ -58,7 +70,7 @@ namespace FingerprintLockManager
                     "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
             }
 
-            // 3. 显示登录窗口
+            // 5. 显示登录窗口
             var loginWindow = new LoginWindow();
             loginWindow.Show();
         }
@@ -134,11 +146,14 @@ namespace FingerprintLockManager
             System.Diagnostics.Debug.WriteLine($"[APP] device registered: {deviceId} {deviceName}");
         }
 
-        /// <summary>根节点注册：记录根节点 ID，供 SD 卡集中存储服务定位</summary>
+        /// <summary>根节点注册：记录根节点 ID 并初始化本地缓存目录（SD 不可用时由 RegisterRoot 触发 StorageDegraded）</summary>
         private void OnRootDeviceRegistered(string rootDeviceId, bool? storageReady)
         {
             try
             {
+                // 始终确保本地缓存目录就绪；SD 不可用时即进入降级模式
+                try { LocalCacheService.Initialize(); } catch { }
+
                 SdStorageService.RegisterRoot(rootDeviceId, storageReady);
                 MeshBridge.Send(rootDeviceId, Protocol.CmdTimeSync, new
                 {
@@ -153,10 +168,139 @@ namespace FingerprintLockManager
             }
         }
 
-        /// <summary>日志上报：根节点已先写入 SD，上位机不再落本地库。</summary>
+        /// <summary>日志上报：SD 可用时由根节点落 SD；SD 不可用时上位机写入本地缓存等待回传。</summary>
         private void OnLogReport(string deviceId, string logJson)
         {
-            System.Diagnostics.Debug.WriteLine($"[APP] root persisted log report from {deviceId}");
+            try
+            {
+                if (App.SdStorageService.IsAvailable)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[APP] root persisted log report from {deviceId}");
+                    return;
+                }
+
+                // SD 不可用：解析日志并写入本地缓存
+                var log = ParseLogEntry(logJson, deviceId);
+                if (log != null)
+                {
+                    LocalCacheService.AppendLog(log);
+                    System.Diagnostics.Debug.WriteLine($"[APP] cached log from {deviceId}");
+                }
+            }
+            catch
+            {
+                // 忽略
+            }
+        }
+
+        /// <summary>SD 进入降级模式：仅记录日志（UI 通过 MainWindow 定时刷新感知）</summary>
+        private void OnStorageDegraded()
+        {
+            System.Diagnostics.Debug.WriteLine("[APP] SD 进入降级模式，启用本地缓存");
+        }
+
+        /// <summary>SD 恢复：异步回传本地缓存到 SD 卡（失败不影响主流程）</summary>
+        private void OnStorageRecovered()
+        {
+            System.Diagnostics.Debug.WriteLine("[APP] SD 恢复，开始回传本地缓存");
+            _ = Task.Run(UploadLocalCacheToSdAsync);
+        }
+
+        /// <summary>将本地缓存的业务表 / 日志 / 指纹模板回传到 SD 卡</summary>
+        private static async Task UploadLocalCacheToSdAsync()
+        {
+            try
+            {
+                // 业务表：devices / users / classes / permissions / role_permissions
+                string[] tables = { "devices", "users", "classes", "permissions", "role_permissions" };
+                foreach (string table in tables)
+                {
+                    var arr = LocalCacheService.ReadTable(table);
+                    if (arr == null) continue;
+                    uint v = LocalCacheService.ReadTableVersion(table);
+                    // 用本地版本号 - 1 作为 base_version（与 RootDataService.SaveArray 写入的 baseVersion + 1 对齐）
+                    uint baseVersion = v > 0 ? v - 1 : 0;
+                    await App.SdStorageService.SaveTableWithFallbackAsync(
+                        table, arr.ToString(Newtonsoft.Json.Formatting.None), baseVersion);
+                }
+
+                // 日志：追加到 SD logs 表，完成后清空本地缓存
+                var logs = LocalCacheService.ReadLogs();
+                if (logs.Count > 0)
+                {
+                    try
+                    {
+                        App.LogService.AddLogs(logs);
+                        LocalCacheService.ClearLogs();
+                    }
+                    catch
+                    {
+                        // 追加日志失败时保留本地缓存，等待下次回传
+                    }
+                }
+
+                // 指纹模板：逐个上传
+                foreach (var (userId, fingerIndex) in LocalCacheService.ListFpTemplates())
+                {
+                    var template = LocalCacheService.ReadFpTemplate(userId, fingerIndex);
+                    if (template == null || template.Length == 0) continue;
+                    bool ok = await App.SdStorageService.UploadFpTemplateWithFallbackAsync(
+                        userId, fingerIndex, template);
+                    if (ok)
+                    {
+                        // SD 上传成功后删除本地缓存（保留降级期间再次生成的模板）
+                        try { LocalCacheService.DeleteFpTemplate(userId); } catch { }
+                    }
+                }
+            }
+            catch
+            {
+                // 回传失败不影响主流程
+            }
+        }
+
+        /// <summary>从日志上报 JSON 解析 LogEntry（兼容单条/数组/字段命名差异）</summary>
+        private static LogEntry? ParseLogEntry(string logJson, string deviceId)
+        {
+            if (string.IsNullOrWhiteSpace(logJson)) return null;
+            try
+            {
+                JToken token = JToken.Parse(logJson);
+                JObject? obj = token as JObject;
+                if (obj == null && token is JArray arr && arr.Count > 0)
+                    obj = arr.First as JObject;
+                if (obj == null) return null;
+
+                var log = new LogEntry
+                {
+                    Id = obj.Value<long?>("id") ?? obj.Value<long?>("log_seq") ?? 0,
+                    DeviceId = obj.Value<string>("device_id") ?? deviceId ?? "",
+                    UserId = obj.Value<string>("user_id") ?? "",
+                    LockId = obj.Value<int?>("lock_id") ?? 0,
+                    Action = obj.Value<string>("action") ?? "",
+                    Result = obj.Value<string>("result") ?? "",
+                    Reason = obj.Value<string>("reason") ?? ""
+                };
+
+                // 时间字段兼容 create_time / time / timestamp（unix 秒）
+                string? timeStr = obj.Value<string>("create_time");
+                if (!string.IsNullOrWhiteSpace(timeStr) && DateTime.TryParse(timeStr, out var dt))
+                {
+                    log.CreateTime = dt;
+                }
+                else
+                {
+                    long unix = obj.Value<long?>("time") ?? obj.Value<long?>("timestamp") ?? 0;
+                    log.CreateTime = unix > 0
+                        ? DateTimeOffset.FromUnixTimeSeconds(unix).LocalDateTime
+                        : DateTime.Now;
+                }
+                return log;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         /// <summary>ACK 应答：当前仅记录日志，可用于命令确认匹配</summary>
@@ -195,10 +339,10 @@ namespace FingerprintLockManager
             }
         }
 
-        /// <summary>配置保存成功：记录日志（具体提示由 DeviceConfigWindow 自行处理）</summary>
+        /// <summary>配置保存成功：占位实现（V2.7 之前由独立 AP 配置窗口展示提示，现已去除该窗口）</summary>
         private void OnConfigSavedHandler(string deviceId)
         {
-            // 占位：DeviceConfigWindow 已订阅 OnConfigSaved 显示提示
+            // 占位：AP 配置功能已移除，无 UI 订阅此事件。保留以兼容协议层事件总线。
         }
 
     }

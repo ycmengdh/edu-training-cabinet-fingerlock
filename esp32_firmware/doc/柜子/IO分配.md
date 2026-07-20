@@ -1,0 +1,208 @@
+# 柜子节点 IO 分配（ESP32-S3）
+
+更新时间：2026-07-19  
+适用范围：`esp32_firmware/cabinet_node`  
+板型：ESP32-S3（工程按 N16R8；**主机口为 UART0，非 USB CDC**）
+
+本文以**实际 PCB 接线**为准。固件引脚定义见 `cabinet_node/src/config.h`。
+
+芯片与根节点同为 ESP32-S3 核心板时：Flash/PSRAM、板级电源、UART0 默认脚位等可按根节点同类配置理解；  
+**外设 IO（指纹/按键/595）以本文为准，与根节点 TFT/SD 不同。**
+
+通信：
+
+- **Mesh 模式（默认）**：组网找 Root + **同时常开 UART0 协议口**（与根节点 USB 同协议帧/波特率）
+- **Debug 模式**：仅 UART0，不组 Mesh；长按任意键 10s 切换
+
+---
+
+## 1. 总览
+
+| 模块 | 接口 | GPIO / 资源 | 方向 | 说明 |
+| --- | --- | --- | --- | --- |
+| 调试/上位机串口 TX | UART0 | **GPIO43** (U0TXD) | 输出 | 外接 USB-TTL RX；协议同根节点 |
+| 调试/上位机串口 RX | UART0 | **GPIO44** (U0RXD) | 输入 | 外接 USB-TTL TX |
+| 按键 K1 | 开锁 1 | GPIO47 | 输入（内部上拉） | 按下 = LOW |
+| 按键 K2 | 开锁 2 | GPIO48 | 输入（内部上拉） | 按下 = LOW |
+| 按键 K3 | 开锁 3 | GPIO45 | 输入（内部上拉） | 按下 = LOW；strapping 脚，见风险 |
+| 按键 K4 | 开锁 4 | GPIO39 | 输入（内部上拉） | 按下 = LOW |
+| 按键 K5 | 取消 | GPIO40 | 输入（内部上拉） | 按下 = LOW |
+| 指纹通讯 TX | UART2 | GPIO17 | 输出 | ESP32 TX → AS608 RX |
+| 指纹通讯 RX | UART2 | GPIO18 | 输入 | ESP32 RX ← AS608 TX |
+| 指纹上电控制 | 电源开关 | GPIO42 | 输出 | 控制指纹模块供电 |
+| 指纹上电状态 | 状态反馈 | GPIO21 | 输入 | 读指纹供电是否到位 |
+| 595 数据 | DS | GPIO4 | 输出 | 74HC595 SER |
+| 595 锁存 | STCP | GPIO15 | 输出 | 74HC595 RCLK |
+| 595 时钟 | SHCP | GPIO16 | 输出 | 74HC595 SRCLK |
+| 状态 LED | 板载指示 | GPIO2 | 输出 | Mesh/调试指示，非锁 LED |
+| 指纹状态 LED 绿 | 双色指示 | GPIO41 | 输出 | V2.7 指纹验证成功/识别中（绿灯） |
+| 指纹状态 LED 红 | 双色指示 | GPIO38 | 输出 | V2.7 指纹验证失败（红灯闪烁 3 次） |
+
+---
+
+## 2. 调试串口与上位机直连
+
+| 项目 | 值 |
+| --- | --- |
+| 物理接口 | **UART0**（非板载 USB-Serial-JTAG / CDC） |
+| 默认脚位 | TX=**GPIO43**, RX=**GPIO44**（ESP32-S3 默认 UART0） |
+| 波特率 | **921600**（与根节点 `UPLINK_USB_BAUD` 相同） |
+| 协议 | 与根节点上行一致：帧头 `0xA5 0x5A` + 长度 + JSON + CRC16/MODBUS |
+| 工程开关 | `ARDUINO_USB_CDC_ON_BOOT=0`（`Serial` 走 UART0） |
+| 工作模式 | `MODE_MESH`：Mesh + UART0 双开；`MODE_DEBUG`：仅 UART0 |
+| 切换 | 任意键长按 10 s，Mesh ↔ Debug，重启生效 |
+| 启动标记 | 明文 `[CABINET_BOOT] UART0-SERIAL ALIVE` / `PROTOCOL READY`（同根节点风格） |
+| 注册 | 周期性 `REGISTER`（`is_root=false`, `uplink=uart0`, `role=cabinet`） |
+
+联调要点：
+
+1. USB-TTL：模块 TX↔GPIO44，RX↔GPIO43，共地  
+2. 上位机打开对应 COM，波特率 921600，按**根节点串口协议**收发  
+3. 明文探测：发 `PING\n` 应回 `PONG`；正式业务用协议帧  
+4. Debug 模式下设备会周期性发 `REGISTER`（`uplink=uart0`, `role=cabinet`）  
+5. 日志在 Debug 模式下封装为 `cmd=LOG` 帧，避免打乱上位机解析  
+
+与根节点差异仅在物理介质：
+
+| | 根节点 | 柜子节点（调试） |
+| --- | --- | --- |
+| 物理口 | USB-Serial-JTAG (CDC, GPIO19/20) | **UART0 (GPIO43/44)** |
+| 协议帧 / 波特率 / JSON 命令 | 相同 | 相同 |
+| 业务角色 | Root + SD + 桥接 | 指纹/锁/按键本机业务 |
+
+---
+
+## 3. 按键
+
+| 逻辑名 | 硬件丝印 | GPIO | 功能 | 固件宏 |
+| --- | --- | --- | --- | --- |
+| Key0 | K1 | 47 | 开锁 0（Lock0） | `KEY0_PIN` |
+| Key1 | K2 | 48 | 开锁 1（Lock1） | `KEY1_PIN` |
+| Key2 | K3 | 45 | 开锁 2（Lock2） | `KEY2_PIN` |
+| Key3 | K4 | 39 | 开锁 3（Lock3） | `KEY3_PIN` |
+| Key4 | K5 | 40 | 取消当前指纹流程 | `KEY4_PIN` / `KEY_CANCEL_INDEX=4` |
+
+电气约定：
+
+- `INPUT_PULLUP`
+- 按下接到 GND → 读到 LOW
+- 消抖 20 ms
+- 任意键长按 10 s：Mesh ↔ Debug(UART0) 切换并重启
+
+风险：
+
+- **GPIO45 为 ESP32-S3 strapping 脚**（VDD_SPI 相关）。  
+  按键外部不要再加会在复位期间拉偏的强上下拉；若启动异常，优先检查 K3 外围。
+
+---
+
+## 4. 指纹模块（AS608）
+
+| 信号 | GPIO | 方向 | 固件宏 | 接线 |
+| --- | --- | --- | --- | --- |
+| UART TX | 17 | 输出 | `FINGER_TX_PIN` | ESP32 GPIO17 → AS608 RX |
+| UART RX | 18 | 输入 | `FINGER_RX_PIN` | ESP32 GPIO18 ← AS608 TX |
+| 上电控制 | 42 | 输出 | `FINGER_PWR_PIN` | 控制模块电源通路（如 MOS/LDO EN） |
+| 上电状态 | 21 | 输入 | `FINGER_PWR_STATUS_PIN` | 读供电反馈 |
+
+通讯参数：
+
+- 外设：`HardwareSerial(2)` / UART2
+- 波特率：`57600`（`FINGER_UART_BAUD`）
+- 数据格式：8N1
+
+上电时序（固件）：
+
+1. 配置 GPIO42 为输出，拉到**上电有效电平**（默认 HIGH，见 `FINGER_PWR_ON_LEVEL`）
+2. 等待模块稳定（默认 300 ms）
+3. 读 GPIO21 状态日志
+4. 打开 UART2，执行 `verifyPassword()`
+
+注意：
+
+- 必须共地
+- 供电电压以模块规格为准（多数 AS608 供电 3.3~5V，UART 常为 3.3V TTL）
+- 若实际电源开关是低电平有效，只需改 `config.h` 中 `FINGER_PWR_ON_LEVEL`
+
+---
+
+## 5. 74HC595 与锁 / 锁 LED
+
+| 信号 | GPIO | 74HC595 引脚 | 固件宏 |
+| --- | --- | --- | --- |
+| DATA | 4 | SER / DS | `SHIFT_DS_PIN` |
+| STCP | 15 | RCLK / ST_CP | `SHIFT_STCP_PIN` |
+| SHCP | 16 | SRCLK / SH_CP | `SHIFT_SHCP_PIN` |
+
+### 5.1 595 输出位映射
+
+固件按 **MSB first** 移出 1 字节：bit0 → Q0 … bit7 → Q7。
+
+| 595 输出 | 功能 | 逻辑 |
+| --- | --- | --- |
+| Q0 | 锁 1 / Lock0 继电器 | **低电平开锁**（0=开，1=关） |
+| Q1 | 锁 2 / Lock1 继电器 | 同上 |
+| Q2 | 锁 3 / Lock2 继电器 | 同上 |
+| Q3 | 锁 4 / Lock3 继电器 | 同上 |
+| Q4 | 锁 1 状态 LED | **高电平亮** |
+| Q5 | 锁 2 状态 LED | 高电平亮 |
+| Q6 | 锁 3 状态 LED | 高电平亮 |
+| Q7 | 锁 4 状态 LED | 高电平亮 |
+
+对应关系：
+
+- 开锁时：对应继电器 bit=0，对应 LED bit=1
+- 关锁时：对应继电器 bit=1，对应 LED bit=0
+- 开锁保持时间：`LOCK_OPEN_DURATION_MS` = 3000 ms，超时自动关锁
+
+默认上电字节：`0x0F`  
+（Q0~Q3=1 全关锁，Q4~Q7=0 全灭 LED）
+
+---
+
+## 6. 指纹状态 LED（V2.7）
+
+双色 LED（绿 GPIO41 / 红 GPIO38）指示指纹验证流程状态，由 `led_indicator.cpp` 非阻塞驱动：
+
+| 状态 | 表现 | 触发 |
+| --- | --- | --- |
+| 识别中 | 绿灯慢闪（500ms 周期） | 常态轮询指纹（`STATE_WAIT_FINGER`） |
+| 验证成功 | 绿灯常亮 | 指纹匹配成功，进入 10s 操作窗口 |
+| 验证失败 | 红灯闪烁 3 次（约 1.5s）后熄灭 | 指纹未匹配或权限未同步 |
+| 窗口超时/取消 | 全部熄灭 | 10s 窗口超时或按下取消键 K5 |
+| 开锁完成 | 全部熄灭 | 窗口期内按键开锁后 |
+
+极性：默认共阴极（`FP_LED_COMMON_ANODE=0`，HIGH=亮）。若硬件为共阳极，在 `config.h` 改 `FP_LED_COMMON_ANODE 1`。
+
+---
+
+## 7. 建议联调顺序
+
+1. UART0 接 USB-TTL，921600，看是否有：  
+   `[CABINET_BOOT] UART0 ALIVE` / `PROTOCOL READY`
+2. Debug 模式：上位机按根节点串口方式收 `REGISTER`，可下发本机 `device_id` 的命令  
+3. 指纹：`[FINGER] power ...` -> `init success`；观察绿灯开始慢闪（识别中）
+4. 按压已录入指纹：绿灯常亮（进入 10s 窗口）；10s 内按 K1~K4 有权限的锁则开锁约 3 s
+5. 按压未录入指纹或无权限用户：红灯闪烁 3 次
+6. K5 取消：在窗口期内按下立即灭灯回识别态；长按 10 s 切 Mesh/Debug  
+
+若指纹 init 失败：查 17/18 交叉、GPIO42 上电、GPIO21、共地、波特率。  
+若按键无日志：查 47/48/45/39/40 与 active-LOW。  
+若锁不动：查 595 的 4/15/16 与 Q0~Q3 极性。  
+若指纹状态 LED 不亮：查 GPIO41/GPIO38 接线与共阴/共阳极性设置。  
+若上位机无帧：确认 **UART0 不是 USB 口**、交叉线、波特率、是否在 Debug 模式。
+
+---
+
+## 8. 固件文件索引
+
+| 文件 | 内容 |
+| --- | --- |
+| `cabinet_node/platformio.ini` | N16R8；`USB_CDC_ON_BOOT=0` |
+| `cabinet_node/src/config.h` | 全部 GPIO 宏 |
+| `cabinet_node/src/key_handler.*` | 5 路按键 |
+| `cabinet_node/src/fingerprint.*` | 指纹供电 + UART2 |
+| `cabinet_node/src/led_indicator.*` | V2.7 指纹状态 LED（绿/红双色） |
+| `cabinet_node/src/lock_control.*` | 74HC595 锁与 LED |
+| `common/mesh_comm.*` | Mesh + Debug(UART0 协议) |
+| `cabinet_node/src/main.cpp` | 初始化顺序与主循环 |

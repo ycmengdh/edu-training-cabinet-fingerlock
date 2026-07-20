@@ -18,8 +18,11 @@ namespace FingerprintLockManager
         /// <summary>最近一次传输层错误；无错误时为空。</summary>
         string LastError { get; }
 
-        /// <summary>收到一行 JSON 消息事件（已去除尾部换行）</summary>
+        /// <summary>收到一行 JSON 消息事件（过渡兼容；新路径优先 PayloadReceived）</summary>
         event Action<string>? LineReceived;
+
+        /// <summary>收到完整应用层负载（外层 A5 帧已解，可能是二进制信封或遗留 JSON）</summary>
+        event Action<byte[]>? PayloadReceived;
 
         /// <summary>物理链路连接状态变化</summary>
         event Action<bool>? ConnectionChanged;
@@ -37,10 +40,15 @@ namespace FingerprintLockManager
         void Stop();
 
         /// <summary>
-        /// 发送一条 JSON 消息（自动补 \n）
+        /// 发送一条 JSON 消息（自动封帧；过渡兼容）
         /// </summary>
         /// <param name="jsonLine">JSON 字符串（不含尾部换行）</param>
         /// <returns>发送成功返回 true；未连接或异常返回 false</returns>
         bool Send(string jsonLine);
+
+        /// <summary>
+        /// 发送应用层负载字节（内部 FrameCodec.Encode 封帧）
+        /// </summary>
+        bool SendPayload(byte[] appPayload);
     }
 }

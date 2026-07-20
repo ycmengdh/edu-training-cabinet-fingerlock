@@ -25,6 +25,12 @@ public:
     // 将 JSON 发送到上行链路（编码为协议帧后发送）
     static bool sendToUplink(const String &json);
 
+    // Binary app envelope → uplink (outer A5 frame)
+    static bool sendToUplinkBytes(const uint8_t *appMsg, uint16_t len);
+
+    // Handle one decoded uplink payload (binary app or legacy JSON)
+    static void handleUplinkPayload(const uint8_t *data, int len);
+
     // 上行链路是否已连接
     static bool isUplinkConnected();
 
@@ -39,8 +45,15 @@ public:
     static void addRoute(const String &deviceId, const uint8_t *mac);
     // 查找 device_id 对应的 MAC，找到返回 true
     static bool lookupRoute(const String &deviceId, uint8_t *mac);
-    // 获取路由表条目数
+    // 获取当前活跃路由数（30s 内有心跳/REGISTER）
     static int getRouteCount();
+    // 获取已知（曾连上）的总路由数（含已过期但未回收的条目）
+    static int getRouteKnownCount();
+    // 获取第 N 个路由条目的 deviceId（用于屏幕展示前几个柜子）
+    // 返回 true 表示 outFilled 已填充
+    static bool getRouteDeviceId(int index, char *outBuf, size_t bufSize);
+    // 获取自上次成功上行/下行以来的秒数（用于诊断 Mesh 健康度）
+    static unsigned long getLastUplinkAgeMs();
 
     // 向所有当前有效柜子路由广播业务 JSON
     static int broadcastToCabinets(const String &json);
@@ -61,6 +74,8 @@ private:
     static UplinkMode uplinkMode;
     static bool uplinkConnected;
     static bool initialized;
+    // V2.7：最近一次收到上行链路有效数据时刻
+    static unsigned long lastUplinkRxMs;
 
     // ====== USB 串口上行 ======
     static void initUSB();

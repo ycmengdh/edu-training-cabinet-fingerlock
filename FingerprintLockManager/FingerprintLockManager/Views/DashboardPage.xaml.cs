@@ -91,6 +91,33 @@ namespace FingerprintLockManager
             RecentLogDataGrid.ItemsSource = snapshot.RecentLogs;
             PendingLogText.Text = $"待传 {snapshot.PendingLogCount}";
             RefreshTimeText.Text = $"最近刷新 {snapshot.RefreshedAt:yyyy-MM-dd HH:mm:ss}";
+
+            // V2.7：学生绑定设备统计（已分配权限的学生数 / 总学生数）
+            PopulateStudentBindMetric();
+        }
+
+        /// <summary>
+        /// V2.7：统计已分配权限覆盖的学生数与总学生数。
+        /// 教师仅统计本班学生（数据范围隔离）。
+        /// </summary>
+        private void PopulateStudentBindMetric()
+        {
+            try
+            {
+                var visibleStudents = App.UserService.GetVisibleUsersByRole("student");
+                int totalStudents = visibleStudents.Count;
+                var boundUserIds = App.PermissionService.GetAllBoundUserIds();
+                int boundStudents = visibleStudents.Count(u => boundUserIds.Contains(u.UserId));
+                StudentBindValueText.Text = $"{boundStudents} / {totalStudents}";
+                StudentBindDetailText.Text = totalStudents == 0
+                    ? "暂无学生"
+                    : $"绑定率 {(totalStudents > 0 ? boundStudents * 100.0 / totalStudents : 0):F0}%";
+            }
+            catch
+            {
+                StudentBindValueText.Text = "-";
+                StudentBindDetailText.Text = "无法读取学生数据";
+            }
         }
 
         private void ClearSnapshot()
@@ -101,6 +128,8 @@ namespace FingerprintLockManager
             SyncDetailText.Text = "等待版本信息";
             StorageValueText.Text = "-";
             StorageDetailText.Text = "等待 SD 信息";
+            StudentBindValueText.Text = "-";
+            StudentBindDetailText.Text = "根节点不可用";
             AlertDataGrid.ItemsSource = null;
             RecentLogDataGrid.ItemsSource = null;
             AlertCountText.Text = "无法读取";

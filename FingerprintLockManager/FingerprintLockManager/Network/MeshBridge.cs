@@ -41,7 +41,11 @@ namespace FingerprintLockManager
         private long _sentCount;
         private long _receivedCount;
 
-        private const int MaxTraceEntries = 500;
+        private const int MaxTraceEntries = 5000;
+        // 柜子每 10 秒发一次 HEARTBEAT；允许丢失两个周期并留 5 秒调度余量。
+        private static readonly TimeSpan CabinetOfflineTimeout = TimeSpan.FromSeconds(35);
+        // Root 当前每 60 秒发一次 STATUS_REPORT，使用独立的较长超时。
+        private static readonly TimeSpan RootOfflineTimeout = TimeSpan.FromSeconds(75);
 
         /// <summary>当前传输实例</summary>
         public ITransport? Transport => _transport;
@@ -117,6 +121,7 @@ namespace FingerprintLockManager
             _transport = CreateTransport(config);
             CurrentType = config.Type;
             _transport.LineReceived += OnLineReceived;
+            _transport.PayloadReceived += OnPayloadReceived;
             _transport.ConnectionChanged += OnConnectionChanged;
             _transport.DiagnosticMessage += OnTransportDiagnostic;
             _transport.UnframedDataReceived += OnUnframedDataReceived;
@@ -136,6 +141,7 @@ namespace FingerprintLockManager
             if (_transport == null) return;
 
             _transport.LineReceived -= OnLineReceived;
+            _transport.PayloadReceived -= OnPayloadReceived;
             _transport.ConnectionChanged -= OnConnectionChanged;
             _transport.DiagnosticMessage -= OnTransportDiagnostic;
             _transport.UnframedDataReceived -= OnUnframedDataReceived;
@@ -170,7 +176,7 @@ namespace FingerprintLockManager
         {
             if (_transport == null || msg == null) return false;
             msg.DeviceId = deviceId;
-            return SendJson(JsonHelper.Serialize(msg));
+            return SendMessageBinary(msg);
         }
 
         /// <summary>
@@ -195,7 +201,7 @@ namespace FingerprintLockManager
         {
             if (_transport == null || msg == null) return false;
             msg.DeviceId = ""; // 空表示广播
-            return SendJson(JsonHelper.Serialize(msg));
+            return SendMessageBinary(msg);
         }
 
         /// <summary>
@@ -203,11 +209,35 @@ namespace FingerprintLockManager
         /// </summary>
         public List<DeviceClient> GetOnlineDevices()
         {
+            ExpireInactiveDevices(DateTime.Now);
             lock (_devicesLock)
             {
                 return _devices.Values.Where(d => d.IsOnline).ToList();
             }
         }
+
+        /// <summary>
+        /// 获取所有曾经通讯过的设备（含当前离线）。
+        /// 设备页应使用此列表：见过就保留，只更新 IsOnline。
+        /// </summary>
+        public List<DeviceClient> GetKnownDevices()
+        {
+            ExpireInactiveDevices(DateTime.Now);
+            lock (_devicesLock)
+            {
+                return new List<DeviceClient>(_devices.Values);
+            }
+        }
+
+        /// <summary>当前已知设备总数（含离线/根节点，调试用）。</summary>
+        public int KnownDeviceCount
+        {
+            get { lock (_devicesLock) return _devices.Count; }
+        }
+
+        /// <summary>在线柜子数（排除真正的根节点）。</summary>
+        public int OnlineCabinetCount =>
+            GetOnlineDevices().Count(d => !DeviceService.IsTrueRoot(d));
 
         /// <summary>根据传输配置创建对应 ITransport 实现</summary>
         private static ITransport CreateTransport(TransportConfig config)
@@ -225,28 +255,114 @@ namespace FingerprintLockManager
             }
         }
 
-        /// <summary>收到一行 JSON 的处理：解析消息 → 更新设备 → 触发事件</summary>
-        private void OnLineReceived(string line)
+        /// <summary>收到应用层负载：二进制信封优先，遗留 JSON 兼容。</summary>
+        private void OnPayloadReceived(byte[] payload)
         {
             Interlocked.Increment(ref _receivedCount);
             LastReceivedTime = DateTime.Now;
-            RecordTrace(CommunicationDirection.Receive, "协议 JSON", line);
             try
             {
-                var msg = Message.FromJson(line);
-                if (msg == null || string.IsNullOrEmpty(msg.Cmd)) return;
+                Message? msg = null;
+                AppMessage? app = null;
 
-                // 确定消息来源设备 ID：优先 SourceDeviceId（Root 转发场景），其次 DeviceId
-                string sourceId = msg.SourceDeviceId;
-                if (string.IsNullOrEmpty(sourceId)) sourceId = msg.DeviceId;
-
-                DeviceClient? device = null;
-                if (!string.IsNullOrEmpty(sourceId))
+                // 1) 标准二进制信封
+                if (BinaryMessageCodec.TryDecode(payload, out app) && app != null)
                 {
-                    device = GetOrCreateDevice(sourceId, msg);
+                    msg = AppMessageMapper.ToMessage(app);
+                }
+                // 2) 帧内可能夹杂噪声：扫描 B1 0F 魔数再解
+                else if (TryDecodeBinaryWithResync(payload, out app) && app != null)
+                {
+                    msg = AppMessageMapper.ToMessage(app);
+                    RecordTrace(CommunicationDirection.System, "BIN 重同步",
+                        $"offset 找到魔数后解码成功 cmd=0x{app.CmdId:X4}");
+                }
+                // 3) 遗留整包 JSON
+                else if (payload.Length > 0 && (payload[0] == (byte)'{' || payload[0] == (byte)'['))
+                {
+                    string line = Encoding.UTF8.GetString(payload);
+                    RecordTrace(CommunicationDirection.Receive, "协议 JSON",
+                        line.Length > 240 ? line.Substring(0, 240) + "..." : line);
+                    msg = Message.FromJson(line);
+                }
+                else
+                {
+                    string head = payload.Length == 0 ? "" :
+                        BitConverter.ToString(payload, 0, Math.Min(16, payload.Length));
+                    RecordTrace(CommunicationDirection.System, "解析失败",
+                        $"未知负载 len={payload.Length} head={head}");
+                    return;
                 }
 
-                // 触发消息事件，由 App 路由到 MessageHandler
+                if (msg == null || string.IsNullOrEmpty(msg.Cmd))
+                {
+                    RecordTrace(CommunicationDirection.System, "解析失败", "消息 cmd 为空");
+                    return;
+                }
+
+                if (app != null)
+                {
+                    RecordTrace(CommunicationDirection.Receive, "协议 BIN",
+                        $"cmd=0x{app.CmdId:X4}({msg.Cmd}) did='{msg.DeviceId}' src='{msg.SourceDeviceId}' mid={msg.MsgId} plen={app.Payload?.Length ?? 0} onlineCab={OnlineCabinetCount}");
+                }
+
+                // 节点唯一身份优先 MAC：
+                // 1) source_id（固件/Root 已填 STA MAC）
+                // 2) data.mesh_mac
+                // 3) 回退 device_id（旧固件兼容）
+                string meshMac = NormalizeMac(msg.SourceDeviceId);
+                string logicalId = (msg.DeviceId ?? "").Trim();
+                bool explicitRoot = false;
+                if (msg.Data is Newtonsoft.Json.Linq.JObject dataObj)
+                {
+                    if (string.IsNullOrEmpty(meshMac))
+                        meshMac = NormalizeMac(dataObj["mesh_mac"]?.ToString());
+                    if (string.IsNullOrEmpty(logicalId))
+                        logicalId = (dataObj["device_id"]?.ToString()
+                            ?? dataObj["deviceId"]?.ToString()
+                            ?? "").Trim();
+                    var rootTok = dataObj["is_root"];
+                    if (rootTok != null)
+                    {
+                        string rs = rootTok.ToString();
+                        explicitRoot = rs.Equals("true", StringComparison.OrdinalIgnoreCase) || rs == "1";
+                    }
+                    string role = dataObj["role"]?.ToString() ?? "";
+                    if (role.Equals("cabinet", StringComparison.OrdinalIgnoreCase))
+                        explicitRoot = false;
+                    if (role.Equals("root", StringComparison.OrdinalIgnoreCase))
+                        explicitRoot = true;
+                }
+
+                // 字典主键：有 MAC 用 MAC，否则用逻辑 device_id
+                string identityKey = !string.IsNullOrEmpty(meshMac) ? meshMac : logicalId;
+                if (string.IsNullOrEmpty(msg.DeviceId) && !string.IsNullOrEmpty(logicalId))
+                    msg.DeviceId = logicalId;
+                if (string.IsNullOrEmpty(msg.SourceDeviceId) && !string.IsNullOrEmpty(meshMac))
+                    msg.SourceDeviceId = meshMac;
+
+                DeviceClient? device = null;
+                if (!string.IsNullOrEmpty(identityKey))
+                {
+                    device = GetOrCreateDevice(identityKey, logicalId, meshMac, msg);
+                    // 非 REGISTER 包默认不当根节点，防止误过滤柜子
+                    if (device != null &&
+                        !string.Equals(msg.Cmd, Protocol.CmdRegister, StringComparison.OrdinalIgnoreCase) &&
+                        !explicitRoot &&
+                        !string.IsNullOrEmpty(device.DeviceId) &&
+                        device.DeviceId.Contains("CABINET", StringComparison.OrdinalIgnoreCase))
+                    {
+                        device.IsRoot = false;
+                    }
+                    if (device != null && explicitRoot)
+                        device.IsRoot = true;
+                }
+                else
+                {
+                    RecordTrace(CommunicationDirection.System, "设备忽略",
+                        $"消息无 MAC/device_id: cmd={msg.Cmd} mid={msg.MsgId} known={KnownDeviceCount}");
+                }
+
                 MessageReceived?.Invoke(device, msg);
             }
             catch (Exception ex)
@@ -255,33 +371,134 @@ namespace FingerprintLockManager
             }
         }
 
-        /// <summary>获取或创建逻辑设备，并更新状态</summary>
-        private DeviceClient GetOrCreateDevice(string deviceId, Message msg)
+        /// <summary>在缓冲中扫描 0xB1 0x0F 并尝试解码，兼容帧边界噪声。</summary>
+        private static bool TryDecodeBinaryWithResync(byte[] payload, out AppMessage? app)
         {
-            bool isNew = false;
+            app = null;
+            if (payload == null || payload.Length < BinaryMessageCodec.HeaderSize) return false;
+            for (int i = 0; i <= payload.Length - BinaryMessageCodec.HeaderSize; i++)
+            {
+                if (payload[i] != BinaryMessageCodec.AppMagicLo ||
+                    payload[i + 1] != BinaryMessageCodec.AppMagicHi) continue;
+                if (BinaryMessageCodec.TryDecode(payload.AsSpan(i), out app) && app != null)
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>遗留 LineReceived 路径（仅当传输层同时抛 JSON 字符串时）。</summary>
+        private void OnLineReceived(string line)
+        {
+            // PayloadReceived 已覆盖主路径；此处仅在没有 PayloadReceived 的旧传输上兜底。
+            // 当前三个 Transport 都会同时触发 PayloadReceived，因此默认忽略重复 JSON 行，
+            // 避免双处理。若 payload 不是 JSON 开头则不会走 LineReceived。
+        }
+
+        /// <summary>
+        /// 获取或创建设备。
+        /// identityKey：优先 MAC（稳定唯一）；logicalDeviceId：业务 device_id（命令路由用）。
+        /// </summary>
+        private DeviceClient GetOrCreateDevice(
+            string identityKey, string logicalDeviceId, string meshMac, Message msg)
+        {
+            identityKey = (identityKey ?? "").Trim();
+            if (string.IsNullOrEmpty(identityKey))
+                throw new ArgumentException("identityKey empty", nameof(identityKey));
+
+            logicalDeviceId = (logicalDeviceId ?? "").Trim();
+            meshMac = NormalizeMac(meshMac);
+
+            bool becameOnline = false;
             DeviceClient device;
             lock (_devicesLock)
             {
-                if (!_devices.TryGetValue(deviceId, out var existing))
+                DeviceClient? existing = null;
+                // 1) 主键精确命中（MAC 或旧逻辑 ID）
+                if (!_devices.TryGetValue(identityKey, out existing))
+                {
+                    // 2) 按 MAC 查
+                    if (!string.IsNullOrEmpty(meshMac))
+                    {
+                        existing = _devices.Values.FirstOrDefault(d =>
+                            string.Equals(NormalizeMac(d.MeshMac), meshMac, StringComparison.OrdinalIgnoreCase));
+                    }
+                    // 3) 按逻辑 device_id 查（兼容旧会话）
+                    if (existing == null && !string.IsNullOrEmpty(logicalDeviceId))
+                    {
+                        existing = _devices.Values.FirstOrDefault(d =>
+                            string.Equals(d.DeviceId, logicalDeviceId, StringComparison.OrdinalIgnoreCase));
+                    }
+                }
+
+                if (existing == null)
                 {
                     device = new DeviceClient
                     {
-                        DeviceId = deviceId,
+                        DeviceId = !string.IsNullOrEmpty(logicalDeviceId) ? logicalDeviceId : identityKey,
+                        MeshMac = meshMac,
                         ConnectTime = DateTime.Now,
                         SendCallback = SendViaTransport
                     };
-                    _devices[deviceId] = device;
-                    isNew = true;
+                    _devices[identityKey] = device;
+                    becameOnline = true;
+                    RecordTrace(CommunicationDirection.System, "设备上线",
+                        $"key={identityKey} did={device.DeviceId} mac={meshMac} cmd={msg.Cmd}");
                 }
                 else
                 {
                     device = existing;
+                    becameOnline = !device.IsOnline;
+
+                    // 若之前用逻辑 ID 做键，现在有了 MAC，则迁移字典键到 MAC
+                    string currentKey = _devices.FirstOrDefault(kv => ReferenceEquals(kv.Value, device)).Key
+                                        ?? identityKey;
+                    if (!string.Equals(currentKey, identityKey, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _devices.Remove(currentKey);
+                        _devices[identityKey] = device;
+                    }
                 }
+
+                // 业务 device_id：有逻辑名就更新；发送命令仍用 DeviceId
+                if (!string.IsNullOrEmpty(logicalDeviceId))
+                    device.DeviceId = logicalDeviceId;
+                if (!string.IsNullOrEmpty(meshMac))
+                    device.MeshMac = meshMac;
+
                 device.IsOnline = true;
                 device.LastSeen = DateTime.Now;
+
+                // REGISTER 时刷新名称 / 根节点标记
+                if (string.Equals(msg.Cmd, Protocol.CmdRegister, StringComparison.OrdinalIgnoreCase) &&
+                    msg.Data is Newtonsoft.Json.Linq.JObject jo)
+                {
+                    string? name = jo["device_name"]?.ToString();
+                    if (!string.IsNullOrWhiteSpace(name)) device.DeviceName = name!;
+
+                    bool isRoot = false;
+                    var rootToken = jo["is_root"];
+                    if (rootToken != null && rootToken.Type != Newtonsoft.Json.Linq.JTokenType.Null)
+                    {
+                        string s = rootToken.Type == Newtonsoft.Json.Linq.JTokenType.Boolean
+                            ? ((bool)rootToken ? "true" : "false")
+                            : (rootToken.ToString() ?? "");
+                        isRoot = s.Equals("true", StringComparison.OrdinalIgnoreCase) || s == "1";
+                    }
+                    string role = jo["role"]?.ToString() ?? "";
+                    if (role.Equals("cabinet", StringComparison.OrdinalIgnoreCase))
+                        isRoot = false;
+                    if (role.Equals("root", StringComparison.OrdinalIgnoreCase))
+                        isRoot = true;
+                    device.IsRoot = isRoot;
+                }
+                else if (!string.IsNullOrEmpty(device.DeviceId) &&
+                         device.DeviceId.Contains("CABINET", StringComparison.OrdinalIgnoreCase))
+                {
+                    device.IsRoot = false;
+                }
             }
 
-            if (isNew)
+            if (becameOnline)
             {
                 DeviceConnected?.Invoke(device);
             }
@@ -289,15 +506,104 @@ namespace FingerprintLockManager
             return device;
         }
 
+        /// <summary>规范化 MAC：AA:BB:... 大写；非 MAC 返回空。</summary>
+        private static string NormalizeMac(string? raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return "";
+            string s = raw.Trim().ToUpperInvariant()
+                .Replace("-", ":")
+                .Replace(" ", "");
+            // 已是 AA:BB:CC:DD:EE:FF
+            if (s.Length == 17 && s.Count(c => c == ':') == 5) return s;
+            // 12 位十六进制无冒号
+            string hex = new string(s.Where(Uri.IsHexDigit).ToArray());
+            if (hex.Length == 12)
+            {
+                return string.Join(":", Enumerable.Range(0, 6)
+                    .Select(i => hex.Substring(i * 2, 2)));
+            }
+            return "";
+        }
+
+        /// <summary>
+        /// 按设备最后一条协议消息判定离线。物理串口仍连接只说明 Root 还在，
+        /// 不能证明某个柜子仍在线；柜子必须持续用 HEARTBEAT 刷新 LastSeen。
+        /// </summary>
+        private void ExpireInactiveDevices(DateTime now)
+        {
+            List<DeviceClient> expired = new List<DeviceClient>();
+            lock (_devicesLock)
+            {
+                foreach (var device in _devices.Values)
+                {
+                    if (!device.IsOnline || device.LastSeen == default) continue;
+                    TimeSpan timeout = device.IsRoot
+                        ? RootOfflineTimeout
+                        : CabinetOfflineTimeout;
+                    if (now - device.LastSeen < timeout) continue;
+
+                    device.IsOnline = false;
+                    expired.Add(device);
+                }
+            }
+
+            foreach (var device in expired)
+            {
+                RecordTrace(CommunicationDirection.System, "设备离线",
+                    $"{device.DeviceId} 已 {Math.Max(0, (int)(now - device.LastSeen).TotalSeconds)} 秒无协议消息");
+                DeviceDisconnected?.Invoke(device);
+            }
+        }
+
         /// <summary>DeviceClient 发送回调：经 ITransport 发往 Root</summary>
         private bool SendViaTransport(Message msg)
         {
-            if (_transport == null) return false;
-            return SendJson(JsonHelper.Serialize(msg));
+            if (_transport == null || msg == null) return false;
+            return SendMessageBinary(msg);
+        }
+
+        private bool SendMessageBinary(Message msg)
+        {
+            if (_transport == null)
+            {
+                RecordTrace(CommunicationDirection.System, "发送失败", "链路尚未启动");
+                return false;
+            }
+            try
+            {
+                AppMessage app = AppMessageMapper.ToApp(msg);
+                byte[] payload = BinaryMessageCodec.Encode(app);
+                bool sent = _transport.SendPayload(payload);
+                if (sent)
+                {
+                    Interlocked.Increment(ref _sentCount);
+                    LastSentTime = DateTime.Now;
+                    RecordTrace(CommunicationDirection.Transmit, "协议 BIN",
+                        $"cmd=0x{app.CmdId:X4}({msg.Cmd}) did={msg.DeviceId} mid={msg.MsgId} plen={app.Payload?.Length ?? 0}");
+                }
+                else
+                {
+                    string reason = string.IsNullOrWhiteSpace(_transport.LastError)
+                        ? "物理链路未连接或写入失败"
+                        : _transport.LastError;
+                    RecordTrace(CommunicationDirection.System, "发送失败", reason);
+                }
+                return sent;
+            }
+            catch (Exception ex)
+            {
+                RecordTrace(CommunicationDirection.System, "发送失败", ex.Message);
+                return false;
+            }
         }
 
         private bool SendJson(string json)
         {
+            // 兼容旧调用：尝试解析为 Message 后走二进制；失败则按 UTF-8 JSON 封帧。
+            var msg = Message.FromJson(json);
+            if (msg != null && !string.IsNullOrEmpty(msg.Cmd))
+                return SendMessageBinary(msg);
+
             if (_transport == null)
             {
                 RecordTrace(CommunicationDirection.System, "发送失败", "链路尚未启动");
@@ -341,18 +647,19 @@ namespace FingerprintLockManager
             // 链路断开时，标记所有设备离线
             if (!connected)
             {
-                List<DeviceClient> snapshot;
+                List<DeviceClient> disconnected = new List<DeviceClient>();
                 lock (_devicesLock)
                 {
-                    snapshot = new List<DeviceClient>(_devices.Values);
-                }
-                foreach (var d in snapshot)
-                {
-                    if (d.IsOnline)
+                    foreach (var device in _devices.Values)
                     {
-                        d.IsOnline = false;
-                        DeviceDisconnected?.Invoke(d);
+                        if (!device.IsOnline) continue;
+                        device.IsOnline = false;
+                        disconnected.Add(device);
                     }
+                }
+                foreach (var d in disconnected)
+                {
+                    DeviceDisconnected?.Invoke(d);
                 }
             }
         }

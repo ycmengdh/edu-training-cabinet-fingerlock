@@ -42,7 +42,16 @@ namespace FingerprintLockManager
         /// <summary>SD 卡是否可用（根节点在线且 SD 卡就绪）</summary>
         public bool IsAvailable => IsRootConnected && IsStorageReady != false;
 
+        /// <summary>当前是否处于降级模式（SD 不可用、读写在本地缓存）</summary>
+        public bool IsDegraded => !IsAvailable;
+
         public event Action? StatusChanged;
+
+        /// <summary>SD 进入降级模式时触发（UI 可订阅以提示用户）</summary>
+        public event Action? StorageDegraded;
+
+        /// <summary>SD 从降级模式恢复时触发（App 可订阅以回传本地缓存到 SD）</summary>
+        public event Action? StorageRecovered;
 
         public void RegisterRoot(string rootDeviceId, bool? storageReady)
         {
@@ -50,6 +59,7 @@ namespace FingerprintLockManager
             if (storageReady.HasValue || IsStorageReady == null)
                 IsStorageReady = storageReady;
             LastError = IsStorageReady == false ? "根节点 SD 卡未就绪" : "";
+            UpdateDegradedState();
             StatusChanged?.Invoke();
         }
 
@@ -69,8 +79,29 @@ namespace FingerprintLockManager
                     pending.Tcs.TrySetResult(null);
                 }
             }
+            UpdateDegradedState();
             StatusChanged?.Invoke();
         }
+
+        /// <summary>根据 IsAvailable 变化触发 StorageDegraded / StorageRecovered 事件</summary>
+        private void UpdateDegradedState()
+        {
+            bool degraded = !IsAvailable;
+            // 用事件是否挂载判断“之前是否处于降级”——简单稳妥：直接看 IsAvailable
+            // 这里通过比较私有字段记录的上一次状态来检测跳变
+            if (degraded && !_wasDegraded)
+            {
+                _wasDegraded = true;
+                try { StorageDegraded?.Invoke(); } catch { }
+            }
+            else if (!degraded && _wasDegraded)
+            {
+                _wasDegraded = false;
+                try { StorageRecovered?.Invoke(); } catch { }
+            }
+        }
+
+        private bool _wasDegraded;
 
         /// <summary>
         /// 处理收到的 SD 卡响应消息（由 MessageHandler 调用）
@@ -280,6 +311,107 @@ namespace FingerprintLockManager
             return false;
         }
 
+        // ====== 降级模式包装（SD 不可用时自动切换到本地缓存） ======
+
+        /// <summary>
+        /// 查询表快照（带降级）：SD 可用时优先 SD，失败或不可用时回落到本地缓存。
+        /// </summary>
+        public async Task<SdTableSnapshot?> QueryTableSnapshotWithFallbackAsync(
+            string table, int timeoutMs = DefaultTimeoutMs)
+        {
+            if (IsAvailable)
+            {
+                var snap = await QueryTableSnapshotAsync(table, timeoutMs);
+                if (snap != null && !string.IsNullOrWhiteSpace(snap.Json)) return snap;
+            }
+
+            // SD 不可用或读取失败：从本地缓存读
+            var cached = LocalCacheService.ReadTable(table);
+            if (cached == null) return null;
+            return new SdTableSnapshot
+            {
+                Table = table,
+                Json = cached.ToString(Formatting.None),
+                Version = LocalCacheService.ReadTableVersion(table)
+            };
+        }
+
+        /// <summary>同步包装</summary>
+        public SdTableSnapshot? QueryTableSnapshotWithFallback(string table, int timeoutMs = DefaultTimeoutMs)
+        {
+            return QueryTableSnapshotWithFallbackAsync(table, timeoutMs).GetAwaiter().GetResult();
+        }
+
+        /// <summary>
+        /// 保存表（带降级）：SD 可用时同时写 SD 和本地缓存；
+        /// SD 不可用或写失败时仅写本地缓存。
+        /// </summary>
+        public async Task<bool> SaveTableWithFallbackAsync(string table, string json,
+            uint baseVersion = 0, int timeoutMs = DefaultTimeoutMs)
+        {
+            if (IsAvailable)
+            {
+                bool ok = await SaveTableAsync(table, json, baseVersion, timeoutMs);
+                if (ok)
+                {
+                    try
+                    {
+                        var arr = JArray.Parse(json);
+                        LocalCacheService.WriteTable(table, arr);
+                        LocalCacheService.WriteTableVersion(table, baseVersion + 1);
+                    }
+                    catch { }
+                    return true;
+                }
+            }
+
+            // SD 不可用或保存失败：写本地缓存
+            try
+            {
+                var arr = JArray.Parse(json);
+                LocalCacheService.WriteTable(table, arr);
+                uint v = baseVersion > 0 ? baseVersion + 1 : LocalCacheService.ReadTableVersion(table) + 1;
+                LocalCacheService.WriteTableVersion(table, v);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>同步包装</summary>
+        public bool SaveTableWithFallback(string table, string json, uint baseVersion = 0,
+            int timeoutMs = DefaultTimeoutMs)
+        {
+            return SaveTableWithFallbackAsync(table, json, baseVersion, timeoutMs).GetAwaiter().GetResult();
+        }
+
+        /// <summary>
+        /// 上传指纹模板（带降级）：SD 可用时优先上传 SD；
+        /// SD 不可用或上传失败时保存到本地缓存。
+        /// </summary>
+        public async Task<bool> UploadFpTemplateWithFallbackAsync(string userId, int fingerIndex,
+            byte[] templateBytes, int timeoutMs = DefaultTimeoutMs)
+        {
+            if (IsAvailable)
+            {
+                bool ok = await UploadTemplateAsync(userId, fingerIndex, templateBytes, timeoutMs);
+                if (ok) return true;
+            }
+
+            // SD 不可用或上传失败：保存到本地
+            try
+            {
+                LocalCacheService.SaveFpTemplate(userId, fingerIndex, templateBytes);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         // ====== 内部实现 ======
 
         /// <summary>发送请求并等待响应</summary>
@@ -352,6 +484,17 @@ namespace FingerprintLockManager
                     return;
                 }
                 buf.Parts[part] = chunk;
+                // 可选 PART_ACK：帮助根节点侧诊断丢片；根节点当前为 fire-and-forget 窗口发送。
+                try
+                {
+                    if (!string.IsNullOrEmpty(RootDeviceId))
+                    {
+                        App.MeshBridge.Send(RootDeviceId, CmdIds.NameSdQueryPartAck,
+                            new { part, total, msg_id = msg.MsgId });
+                    }
+                }
+                catch { /* best-effort */ }
+
                 if (buf.Parts.Count < buf.Total) return;  // 未收齐
             }
 

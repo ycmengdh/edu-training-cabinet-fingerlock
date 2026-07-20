@@ -68,6 +68,9 @@ namespace FingerprintLockManager
         /// <summary>指纹录入最终结果（下位机 -> 上位机）</summary>
         AddFingerprintResult,
 
+        /// <summary>指纹录入过程提示（放指/抬指/验证）</summary>
+        EnrollProgress,
+
         /// <summary>权限事务提交结果（下位机 -> 上位机）</summary>
         SyncAck,
 
@@ -164,6 +167,26 @@ namespace FingerprintLockManager
         DeleteFpTemplate,
 
         /// <summary>删除指纹模板响应（根节点 -> 上位机）</summary>
-        FpTemplateDeleteResponse
+        FpTemplateDeleteResponse,
+
+        // ===== V2.7 设备专属副指纹命令（上位机 <-> 柜子，不经 SD 卡） =====
+
+        /// <summary>录入本机副指纹（上位机 -> 柜子）</summary>
+        AddBackupFingerprint,
+
+        /// <summary>请求本机副指纹清单（上位机 -> 柜子）</summary>
+        BackupFpListRequest,
+
+        /// <summary>本机副指纹清单响应（柜子 -> 上位机）</summary>
+        BackupFpList,
+
+        /// <summary>删除本机副指纹（上位机 -> 柜子）</summary>
+        DeleteBackupFingerprint,
+
+        /// <summary>删除本机副指纹结果（柜子 -> 上位机）</summary>
+        DeleteBackupFingerprintResult,
+
+        /// <summary>验证窗口事件（柜子 -> 上位机：进入/退出/超时/取消/开锁）</summary>
+        VerifyWindowEvent
     }
 }

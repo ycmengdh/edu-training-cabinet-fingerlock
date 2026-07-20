@@ -36,17 +36,18 @@ namespace FingerprintLockManager
             SetBusy(true, "正在读取根节点日志");
             try
             {
+                // V2.7：使用 Visible 变体实现教师数据范围隔离
                 int total = await Task.Run(() =>
-                    App.LogService.CountLogs(deviceId, userId, startTime, endTime, result));
+                    App.LogService.CountVisibleLogs(deviceId, userId, startTime, endTime, result));
                 int totalPages = Math.Max(1, (int)Math.Ceiling(total / (double)PageSize));
                 if (_pageIndex >= totalPages) _pageIndex = totalPages - 1;
                 if (_pageIndex < 0) _pageIndex = 0;
 
                 var logs = await Task.Run(() =>
-                    App.LogService.QueryLogs(deviceId, userId, startTime, endTime, result,
+                    App.LogService.QueryVisibleLogs(deviceId, userId, startTime, endTime, result,
                         PageSize, _pageIndex * PageSize));
                 var fails = await Task.Run(() =>
-                    App.LogService.AggregateFailReasons(deviceId, userId, startTime, endTime));
+                    App.LogService.AggregateVisibleFailReasons(deviceId, userId, startTime, endTime));
 
                 LogDataGrid.ItemsSource = logs;
                 PageInfoText.Text = $"第 {_pageIndex + 1} / {totalPages} 页";
@@ -134,7 +135,7 @@ namespace FingerprintLockManager
             try
             {
                 var all = await Task.Run(() =>
-                    App.LogService.QueryLogs(deviceId, userId, startTime, endTime, null, 100000, 0));
+                    App.LogService.QueryVisibleLogs(deviceId, userId, startTime, endTime, null, 100000, 0));
                 var dialog = new SaveFileDialog
                 {
                     Filter = "CSV 文件 (*.csv)|*.csv",

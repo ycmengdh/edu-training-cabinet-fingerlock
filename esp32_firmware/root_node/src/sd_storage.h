@@ -32,6 +32,9 @@ public:
     // SD 卡是否已挂载就绪
     static bool isReady();
 
+    // V2.7: 获取最近一次 SD 失败原因（为空表示正常或未尝试）
+    static const String& getLastError() { return lastError; }
+
     // ====== JSON 表读写 ======
     // 读取整张表为 JSON 字符串（全量读取，适合中小表）
     // tableName: "users" / "classes" / "permissions" / "devices" / "version"
@@ -84,6 +87,8 @@ public:
 
 private:
     static bool mounted;
+    // V2.7: 详细错误信息（供 host/显示/调试定位 SD 故障）
+    static String lastError;
 
     // 确保目录存在
     static bool ensureDir(const String &path);

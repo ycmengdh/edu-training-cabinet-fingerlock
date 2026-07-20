@@ -84,22 +84,28 @@
                                 <TextBlock Text="柜子节点" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
                             </StackPanel>
                         </Button>
+                        <Button x:Name="NavFingerprintTemplate" Style="{StaticResource NavButton}" Click="NavFingerprintTemplate_Click">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="&#xE928;" FontFamily="Segoe MDL2 Assets" FontSize="15" Width="30" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                                <TextBlock Text="指纹模板库" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                            </StackPanel>
+                        </Button>
                         <Button x:Name="NavLog" Style="{StaticResource NavButton}" Click="NavLog_Click">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="&#xE81C;" FontFamily="Segoe MDL2 Assets" FontSize="15" Width="30" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
                                 <TextBlock Text="开锁日志" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
                             </StackPanel>
                         </Button>
-                        <Button x:Name="NavDeviceConfig" Style="{StaticResource NavButton}" Click="NavDeviceConfig_Click">
-                            <StackPanel Orientation="Horizontal">
-                                <TextBlock Text="&#xE713;" FontFamily="Segoe MDL2 Assets" FontSize="15" Width="30" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
-                                <TextBlock Text="AP 配置" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
-                            </StackPanel>
-                        </Button>
                         <Button x:Name="NavSettings" Style="{StaticResource NavButton}" Click="NavSettings_Click">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="&#xE90F;" FontFamily="Segoe MDL2 Assets" FontSize="15" Width="30" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
                                 <TextBlock Text="系统设置" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                            </StackPanel>
+                        </Button>
+                        <Button x:Name="NavSystemLog" Style="{StaticResource NavButton}" Click="NavSystemLog_Click">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="&#xE9D9;" FontFamily="Segoe MDL2 Assets" FontSize="15" Width="30" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                                <TextBlock Text="系统日志" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
                             </StackPanel>
                         </Button>
                     </StackPanel>

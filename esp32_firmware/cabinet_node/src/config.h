@@ -2,27 +2,60 @@
 #define CONFIG_H
 #include "config_common.h"
 
-// AS608 指纹模块 UART2
-#define FINGER_TX_PIN       17
-#define FINGER_RX_PIN       18
-#define FINGER_UART_BAUD    57600
+// ===================== 调试 / 上位机直连：UART0 =====================
+// 与根节点相同波特率与协议帧（0xA5 0x5A + CRC16），物理口为 UART0 非 USB CDC。
+// ESP32-S3 默认：U0TXD=GPIO43, U0RXD=GPIO44（外接 USB-TTL / 上位机串口）
+#define DEBUG_UART_TX_PIN       43
+#define DEBUG_UART_RX_PIN       44
+#define DEBUG_UART_BAUD         UPLINK_USB_BAUD
 
-// 74HC595 移位寄存器控制
-#define SHIFT_DS_PIN        4
-#define SHIFT_STCP_PIN      15
-#define SHIFT_SHCP_PIN      16
+// ===================== AS608 指纹模块 =====================
+// UART2: ESP32 TX=GPIO17 -> AS608 RX, ESP32 RX=GPIO18 <- AS608 TX
+#define FINGER_TX_PIN           17
+#define FINGER_RX_PIN           18
+#define FINGER_UART_BAUD        57600
 
-// 按键: Key1-4 开锁, Key5 取消
-#define KEY0_PIN            47
-#define KEY1_PIN            48
-#define KEY2_PIN            45
-#define KEY3_PIN            38
-#define KEY4_PIN            39
-#define KEY_COUNT           5
-#define KEY_CANCEL_INDEX    4
+// 指纹模块电源控制与状态反馈
+// PWR: 输出控制上电；STATUS: 输入读供电状态
+#define FINGER_PWR_PIN          42
+#define FINGER_PWR_STATUS_PIN   21
+// 默认高电平上电；若硬件为低有效，改为 LOW
+#define FINGER_PWR_ON_LEVEL     HIGH
+#define FINGER_PWR_OFF_LEVEL    ((FINGER_PWR_ON_LEVEL == HIGH) ? LOW : HIGH)
+// 上电后等待模块稳定再握手
+#define FINGER_PWR_STABLE_MS    300
 
-// LED 状态指示
-#define LED_PIN             2
+// ===================== 74HC595 移位寄存器 =====================
+// Q0-Q3: 继电器(低电平开锁), Q4-Q7: 锁状态 LED(高电平亮)
+#define SHIFT_DS_PIN            4
+#define SHIFT_STCP_PIN          15
+#define SHIFT_SHCP_PIN          16
+
+// ===================== 按键: K1-K4 开锁, K5 取消 =====================
+// K1=47, K2=48, K3=45, K4=39, K5=40
+#define KEY0_PIN                47
+#define KEY1_PIN                48
+#define KEY2_PIN                45
+#define KEY3_PIN                39
+#define KEY4_PIN                40
+#define KEY_COUNT               5
+#define KEY_CANCEL_INDEX        4
+
+// LED 状态指示（Mesh/调试，非锁 LED）
+#define LED_PIN                 2
+
+// ===================== 指纹状态 LED（V2.7） =====================
+// 双色 LED 指示指纹验证状态：
+//   识别中：绿灯慢闪（500ms 周期）
+//   成功：  绿灯常亮（持续至 10s 操作窗口结束）
+//   失败：  红灯闪烁 3 次
+// 若硬件为单 GPIO 双色（共阳/共阴），可通过 FP_LED_COMMON_ANODE 切换极性。
+// 若硬件无独立双色 LED，可复用 74HC595 的保留位（需在 lock_control 中扩展）。
+#define FP_LED_GREEN_PIN        41
+#define FP_LED_RED_PIN          38
+// 共阳极 LED：HIGH=灭, LOW=亮。共阴极 LED：HIGH=亮, LOW=灭。
+// 默认共阴极（多数开发板板载 LED 为共阴）。
+#define FP_LED_COMMON_ANODE     0
 
 // 锁控制参数
 #define LOCK_OPEN_DURATION_MS   3000
@@ -31,7 +64,7 @@
 #define KEY_DEBOUNCE_MS         20
 #define KEY_LONGPRESS_MS        10000
 
-// WiFi 调试模式配置
+// WiFi 调试模式配置（保留 AP 可选；主调试链路为 UART0）
 #define AP_DEFAULT_PASSWORD     "12345678"
 #define AP_IP_ADDR              "192.168.4.1"
 #define AP_GATEWAY              "192.168.4.1"

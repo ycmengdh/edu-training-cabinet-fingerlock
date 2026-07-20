@@ -12,13 +12,95 @@
 #include "mesh_bridge.h"
 #include "protocol_frame.h"
 #include "message_hmac.h"
+#include "cmd_ids.h"
+#include "mem_pool.h"
+#include <string.h>
 #ifdef ENABLE_SD_CARD
 #include "sd_storage.h"
 static void syncPermissionsToCabinet(const uint8_t *mac, const char *deviceId);
 #endif
 
+// Rebuild a legacy full JSON message so existing handlers keep working while
+// the outer envelope is binary. Payload is treated as the `data` object bytes
+// (JSON) or "{}" when empty.
+static String appViewToLegacyJson(const AppMessageView &view) {
+    const char *cmdName = appCmdName(view.cmd_id);
+    if (cmdName == nullptr) cmdName = "UNKNOWN";
+
+    char did[APP_DEVICE_ID_MAX + 1];
+    did[0] = '\0';
+    if (view.device_id_len > 0 && view.device_id != nullptr) {
+        size_t n = view.device_id_len;
+        if (n > APP_DEVICE_ID_MAX) n = APP_DEVICE_ID_MAX;
+        memcpy(did, view.device_id, n);
+        did[n] = '\0';
+    }
+
+    String dataJson;
+    if (view.payload_len > 0 && view.payload != nullptr) {
+        // Prefer UTF-8 JSON object payload for complex cmds.
+        dataJson.reserve(view.payload_len + 1);
+        for (uint16_t i = 0; i < view.payload_len; i++) {
+            dataJson += (char)view.payload[i];
+        }
+        if (dataJson.length() == 0 || (dataJson[0] != '{' && dataJson[0] != '[')) {
+            dataJson = "{}";
+        }
+    } else {
+        dataJson = "{}";
+    }
+
+    String msgId = (view.msg_id != 0) ? String(view.msg_id) : String("");
+    return ProtocolFrame::buildMessage(String(cmdName), String(did), dataJson, msgId);
+}
+
 void MessageHandler::init() {
     Debug::println(F("[MSG] root message handler init complete"));
+}
+
+void MessageHandler::handleIncomingApp(const AppMessageView &view) {
+    // Binary control-plane shortcuts that need no JSON doc.
+    if (view.cmd_id == CMD_HEARTBEAT_ACK || view.cmd_id == CMD_ACK) {
+        return;
+    }
+    // Hybrid: convert to legacy JSON and reuse existing dispatch (SD/config/etc).
+    String legacy = appViewToLegacyJson(view);
+    handleIncoming(legacy);
+}
+
+void MessageHandler::handleMeshMessageApp(const uint8_t *fromMac, const uint8_t *appMsg, uint16_t len) {
+    if (appMsg == nullptr || len == 0) return;
+    AppMessageView view;
+    if (!appDecode(appMsg, (int)len, view)) return;
+
+    char did[APP_DEVICE_ID_MAX + 1];
+    did[0] = '\0';
+    if (view.device_id_len > 0 && view.device_id != nullptr) {
+        size_t n = view.device_id_len;
+        if (n > APP_DEVICE_ID_MAX) n = APP_DEVICE_ID_MAX;
+        memcpy(did, view.device_id, n);
+        did[n] = '\0';
+    }
+    if (did[0] == '\0') return;
+
+    if (view.cmd_id == CMD_HEARTBEAT) {
+        // Binary HEARTBEAT_ACK — no JSON, no SD.
+        uint8_t pl[8];
+        int pln = packAck(pl, (int)sizeof(pl), view.msg_id, 0, "ok");
+        if (pln < 0) pln = 0;
+        uint8_t out[128];
+        String rootMac = MeshComm::getMeshMac();
+        int n = appEncode(out, (int)sizeof(out), CMD_HEARTBEAT_ACK, view.msg_id, 0,
+                          APP_FLAG_IS_ACK, did, rootMac.c_str(), pl, (uint16_t)pln, 0);
+        if (n > 0 && !MeshComm::sendToNodeApp(fromMac, out, (uint16_t)n)) {
+            Debug::printf("[MSG] binary HEARTBEAT_ACK to %s failed\n", did);
+        }
+        return;
+    }
+
+    // REGISTER and other side-effects: reuse JSON side-effect path with rebuilt msg.
+    String legacy = appViewToLegacyJson(view);
+    handleMeshMessage(fromMac, legacy);
 }
 
 void MessageHandler::handleMeshMessage(const uint8_t *fromMac, const String &message) {
@@ -33,30 +115,36 @@ void MessageHandler::handleMeshMessage(const uint8_t *fromMac, const String &mes
     const char *deviceId = doc["device_id"] | "";
     if (strlen(deviceId) == 0) return;
 
+    // 心跳必须形成双向闭环。Root 的 ACK 既证明下行可达，也让柜子能区分
+    // “仍关联着父节点”和“Root 应用层确实能收发消息”。心跳不触碰 SD。
+    if (strcmp(cmd, "HEARTBEAT") == 0) {
+        String ack = ProtocolFrame::buildMessage(
+            "HEARTBEAT_ACK", deviceId, "{\"result\":\"ok\"}",
+            String(doc["msg_id"] | ""));
+        if (!MeshComm::sendToNode(fromMac, ack)) {
+            Debug::printf("[MSG] HEARTBEAT_ACK to %s failed\n", deviceId);
+        }
+        return;
+    }
+
 #ifdef ENABLE_SD_CARD
     if (strcmp(cmd, "LOG_REPORT") == 0) {
-        JsonArray sourceLogs = doc["data"]["logs"].as<JsonArray>();
-        DynamicJsonDocument logsDoc(16384);
-        JsonArray logs = logsDoc.to<JsonArray>();
-        for (JsonObject source : sourceLogs) {
-            JsonObject target = logs.createNestedObject();
-            for (JsonPair pair : source) target[pair.key()] = pair.value();
-            target["device_id"] = deviceId;
-        }
-
-        String logsJson;
-        serializeJson(logs, logsJson);
-        bool stored = SdStorage::appendLogs(logsJson);
-
-        // A cabinet may discard its local batch only after root persistence.
+        // Access logs are runtime-only.  Acknowledge legacy cabinet batches
+        // so old firmware stops retrying, but do not write them to the SD card.
         String ack = ProtocolFrame::buildMessage(
             "LOG_REPORT_ACK", deviceId,
-            stored ? "{\"result\":\"success\"}" : "{\"result\":\"fail\"}",
+            "{\"result\":\"success\"}",
             String(doc["msg_id"] | ""));
         MeshComm::sendToNode(fromMac, ack);
-    } else if (strcmp(cmd, "REGISTER") == 0 ||
-               strcmp(cmd, "STATUS_REPORT") == 0 ||
-               strcmp(cmd, "HEARTBEAT") == 0) {
+    } else if (strcmp(cmd, "REGISTER") == 0) {
+        // 仅 REGISTER（新设备首次注册）写 SD 卡——这是数据确实更新的场景。
+        // 此前 HEARTBEAT(10s) + STATUS_REPORT(60s) 都触发 SD read+write 32KB
+        // JSON，长时间运行后 SD 卡 FATFS 累积卡顿，主循环阻塞几百毫秒，
+        // mesh_rx 队列塞满（8×1508B=12KB），Mesh 协议栈底层缓冲也满，
+        // 整个 Mesh 网络停摆——表现为"前面通讯正常，运行一段时间后就不行了"。
+        // HEARTBEAT 的 last_seen 由 MeshBridge 路由表 lastSeen 字段维护
+        // （MESH_ROUTE_TIMEOUT_MS=30s 过期），STATUS_REPORT 的实时状态
+        // 由上位机收到原始消息时直接处理，都不需要落 SD 卡。
         String devicesJson;
         DynamicJsonDocument devicesDoc(32768);
         JsonArray devices = devicesDoc.to<JsonArray>();
@@ -70,6 +158,8 @@ void MessageHandler::handleMeshMessage(const uint8_t *fromMac, const String &mes
             }
         }
 
+        // 检查设备是否已存在且关键字段未变化——只在确实更新时才写 SD 卡
+        bool needWrite = false;
         JsonObject record;
         for (JsonObject candidate : devices) {
             if (String((const char *)(candidate["device_id"] | "")) == deviceId) {
@@ -77,35 +167,56 @@ void MessageHandler::handleMeshMessage(const uint8_t *fromMac, const String &mes
                 break;
             }
         }
-        if (record.isNull()) record = devices.createNestedObject();
-        record["device_id"] = deviceId;
-        record["device_name"] = doc["data"]["device_name"] | deviceId;
-        record["is_root"] = false;
-        record["online"] = true;
-        record["last_seen"] = (uint32_t)time(nullptr);
-        record["mesh_mac"] = MeshComm::macToString(fromMac);
-        if (doc["data"].containsKey("firmware_version")) {
-            record["firmware_version"] = doc["data"]["firmware_version"];
+        if (record.isNull()) {
+            // 新设备：创建记录并写 SD
+            record = devices.createNestedObject();
+            needWrite = true;
         }
-        if (strcmp(cmd, "STATUS_REPORT") == 0) {
-            JsonObject status = record.createNestedObject("status");
-            for (JsonPair pair : doc["data"].as<JsonObject>()) status[pair.key()] = pair.value();
+        // 检查关键字段是否变化（device_name / mesh_mac / firmware_version）
+        String newName = doc["data"]["device_name"] | deviceId;
+        String newMac = MeshComm::macToString(fromMac);
+        String newFw = doc["data"].containsKey("firmware_version") ?
+                       String((const char *)doc["data"]["firmware_version"]) : String("");
+        String oldName = record["device_name"] | "";
+        String oldMac = record["mesh_mac"] | "";
+        String oldFw = record["firmware_version"] | "";
+        if (oldName != newName || oldMac != newMac || oldFw != newFw || !record["online"]) {
+            needWrite = true;
         }
-
-        String output;
-        serializeJson(devices, output);
-        SdStorage::writeTable("devices", output);
-
-        if (strcmp(cmd, "REGISTER") == 0) {
-            syncPermissionsToCabinet(fromMac, deviceId);
-
-            time_t currentTime = time(nullptr);
-            if (currentTime > 1700000000) {
-                String timeData = "{\"timestamp\":" + String((uint32_t)currentTime) + "}";
-                MeshComm::sendToNode(fromMac, ProtocolFrame::buildMessage(
-                    "TIME_SYNC", deviceId, timeData));
+        if (needWrite) {
+            record["device_id"] = deviceId;
+            record["device_name"] = newName;
+            record["is_root"] = false;
+            record["online"] = true;
+            record["last_seen"] = (uint32_t)time(nullptr);
+            record["mesh_mac"] = newMac;
+            if (newFw.length() > 0) {
+                record["firmware_version"] = newFw;
             }
+
+            String output;
+            serializeJson(devices, output);
+            SdStorage::writeTable("devices", output);
+            Debug::printf("[MSG] device %s registered/updated in SD\n", deviceId);
+        } else {
+            // 仅更新内存中 online 状态（不写 SD）
+            record["online"] = true;
+            record["last_seen"] = (uint32_t)time(nullptr);
         }
+
+        syncPermissionsToCabinet(fromMac, deviceId);
+
+        time_t currentTime = time(nullptr);
+        if (currentTime > 1700000000) {
+            String timeData = "{\"timestamp\":" + String((uint32_t)currentTime) + "}";
+            MeshComm::sendToNode(fromMac, ProtocolFrame::buildMessage(
+                "TIME_SYNC", deviceId, timeData));
+        }
+    } else if (strcmp(cmd, "STATUS_REPORT") == 0) {
+        // STATUS_REPORT 不写 SD 卡：实时状态由上位机收到原始消息时直接处理，
+        // last_seen 由 MeshBridge 路由表 lastSeen 字段维护（30s 过期）。
+        // 设备掉线由 handleDeviceOffline 处理（只在状态变化时写 SD，已实现）。
+        // 高频状态路径不输出日志，避免 USB 日志反压 Mesh 主循环。
     }
 #endif
 }
@@ -202,13 +313,28 @@ static void syncPermissionsToCabinet(const uint8_t *mac, const char *deviceId) {
         return;
     }
 
+    // Helper: unicast one binary app message with JSON data payload to a cabinet.
+    auto sendBin = [&](uint16_t cmdId, const String &dataObj) -> bool {
+        uint8_t out[1400];
+        String rootMac = MeshComm::getMeshMac();
+        // device_id=目标柜逻辑ID；source_id=根节点 MAC
+        int n = appEncode(out, (int)sizeof(out), cmdId, appNextMsgId(), 0, 0,
+                          deviceId, rootMac.c_str(),
+                          (const uint8_t *)dataObj.c_str(), (uint16_t)dataObj.length(), 0);
+        if (n <= 0) return false;
+        return MeshComm::sendToNodeApp(mac, out, (uint16_t)n);
+    };
+
+    // Pace unicast rows so 40-cabinet REGISTER storms cannot flood Mesh TX.
+    // BEGIN + N×SYNC + COMMIT; inter-row delay from config_common.h.
     String beginData = "{\"version\":" + String(globalVersion) +
                        ",\"total\":" + String(total) + "}";
-    bool allSent = MeshComm::sendToNode(mac, ProtocolFrame::buildMessage(
-        "BEGIN_PERMISSION_SYNC", deviceId, beginData));
+    bool allSent = sendBin(CMD_BEGIN_PERMISSION_SYNC, beginData);
+    delay(PERM_SYNC_INTER_ROW_MS);
 
     int sequence = 0;
     for (JsonObject user : users) {
+        if (!allSent) break;
         int fingerprintId = user["fingerprint_id"] | -1;
         String userId = user["user_id"] | "";
         bool enabled = user["enabled"] | true;
@@ -237,7 +363,9 @@ static void syncPermissionsToCabinet(const uint8_t *mac, const char *deviceId) {
         // grant the system lock to a teacher or student.
         if (strcmp(role, "admin") != 0) lockPermissions[0] = false;
 
-        DynamicJsonDocument permissionDoc(1024);
+        // Compact JSON row — avoids nested DynamicJsonDocument per user when possible.
+        // Keep ArduinoJson for name/user_id escaping safety.
+        DynamicJsonDocument permissionDoc(768);
         permissionDoc["version"] = globalVersion;
         permissionDoc["total"] = total;
         permissionDoc["sequence"] = sequence++;
@@ -253,15 +381,16 @@ static void syncPermissionsToCabinet(const uint8_t *mac, const char *deviceId) {
         lockObject["lock_3"] = lockPermissions[3];
         String data;
         serializeJson(permissionDoc, data);
-        allSent = MeshComm::sendToNode(mac, ProtocolFrame::buildMessage(
-            "SYNC_PERMISSION", deviceId, data)) && allSent;
+        allSent = sendBin(CMD_SYNC_PERMISSION, data) && allSent;
+        delay(PERM_SYNC_INTER_ROW_MS);
+        yield();
     }
 
     if (allSent) {
+        delay(PERM_SYNC_INTER_ROW_MS);
         String commitData = "{\"version\":" + String(globalVersion) +
                             ",\"total\":" + String(total) + "}";
-        allSent = MeshComm::sendToNode(mac, ProtocolFrame::buildMessage(
-            "COMMIT_PERMISSION_SYNC", deviceId, commitData));
+        allSent = sendBin(CMD_COMMIT_PERMISSION_SYNC, commitData);
     }
     Debug::printf("[MSG] permission transaction to %s: %d records, version=%u, %s\n",
                   deviceId, total, globalVersion, allSent ? "sent" : "aborted");
@@ -274,18 +403,84 @@ bool MessageHandler::sendMessage(const String &cmd, const String &dataJson,
     // responses therefore go directly through the uplink bridge here.
     DeviceConfig cfg;
     Storage::loadDeviceConfig(cfg);
+
+    uint16_t cmdId = appCmdIdFromName(cmd.c_str());
+    if (cmdId != 0) {
+        uint16_t mid = 0;
+        if (msgId.length() > 0) mid = (uint16_t)msgId.toInt();
+        if (mid == 0) mid = appNextMsgId();
+
+        uint8_t flags = 0;
+        if (cmdId == CMD_ACK || cmdId == CMD_HEARTBEAT_ACK ||
+            cmdId == CMD_SD_SAVE_RESPONSE || cmdId == CMD_SD_VERSION_RESPONSE ||
+            cmdId == CMD_FP_TEMPLATE_UPLOAD_RESPONSE ||
+            cmdId == CMD_FP_TEMPLATE_DOWNLOAD_RESPONSE ||
+            cmdId == CMD_FP_TEMPLATE_DELETE_RESPONSE) {
+            flags |= APP_FLAG_IS_ACK;
+        }
+        if (cmdId == CMD_ERROR) flags |= APP_FLAG_IS_ERROR;
+
+        const String &data = dataJson.length() > 0 ? dataJson : String("{}");
+        if (data.length() <= APP_MAX_PAYLOAD) {
+            uint8_t *scratch = MemPool::meshTxScratch();
+            size_t scratchSize = MemPool::meshTxScratchSize();
+            // Prefer a larger buffer for SD responses that still fit one frame.
+            uint8_t local[1600];
+            uint8_t *out = scratch;
+            int outSize = (int)scratchSize;
+            if (out == nullptr || outSize < (int)(APP_ENVELOPE_MIN + data.length() + 32)) {
+                out = local;
+                outSize = (int)sizeof(local);
+            }
+            String selfMac = MeshComm::getMeshMac();
+            int n = appEncode(out, outSize, cmdId, mid, 0, flags,
+                              cfg.device_id.c_str(), selfMac.c_str(),
+                              (const uint8_t *)data.c_str(), (uint16_t)data.length(), 0);
+            if (n > 0) return MeshBridge::sendToUplinkBytes(out, (uint16_t)n);
+        }
+    }
+
+    // Legacy full JSON fallback (unknown cmd or oversized single payload)
     String json = ProtocolFrame::buildMessage(cmd, cfg.device_id, dataJson, msgId);
     return MeshBridge::sendToUplink(json);
 }
 
 void MessageHandler::sendAck(const String &msgId, const String &result) {
     if (msgId.length() == 0) return;
+    // Binary ACK packer when possible
+    uint16_t mid = (uint16_t)msgId.toInt();
+    uint8_t pl[48];
+    int pln = packAck(pl, (int)sizeof(pl), mid, 0, result.c_str());
+    if (pln > 0) {
+        DeviceConfig cfg;
+        Storage::loadDeviceConfig(cfg);
+        String selfMac = MeshComm::getMeshMac();
+        uint8_t out[128];
+        int n = appEncode(out, (int)sizeof(out), CMD_ACK, mid, 0, APP_FLAG_IS_ACK,
+                          cfg.device_id.c_str(), selfMac.c_str(), pl, (uint16_t)pln, 0);
+        if (n > 0 && MeshBridge::sendToUplinkBytes(out, (uint16_t)n)) return;
+    }
     String data = "{\"result\":\"" + result + "\"}";
     sendMessage("ACK", data, msgId);
 }
 
 void MessageHandler::sendError(ErrorCode code, const String &message,
                                const String &msgId) {
+    uint16_t mid = msgId.length() > 0 ? (uint16_t)msgId.toInt() : 0;
+    uint8_t pl[160];
+    int pln = packError(pl, (int)sizeof(pl), mid, (uint16_t)code, message.c_str());
+    if (pln > 0) {
+        DeviceConfig cfg;
+        Storage::loadDeviceConfig(cfg);
+        String selfMac = MeshComm::getMeshMac();
+        uint8_t out[256];
+        int n = appEncode(out, (int)sizeof(out), CMD_ERROR, mid, 0, APP_FLAG_IS_ERROR,
+                          cfg.device_id.c_str(), selfMac.c_str(), pl, (uint16_t)pln, 0);
+        if (n > 0 && MeshBridge::sendToUplinkBytes(out, (uint16_t)n)) {
+            Debug::printf("[MSG] error response: code=%d msg=%s\n", (int)code, message.c_str());
+            return;
+        }
+    }
     String data = "{\"error_code\":" + String((int)code) + ",";
     data += "\"message\":\"" + message + "\"}";
     sendMessage("ERROR", data, msgId);
@@ -357,6 +552,9 @@ void MessageHandler::handleIncoming(const String &message) {
         cmdDownloadFpTemplate(data, msgId);
     } else if (strcmp(cmd, "DELETE_FP_TEMPLATE") == 0) {
         cmdDeleteFpTemplate(data, msgId);
+    } else if (strcmp(cmd, "SD_QUERY_PART_ACK") == 0) {
+        // Host optional part-ack: currently windowed fire-and-forget on root.
+        // Accept silently so unknown-cmd errors do not surface during large queries.
 #endif
     } else if (strcmp(cmd, "HEARTBEAT_ACK") == 0) {
         // No action needed
@@ -503,6 +701,8 @@ static size_t utf8SafePartLength(const String &text, size_t start, size_t maxLen
 bool MessageHandler::sendLargeResponse(const String &cmd, const String &dataJson,
                                        const String &msgId) {
     // One SD_QUERY_PART must fit into a single 1400-byte ESP frame.
+    // Windowed send: fire up to SD_PART_WINDOW parts, then yield briefly.
+    // PC still reassembles by part index; PART_ACK is optional (see host).
     const size_t MAX_PART = 500;
 
     if (dataJson.length() <= MAX_PART) {
@@ -539,15 +739,25 @@ bool MessageHandler::sendLargeResponse(const String &cmd, const String &dataJson
         }
         part += "\"}";
 
-        sendMessage("SD_QUERY_PART", part, msgId);
-        delay(30);
+        if (!sendMessage("SD_QUERY_PART", part, msgId)) {
+            Debug::printf("[MSG] SD_QUERY_PART %d/%d send failed\n", i + 1, totalParts);
+            return false;
+        }
+        // Pace parts: every SD_PART_WINDOW packets, longer pause so USB/CDC
+        // and host reassembly can catch up without filling TX buffers.
+        if (((i + 1) % SD_PART_WINDOW) == 0) {
+            delay(80);
+            yield();
+        } else {
+            delay(25);
+        }
     }
     return true;
 }
 
 void MessageHandler::cmdSdQuery(const JsonObject &data, const String &msgId) {
     if (!SdStorage::isReady()) {
-        sendError(ERR_INTERNAL, "sd card not ready", msgId);
+        sendError(ERR_SD_NOT_READY, "sd card not ready", msgId);
         return;
     }
 
@@ -575,7 +785,7 @@ void MessageHandler::cmdSdQuery(const JsonObject &data, const String &msgId) {
 
 void MessageHandler::cmdSdSave(const JsonObject &data, const String &msgId) {
     if (!SdStorage::isReady()) {
-        sendError(ERR_INTERNAL, "sd card not ready", msgId);
+        sendError(ERR_SD_NOT_READY, "sd card not ready", msgId);
         return;
     }
 
@@ -650,7 +860,7 @@ void MessageHandler::cmdSdQueryVersion(const String &msgId) {
 
 void MessageHandler::cmdUploadFpTemplate(const JsonObject &data, const String &msgId) {
     if (!SdStorage::isReady()) {
-        sendError(ERR_INTERNAL, "sd card not ready", msgId);
+        sendError(ERR_SD_NOT_READY, "sd card not ready", msgId);
         return;
     }
 
@@ -710,7 +920,7 @@ void MessageHandler::cmdUploadFpTemplate(const JsonObject &data, const String &m
 
 void MessageHandler::cmdDownloadFpTemplate(const JsonObject &data, const String &msgId) {
     if (!SdStorage::isReady()) {
-        sendError(ERR_INTERNAL, "sd card not ready", msgId);
+        sendError(ERR_SD_NOT_READY, "sd card not ready", msgId);
         return;
     }
 
@@ -761,7 +971,7 @@ void MessageHandler::cmdDownloadFpTemplate(const JsonObject &data, const String 
 
 void MessageHandler::cmdDeleteFpTemplate(const JsonObject &data, const String &msgId) {
     if (!SdStorage::isReady()) {
-        sendError(ERR_INTERNAL, "sd card not ready", msgId);
+        sendError(ERR_SD_NOT_READY, "sd card not ready", msgId);
         return;
     }
 

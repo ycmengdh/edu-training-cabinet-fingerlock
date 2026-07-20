@@ -29,9 +29,14 @@ namespace FingerprintLockManager
             SetBusy(true, "正在读取根节点用户数据");
             try
             {
-                List<User> users = await Task.Run(() => string.IsNullOrEmpty(role)
-                    ? App.UserService.GetAllUsers()
-                    : App.UserService.GetUsersByRole(role));
+                // V2.7：使用 GetVisibleUsers 实现教师数据范围隔离
+                List<User> users = await Task.Run(() =>
+                {
+                    var visible = App.UserService.GetVisibleUsers();
+                    return string.IsNullOrEmpty(role)
+                        ? visible
+                        : visible.Where(u => u.Role == role).ToList();
+                });
                 UserDataGrid.ItemsSource = users;
                 PageStatusText.Text = $"共 {users.Count} 个用户";
             }
@@ -321,19 +326,42 @@ namespace FingerprintLockManager
                     selected.FingerprintId = fingerprintId;
                 }
 
-                bool templateBackedUp = false;
+                // 采集-存储-分配解耦：先把模板存到本地指纹模板库
+                bool savedLocal = false;
                 if (enrollment.TemplateBytes is { Length: > 0 })
                 {
-                    templateBackedUp = await App.SdStorageService.UploadTemplateAsync(
-                        selected.UserId, 1, enrollment.TemplateBytes);
+                    savedLocal = await Task.Run(() =>
+                        App.FingerprintTemplateService.SaveEnrolledTemplate(
+                            fingerprintId, enrollment.TemplateBytes!,
+                            targetDevice, selected.UserId));
+                }
+
+                // 模板上传改为调 FingerprintTemplateService.UploadToSd（带 fallback）
+                bool templateBackedUp = false;
+                if (savedLocal && enrollment.TemplateBytes is { Length: > 0 })
+                {
+                    try
+                    {
+                        templateBackedUp = await App.FingerprintTemplateService.UploadToSdAsync(fingerprintId);
+                    }
+                    catch
+                    {
+                        templateBackedUp = false;
+                    }
                 }
 
                 BroadcastCommandResult permissionsSynced = await Task.Run(
                     App.CabinetSyncService.SyncAllPermissions);
                 string summary = "指纹录入已完成。";
+                if (savedLocal)
+                {
+                    summary += "\n模板已暂存到本地指纹模板库。";
+                }
                 summary += templateBackedUp
                     ? "\n模板已备份到根节点。"
-                    : "\n模板尚未备份到根节点。";
+                    : (App.SdStorageService.IsAvailable
+                        ? "\n模板尚未备份到根节点。"
+                        : "\nSD 不可用，模板仅保存在本地，待 SD 恢复后可在「指纹模板库」中手动上传。");
                 summary += "\n" + CabinetSyncService.FormatSyncResult(permissionsSynced,
                     "所有在线柜子均已确认权限更新。",
                     "在线柜子未全部确认权限更新，未确认设备仍使用原有缓存。");
@@ -341,7 +369,7 @@ namespace FingerprintLockManager
                 MessageBox.Show(summary,
                     permissionsSynced.Success ? "录入完成" : "录入完成，待同步",
                     MessageBoxButton.OK,
-                    permissionsSynced.Success && templateBackedUp
+                    permissionsSynced.Success && savedLocal
                         ? MessageBoxImage.Information
                         : MessageBoxImage.Warning);
                 await LoadUsersAsync();
@@ -350,6 +378,108 @@ namespace FingerprintLockManager
             {
                 MessageBox.Show(ex.Message, "根节点不可用",
                     MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+            finally
+            {
+                SetBusy(false);
+            }
+        }
+
+        /// <summary>
+        /// V2.7：批量分配柜子权限。
+        /// 对 DataGrid 选中的多个学生，弹出柜子多选对话框，为每个学生写入 4 锁权限覆盖并同步。
+        /// </summary>
+        private async void BatchAssignPermButton_Click(object sender, RoutedEventArgs e)
+        {
+            var selectedUsers = UserDataGrid.SelectedItems.OfType<User>().ToList();
+            if (selectedUsers.Count == 0)
+            {
+                MessageBox.Show("请先在列表中选择一个或多个用户（按住 Ctrl 多选）", "提示");
+                return;
+            }
+
+            // 弹出柜子多选对话框（复用简单的多行输入：每行一个 deviceId，或 * 表示全部在线柜子）
+            string? input = PromptDialog.Show(
+                "请输入要分配权限的柜子 ID（每行一个），或输入 * 表示全部在线柜子：",
+                "批量分配柜子权限",
+                "*");
+            if (string.IsNullOrWhiteSpace(input)) return;
+
+            // 解析目标柜子列表
+            List<string> targetDevices;
+            if (input.Trim() == "*")
+            {
+                targetDevices = App.MeshBridge.GetOnlineDevices()
+                    .Where(d => d.IsOnline && !d.IsRoot && !string.IsNullOrWhiteSpace(d.DeviceId))
+                    .Select(d => d.DeviceId).Distinct().ToList();
+            }
+            else
+            {
+                targetDevices = input.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                    .Select(s => s.Trim()).Where(s => !string.IsNullOrEmpty(s)).Distinct().ToList();
+            }
+            if (targetDevices.Count == 0)
+            {
+                MessageBox.Show("没有可用的目标柜子", "提示");
+                return;
+            }
+
+            // 弹出权限选择（4 锁，简单的多行输入 lock_0..lock_3 的 true/false）
+            string? permInput = PromptDialog.Show(
+                "请输入 4 把锁的权限（true/false，逗号分隔，对应 Lock0-3）：\n例如：false,true,true,false",
+                "权限配置",
+                "false,true,true,false");
+            if (string.IsNullOrWhiteSpace(permInput)) return;
+
+            var parts = permInput.Split(',', StringSplitOptions.TrimEntries);
+            if (parts.Length != 4)
+            {
+                MessageBox.Show("权限格式错误：需要 4 个 true/false 值", "错误");
+                return;
+            }
+            bool[] perms = new bool[4];
+            for (int i = 0; i < 4; i++)
+            {
+                if (!bool.TryParse(parts[i], out perms[i]))
+                {
+                    MessageBox.Show($"权限值 '{parts[i]}' 无效", "错误");
+                    return;
+                }
+            }
+
+            SetBusy(true, $"正在为 {selectedUsers.Count} 个用户批量分配权限...");
+            try
+            {
+                int success = 0, fail = 0;
+                foreach (var user in selectedUsers)
+                {
+                    try
+                    {
+                        var dict = new Dictionary<int, bool>
+                        {
+                            { 0, perms[0] }, { 1, perms[1] }, { 2, perms[2] }, { 3, perms[3] }
+                        };
+                        bool ok = await Task.Run(() => App.PermissionService.SetUserPermissions(user.UserId, dict));
+                        if (ok) success++;
+                        else fail++;
+                    }
+                    catch (UnauthorizedAccessException)
+                    {
+                        fail++;
+                    }
+                }
+
+                // 同步到柜子
+                var syncResult = App.CabinetSyncService.SyncAllPermissions();
+
+                MessageBox.Show(
+                    $"批量分配完成：成功 {success}，失败 {fail}\n柜子同步：{syncResult}",
+                    "完成", MessageBoxButton.OK, MessageBoxImage.Information);
+                await LoadUsersAsync();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("批量分配异常：" + ex.Message, "错误");
             }
             finally
             {

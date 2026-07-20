@@ -1,6 +1,8 @@
 /**
  * lock_control.cpp - 4 路锁控制 via 74HC595 移位寄存器
- * 595 Q0-Q3: 继电器(低电平触发, LOW=开锁), Q4-Q7: LED(高电平亮)
+ * 接线: DS=GPIO4, STCP=GPIO15, SHCP=GPIO16
+ * 595 Q0-Q3: 锁1-4 继电器(低电平触发, LOW=开锁)
+ * 595 Q4-Q7: 锁1-4 状态 LED(高电平亮)
  * 每次 openLock/closeLock 后更新整个 595 输出
  */
 #include "lock_control.h"

@@ -2,13 +2,40 @@ namespace FingerprintLockManager
 {
     /// <summary>
     /// 登录认证服务。账号和密码哈希从根节点 users.json 读取。
+    /// 规则：
+    /// 1) 用户表为空（或完全读不到数据源）时，允许 admin/admin123，并尽量自动创建该账户；
+    /// 2) 一旦已有任意账户，一律按账户表严格校验，不再使用内置口令旁路。
     /// </summary>
     public class AuthService
     {
+        private const string BuiltInAdministratorUserId = "admin";
+        private const string BuiltInAdministratorPassword = "admin123";
+
         public User? Login(string userId, string password)
         {
             if (string.IsNullOrWhiteSpace(userId) || string.IsNullOrEmpty(password)) return null;
-            var user = App.UserService.GetUser(userId);
+            userId = userId.Trim();
+
+            List<User> users;
+            try
+            {
+                users = App.UserService.GetAllUsers();
+            }
+            catch (RootDataUnavailableException)
+            {
+                // 无 SD、也无本地缓存：仅允许内置管理员进入系统。
+                var builtInAdministrator = CreateBuiltInAdministrator(userId, password);
+                if (builtInAdministrator != null) return builtInAdministrator;
+                throw;
+            }
+
+            // 没有任何用户：引导创建默认管理员。
+            if (users.Count == 0)
+                return BootstrapBuiltInAdministrator(userId, password);
+
+            // 已有账户：严格按表验证。
+            var user = users.FirstOrDefault(u =>
+                string.Equals(u.UserId, userId, StringComparison.Ordinal));
             if (user == null || !user.Enabled || !PasswordHelper.VerifyPassword(
                     password, user.PasswordSalt, user.PasswordHash)) return null;
 
@@ -18,6 +45,7 @@ namespace FingerprintLockManager
             {
                 try
                 {
+                    // 登录阶段允许对本人做哈希升级（UserService 对本人/空会话放行）。
                     App.UserService.ResetPassword(userId, password);
                 }
                 catch (RootDataUnavailableException)
@@ -27,6 +55,70 @@ namespace FingerprintLockManager
             }
             return user;
         }
+
+        public bool IsBuiltInAdministratorCredentials(string userId, string password) =>
+            string.Equals(userId?.Trim(), BuiltInAdministratorUserId, StringComparison.Ordinal) &&
+            string.Equals(password, BuiltInAdministratorPassword, StringComparison.Ordinal);
+
+        /// <summary>
+        /// 用户表为空时：校验内置口令，写入 admin 账户后返回；
+        /// 写入失败时仍返回内存中的内置管理员，保证空系统可首次进入。
+        /// </summary>
+        private User? BootstrapBuiltInAdministrator(string userId, string password)
+        {
+            if (!IsBuiltInAdministratorCredentials(userId, password)) return null;
+
+            var admin = new User
+            {
+                UserId = BuiltInAdministratorUserId,
+                Name = "超级管理员",
+                Role = "admin",
+                Enabled = true,
+                CreateTime = DateTime.Now
+            };
+
+            try
+            {
+                if (App.UserService.AddUser(admin, BuiltInAdministratorPassword))
+                {
+                    return App.UserService.GetUser(BuiltInAdministratorUserId) ?? BuildEphemeralAdministrator();
+                }
+
+                // 可能是并发创建成功：再读一次并严格校验。
+                var existing = App.UserService.GetUser(BuiltInAdministratorUserId);
+                if (existing != null && existing.Enabled &&
+                    PasswordHelper.VerifyPassword(
+                        password, existing.PasswordSalt, existing.PasswordHash))
+                {
+                    return existing;
+                }
+            }
+            catch (RootDataUnavailableException)
+            {
+                // 写入不可用时退回内存账户。
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // 登录阶段数据范围上下文可能尚未建立。
+            }
+
+            return BuildEphemeralAdministrator();
+        }
+
+        private User? CreateBuiltInAdministrator(string userId, string password)
+        {
+            if (!IsBuiltInAdministratorCredentials(userId, password)) return null;
+            return BuildEphemeralAdministrator();
+        }
+
+        private static User BuildEphemeralAdministrator() => new User
+        {
+            UserId = BuiltInAdministratorUserId,
+            Name = "超级管理员",
+            Role = "admin",
+            Enabled = true,
+            CreateTime = DateTime.Now
+        };
 
         public bool ChangePassword(string userId, string oldPassword, string newPassword)
         {

@@ -11,12 +11,16 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include "config.h"
+#include "app_protocol.h"
 
 class MessageHandler {
 public:
     static void init();
     static void handleIncoming(const String &message);
+    // Binary app envelope from host or mesh (hybrid: complex payloads may be JSON)
+    static void handleIncomingApp(const AppMessageView &view);
     static void handleMeshMessage(const uint8_t *fromMac, const String &message);
+    static void handleMeshMessageApp(const uint8_t *fromMac, const uint8_t *appMsg, uint16_t len);
     static void handleDeviceOffline(const String &deviceId);
     static void update();
 

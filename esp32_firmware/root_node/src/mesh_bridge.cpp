@@ -10,11 +10,15 @@
 #include "message_handler.h"
 #include "storage.h"
 #include "protocol_frame.h"
+#include "mem_pool.h"
+#include "app_protocol.h"
+#include "cmd_ids.h"
 #ifdef ENABLE_SD_CARD
 #include "sd_storage.h"
 #endif
 #include <ArduinoJson.h>
 #include <WiFi.h>
+#include <string.h>
 
 // ====== 静态成员初始化 ======
 MeshBridge::RouteEntry MeshBridge::routeTable[MESH_MAX_NODE];
@@ -22,6 +26,8 @@ int MeshBridge::routeCount = 0;
 UplinkMode MeshBridge::uplinkMode = UPLINK_USB;
 bool MeshBridge::uplinkConnected = false;
 bool MeshBridge::initialized = false;
+// V2.7：最近一次收到上行链路有效数据时刻（用于诊断 Mesh 健康度）
+unsigned long MeshBridge::lastUplinkRxMs = 0;
 
 // AP/STA TCP 上行链路资源
 static WiFiServer *bridgeServer = nullptr;   // AP 模式 TCP 服务端
@@ -34,8 +40,11 @@ static const unsigned long ROOT_ANNOUNCE_INTERVAL_MS = 3000;
 static void announceRootToHost(const char *uplink) {
     DeviceConfig cfg;
     Storage::loadDeviceConfig(cfg);
+    String selfMac = MeshComm::getMeshMac();
     String data = "{\"device_name\":\"" + cfg.device_name +
                   "\",\"is_root\":true,\"firmware_version\":\"" FIRMWARE_VERSION "\"";
+    data += ",\"role\":\"root\"";
+    data += ",\"mesh_mac\":\"" + selfMac + "\"";
     data += ",\"uplink\":\"";
     data += uplink;
     data += "\"";
@@ -46,7 +55,17 @@ static void announceRootToHost(const char *uplink) {
     data += ",\"sd_ready\":false";
 #endif
     data += "}";
-    MeshBridge::sendToUplink(ProtocolFrame::buildMessage("REGISTER", cfg.device_id, data));
+
+    // Binary REGISTER：device_id=逻辑名，source_id=MAC（上位机节点唯一键）
+    uint8_t out[512];
+    int n = appEncode(out, (int)sizeof(out), CMD_REGISTER, appNextMsgId(), 0, 0,
+                      cfg.device_id.c_str(), selfMac.c_str(),
+                      (const uint8_t *)data.c_str(), (uint16_t)data.length(), 0);
+    if (n > 0) {
+        MeshBridge::sendToUplinkBytes(out, (uint16_t)n);
+    } else {
+        MeshBridge::sendToUplink(ProtocolFrame::buildMessage("REGISTER", cfg.device_id, data));
+    }
     lastRootAnnouncement = millis();
 }
 
@@ -210,18 +229,118 @@ void MeshBridge::update() {
 
 // ====== Root 收到子节点 Mesh 消息：转发到上行链路 ======
 void MeshBridge::onMeshMessage(const uint8_t *fromMac, const String &json) {
-    // 解析 device_id 并更新路由表
+    // Binary app envelope: always ensure source_id carries peer Mesh MAC so the
+    // host can key devices by MAC even if cabinet firmware omitted source_id.
+    if (json.length() >= APP_ENVELOPE_MIN) {
+        AppMessageView view;
+        const uint8_t *raw = (const uint8_t *)json.c_str();
+        uint16_t rawLen = (uint16_t)json.length();
+        if (appDecode(raw, (int)rawLen, view)) {
+            char didCopy[APP_DEVICE_ID_MAX + 1];
+            didCopy[0] = '\0';
+            if (view.device_id_len > 0 && view.device_id != nullptr) {
+                size_t n = view.device_id_len;
+                if (n > APP_DEVICE_ID_MAX) n = APP_DEVICE_ID_MAX;
+                memcpy(didCopy, view.device_id, n);
+                didCopy[n] = '\0';
+                addRoute(String(didCopy), fromMac);
+            }
+
+            char srcCopy[APP_SOURCE_ID_MAX + 1];
+            srcCopy[0] = '\0';
+            if (view.source_id_len > 0 && view.source_id != nullptr) {
+                size_t n = view.source_id_len;
+                if (n > APP_SOURCE_ID_MAX) n = APP_SOURCE_ID_MAX;
+                memcpy(srcCopy, view.source_id, n);
+                srcCopy[n] = '\0';
+            } else if (fromMac != nullptr) {
+                String peerMac = MeshComm::macToString(fromMac);
+                strncpy(srcCopy, peerMac.c_str(), sizeof(srcCopy) - 1);
+                srcCopy[sizeof(srcCopy) - 1] = '\0';
+            }
+
+            // Side-effects (HEARTBEAT_ACK / REGISTER) use original bytes
+            MessageHandler::handleMeshMessageApp(fromMac, raw, rawLen);
+
+            // Prefer re-encoded packet with guaranteed source_id=MAC
+            uint8_t rebuilt[MESH_RX_BUFFER_SIZE];
+            int n = appEncode(rebuilt, (int)sizeof(rebuilt),
+                              view.cmd_id, view.msg_id, view.corr_id, view.flags,
+                              didCopy[0] ? didCopy : nullptr,
+                              srcCopy[0] ? srcCopy : nullptr,
+                              view.payload, view.payload_len,
+                              view.timestamp_unix);
+            if (n > 0) {
+                sendToUplinkBytes(rebuilt, (uint16_t)n);
+            } else {
+                sendToUplinkBytes(raw, rawLen);
+            }
+            return;
+        }
+    }
+
+    // Legacy JSON path
     {
-        StaticJsonDocument<512> doc;
-        if (!deserializeJson(doc, json)) {
+        StaticJsonDocument<768> doc;
+        DeserializationError err = deserializeJson(doc, json);
+        if (err) {
+            Debug::printf("[BRIDGE] child msg JSON parse failed: %s\n", err.c_str());
+        } else {
             const char *did = doc["device_id"] | "";
             if (strlen(did) > 0) {
                 addRoute(String(did), fromMac);
+            } else {
+                Debug::printf("[BRIDGE] child msg has no device_id, json[0..80]=%.80s\n",
+                              json.c_str());
+            }
+            // 旧 JSON：补 mesh_mac 再上行，主机可按 MAC 建节点
+            if (!doc["data"].isNull() && doc["data"].is<JsonObject>()) {
+                JsonObject data = doc["data"].as<JsonObject>();
+                if (!data.containsKey("mesh_mac") || strlen(data["mesh_mac"] | "") == 0) {
+                    data["mesh_mac"] = MeshComm::macToString(fromMac);
+                    String patched;
+                    serializeJson(doc, patched);
+                    MessageHandler::handleMeshMessage(fromMac, patched);
+                    sendToUplink(patched);
+                    return;
+                }
             }
         }
     }
-    // 透传转发到上行链路（不解析业务内容）
+    MessageHandler::handleMeshMessage(fromMac, json);
     sendToUplink(json);
+}
+
+bool MeshBridge::sendToUplinkBytes(const uint8_t *appMsg, uint16_t len) {
+    if (appMsg == nullptr || len == 0) return false;
+    if (!uplinkConnected && uplinkMode != UPLINK_USB) return false;
+
+    int frameCapacity = ProtocolFrame::getEncodedCapacityBytes(len);
+    if (frameCapacity < 0) {
+        Debug::println(F("[BRIDGE] binary message exceeds frame reassembly limit"));
+        return false;
+    }
+    uint8_t *frameBuf = MemPool::frameTxBuf();
+    size_t poolSize = MemPool::frameTxBufSize();
+    bool heapOwned = false;
+    if (frameBuf == nullptr || (size_t)frameCapacity > poolSize) {
+        frameBuf = (uint8_t *)malloc((size_t)frameCapacity);
+        if (frameBuf == nullptr) return false;
+        heapOwned = true;
+        poolSize = (size_t)frameCapacity;
+    }
+    int frameLen = ProtocolFrame::encodeBytes(appMsg, len, frameBuf, (int)poolSize);
+    if (frameLen < 0) {
+        if (heapOwned) free(frameBuf);
+        return false;
+    }
+    bool ok = writeUplink(frameBuf, frameLen);
+    if (heapOwned) free(frameBuf);
+    if (!ok && uplinkMode != UPLINK_USB) {
+        uplinkConnected = false;
+        hostProtocolSeen = false;
+    }
+    return ok;
 }
 
 // ====== 发送 JSON 到上行链路（协议帧封装） ======
@@ -230,26 +349,35 @@ bool MeshBridge::sendToUplink(const String &json) {
         return false;
     }
 
-    // 编码为协议帧。大消息可能包含多个协议分片，按实际容量临时分配。
+    // Phase 0: encode into static/PSRAM TX pool (common path, no malloc).
+    // Rare multi-fragment messages exceeding FRAME_TX_POOL_SIZE fall back
+    // to a one-shot malloc so large SD_QUERY responses still work.
     int frameCapacity = ProtocolFrame::getEncodedCapacity(json);
     if (frameCapacity < 0) {
         Debug::println(F("[BRIDGE] message exceeds frame reassembly limit"));
         return false;
     }
-    uint8_t *frameBuf = (uint8_t *)malloc(frameCapacity);
-    if (frameBuf == nullptr) {
-        Debug::println(F("[BRIDGE] frame buffer allocation failed"));
-        return false;
+    uint8_t *frameBuf = MemPool::frameTxBuf();
+    size_t poolSize = MemPool::frameTxBufSize();
+    bool heapOwned = false;
+    if (frameBuf == nullptr || (size_t)frameCapacity > poolSize) {
+        frameBuf = (uint8_t *)malloc((size_t)frameCapacity);
+        if (frameBuf == nullptr) {
+            Debug::println(F("[BRIDGE] frame buffer allocation failed"));
+            return false;
+        }
+        heapOwned = true;
+        poolSize = (size_t)frameCapacity;
     }
-    int frameLen = ProtocolFrame::encode(json, frameBuf, frameCapacity);
+    int frameLen = ProtocolFrame::encode(json, frameBuf, (int)poolSize);
     if (frameLen < 0) {
         Debug::println(F("[BRIDGE] frame encode failed"));
-        free(frameBuf);
+        if (heapOwned) free(frameBuf);
         return false;
     }
 
     bool ok = writeUplink(frameBuf, frameLen);
-    free(frameBuf);
+    if (heapOwned) free(frameBuf);
     if (!ok && uplinkMode != UPLINK_USB) {
         uplinkConnected = false;
         hostProtocolSeen = false;
@@ -261,17 +389,14 @@ bool MeshBridge::sendToUplink(const String &json) {
 bool MeshBridge::writeUplink(const uint8_t *data, int len) {
     if (uplinkMode == UPLINK_USB) {
         size_t sent = Serial.write(data, len);
-        Serial.flush();
         return (sent == (size_t)len);
     } else if (uplinkMode == UPLINK_AP) {
         if (!bridgeClient.connected()) return false;
         size_t sent = bridgeClient.write(data, len);
-        bridgeClient.flush();
         return (sent == (size_t)len);
     } else if (uplinkMode == UPLINK_STA) {
         if (!bridgeClient.connected()) return false;
         size_t sent = bridgeClient.write(data, len);
-        bridgeClient.flush();
         return (sent == (size_t)len);
     }
     return false;
@@ -304,16 +429,19 @@ static void handlePlainTextProbe(uint8_t b) {
 
 // ====== 读取上行链路字节并送入协议帧解码器 ======
 void MeshBridge::readUplink() {
+    static uint8_t payloadBuf[FRAGMENT_REASSEMBLY_BUF];
+
     if (uplinkMode == UPLINK_USB) {
         while (Serial.available()) {
             uint8_t b = Serial.read();
             // Frame decoder ignores non-A5 bytes while waiting for head, so
             // plain-text probes can coexist with framed protocol traffic.
             handlePlainTextProbe(b);
-            String json;
-            if (ProtocolFrame::decode(b, json)) {
+            int outLen = 0;
+            if (ProtocolFrame::decodeBytes(b, payloadBuf, (int)sizeof(payloadBuf), outLen)) {
                 hostProtocolSeen = true;
-                handleUplinkMessage(json);
+                lastUplinkRxMs = millis();
+                handleUplinkPayload(payloadBuf, outLen);
             }
         }
     } else {
@@ -325,21 +453,106 @@ void MeshBridge::readUplink() {
         }
         while (bridgeClient.available()) {
             uint8_t b = bridgeClient.read();
-            String json;
-            if (ProtocolFrame::decode(b, json)) {
+            int outLen = 0;
+            if (ProtocolFrame::decodeBytes(b, payloadBuf, (int)sizeof(payloadBuf), outLen)) {
                 hostProtocolSeen = true;
-                handleUplinkMessage(json);
+                lastUplinkRxMs = millis();
+                handleUplinkPayload(payloadBuf, outLen);
             }
         }
     }
 }
 
+static bool isRootOnlyCmd(uint16_t cmdId) {
+    return cmdId == CMD_REGISTER || cmdId == CMD_READ_CONFIG ||
+           cmdId == CMD_WRITE_CONFIG || cmdId == CMD_READ_STATUS ||
+           cmdId == CMD_REBOOT || cmdId == CMD_TIME_SYNC ||
+           cmdId == CMD_SD_QUERY || cmdId == CMD_SD_SAVE ||
+           cmdId == CMD_SD_QUERY_VERSION || cmdId == CMD_UPLOAD_FP_TEMPLATE ||
+           cmdId == CMD_DOWNLOAD_FP_TEMPLATE || cmdId == CMD_DELETE_FP_TEMPLATE ||
+           cmdId == CMD_SD_QUERY_PART_ACK;
+}
+
+void MeshBridge::handleUplinkPayload(const uint8_t *data, int len) {
+    if (data == nullptr || len <= 0) return;
+
+    // ---- Binary app envelope (no 64KB JSON parse for routing) ----
+    AppMessageView view;
+    if (appDecode(data, len, view)) {
+        DeviceConfig cfg;
+        Storage::loadDeviceConfig(cfg);
+
+        char did[APP_DEVICE_ID_MAX + 1];
+        did[0] = '\0';
+        if (view.device_id_len > 0 && view.device_id != nullptr) {
+            size_t n = view.device_id_len;
+            if (n > APP_DEVICE_ID_MAX) n = APP_DEVICE_ID_MAX;
+            memcpy(did, view.device_id, n);
+            did[n] = '\0';
+        }
+
+        Debug::printf("[BRIDGE] << uplink app cmd=0x%04X did=%s len=%d\n",
+                      view.cmd_id, did, len);
+
+        if (did[0] == '\0') {
+            if (isRootOnlyCmd(view.cmd_id) || (view.flags & APP_FLAG_BROADCAST) == 0) {
+                // Prefer local for empty-id root management cmds.
+                if (isRootOnlyCmd(view.cmd_id)) {
+                    MessageHandler::handleIncomingApp(view);
+                    return;
+                }
+            }
+            expireStaleRoutes();
+            int sent = 0;
+            for (int i = 0; i < routeCount; i++) {
+                if (routeTable[i].valid &&
+                    MeshComm::sendToNodeApp(routeTable[i].mac, data, (uint16_t)len)) {
+                    sent++;
+                }
+            }
+            Debug::printf("[BRIDGE] binary broadcast to %d cabinets\n", sent);
+            return;
+        }
+
+        if (strcmp(did, cfg.device_id.c_str()) == 0) {
+            MessageHandler::handleIncomingApp(view);
+            return;
+        }
+
+        uint8_t targetMac[6];
+        if (!lookupRoute(String(did), targetMac)) {
+            Debug::printf("[BRIDGE] route for device %s not found, dropped\n", did);
+            uint8_t errPl[96];
+            int pl = packError(errPl, (int)sizeof(errPl), view.msg_id,
+                               (uint16_t)ERR_DEVICE_NOT_REGISTER, "device not registered");
+            if (pl > 0) {
+                uint8_t out[192];
+                int n = appEncode(out, (int)sizeof(out), CMD_ERROR, view.msg_id, 0,
+                                  APP_FLAG_IS_ERROR, cfg.device_id.c_str(), nullptr,
+                                  errPl, (uint16_t)pl, 0);
+                if (n > 0) sendToUplinkBytes(out, (uint16_t)n);
+            }
+            return;
+        }
+
+        bool ok = MeshComm::sendToNodeApp(targetMac, data, (uint16_t)len);
+        Debug::printf("[BRIDGE] binary forward to %s: %s\n", did, ok ? "ok" : "fail");
+        return;
+    }
+
+    // ---- Legacy full JSON message ----
+    String json;
+    json.reserve(len + 1);
+    for (int i = 0; i < len; i++) json += (char)data[i];
+    handleUplinkMessage(json);
+}
+
 // ====== 处理上行链路收到的 JSON（路由到本机或子节点） ======
 void MeshBridge::handleUplinkMessage(const String &json) {
-    Debug::printf("[BRIDGE] << uplink receive: %s\n", json.c_str());
+    Debug::printf("[BRIDGE] << uplink receive(legacy JSON): %s\n", json.c_str());
 
-    // 解析 device_id 决定路由
-    DynamicJsonDocument doc(65536);
+    // Small doc for routing only — never 64KB on the hot path.
+    StaticJsonDocument<768> doc;
     DeserializationError err = deserializeJson(doc, json);
     if (err) {
         Debug::printf("[BRIDGE] JSON parse failed: %s\n", err.c_str());
@@ -349,16 +562,10 @@ void MeshBridge::handleUplinkMessage(const String &json) {
     const char *did = doc["device_id"] | "";
     const char *cmd = doc["cmd"] | "";
 
-    // 检查是否发往本机（Root）
     DeviceConfig cfg;
     Storage::loadDeviceConfig(cfg);
 
-    // Empty device_id is an intentional broadcast from the PC.
     if (strlen(did) == 0) {
-        // Root-management commands may arrive before the host has received
-        // the root REGISTER announcement (for example from the standalone AP
-        // configuration window). Handle them locally instead of broadcasting
-        // them to every cabinet.
         bool rootCommand = strcmp(cmd, "REGISTER") == 0 ||
                            strcmp(cmd, "READ_CONFIG") == 0 ||
                            strcmp(cmd, "WRITE_CONFIG") == 0 ||
@@ -387,16 +594,13 @@ void MeshBridge::handleUplinkMessage(const String &json) {
     }
 
     if (strcmp(did, cfg.device_id.c_str()) == 0) {
-        // 目标是 Root 本机：交给消息处理器
         MessageHandler::handleIncoming(json);
         return;
     }
 
-    // 目标是子节点：查路由表转发
     uint8_t targetMac[6];
     if (!lookupRoute(String(did), targetMac)) {
         Debug::printf("[BRIDGE] route for device %s not found, dropped\n", did);
-        // 回复错误：设备未注册
         String errJson = "{\"cmd\":\"ERROR\",\"device_id\":\"" + cfg.device_id +
                          "\",\"data\":{\"error_code\":" + String(ERR_DEVICE_NOT_REGISTER) +
                          ",\"message\":\"device not registered: " + String(did) + "\"}}";
@@ -404,7 +608,6 @@ void MeshBridge::handleUplinkMessage(const String &json) {
         return;
     }
 
-    // 通过 Mesh 发送到子节点（原始 JSON，不加帧）
     bool ok = MeshComm::sendToNode(targetMac, json);
     Debug::printf("[BRIDGE] forward to %s [%s]: %s\n",
                   did, MeshComm::macToString(targetMac).c_str(),
@@ -484,6 +687,26 @@ int MeshBridge::getRouteCount() {
         if (isRouteFresh(i, now)) active++;
     }
     return active;
+}
+
+int MeshBridge::getRouteKnownCount() {
+    // 总条目数（含已过期但还在数组中的），用于诊断 CAB 短暂掉线场景
+    return routeCount;
+}
+
+bool MeshBridge::getRouteDeviceId(int index, char *outBuf, size_t bufSize) {
+    if (outBuf == nullptr || bufSize == 0 || index < 0 || index >= routeCount) return false;
+    if (!routeTable[index].valid) return false;
+    unsigned long now = millis();
+    if (!isRouteFresh(index, now)) return false;
+    strncpy(outBuf, routeTable[index].deviceId, bufSize - 1);
+    outBuf[bufSize - 1] = '\0';
+    return true;
+}
+
+unsigned long MeshBridge::getLastUplinkAgeMs() {
+    if (lastUplinkRxMs == 0) return 0xFFFFFFFFUL;
+    return millis() - lastUplinkRxMs;
 }
 
 int MeshBridge::broadcastToCabinets(const String &json) {

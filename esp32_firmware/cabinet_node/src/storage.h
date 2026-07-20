@@ -2,7 +2,7 @@
  * storage.h - Flash 存储管理（V2.0 分区方案）
  * 设备配置：NVS 键值存储
  * 权限数据：NVS Blob，A/B 双区写入 + 魔数 0xA5A55A5A + CRC32 校验
- * 离线日志：Flash 环形缓冲（32扇区×4KB），写指针+起始指针
+ * 离线日志：Flash 环形缓冲（logstore 分区 16扇区×4KB），写指针+起始指针
  */
 #ifndef STORAGE_H
 #define STORAGE_H
@@ -41,7 +41,25 @@ public:
     static bool isPermissionLost();
     // 全量替换权限数据（从 SYNC_PERMISSIONS 调用）
     // users: 权限数组，count: 数量
+    // 注意：全量替换只清除主指纹(is_backup=false)记录，保留本机副指纹(is_backup=true)记录。
     static bool replaceAllPermissions(const UserPermission *users, int count, uint32_t version);
+
+    // ====== 设备专属副指纹（V2.7） ======
+    // 副指纹：仅本机生效，AS608 槽位由本机分配，不上报 SD 卡。
+    // 验证时按 AS608 物理槽位(local_fp_id) 查找权限记录，主/副共用同一权限表。
+    // 分配一个未占用的 AS608 物理槽位（0..FINGER_MAX_USERS-1）
+    static int  allocLocalFpId();
+    // 按 AS608 物理槽位查找权限记录（验证入口）
+    static bool findPermissionByAs608Id(int local_fp_id, UserPermission &perm);
+    // 添加一条副指纹记录到本地权限表（is_backup=true）
+    static bool addBackupFingerprint(const UserPermission &perm);
+    // 列出所有副指纹记录（用于 BACKUP_FP_LIST 上报）
+    // 返回记录数，out 数组由调用方分配，至少 PERM_MAX_USERS 个槽位
+    static int  listBackupFingerprints(UserPermission *out, int maxCount);
+    // 删除指定用户的本机副指纹记录（同时从 AS608 删除模板由 message_handler 负责）
+    static bool deleteBackupFingerprint(const String &userId);
+    // 查找指定用户的主指纹权限记录（用于副指纹权限继承）
+    static bool findPrimaryPermission(const String &userId, UserPermission &perm);
 
     // ====== 离线日志（Flash 环形缓冲） ======
     // 追加一条日志（自动管理环形写指针）
@@ -96,6 +114,9 @@ private:
 
     // 从缓存加载权限表
     static void loadPermCacheFromFlash();
+
+    // 将当前内存缓存序列化并持久化到 A/B 双区（供 add/delete backup 复用）
+    static bool persistCache();
 
     // ====== 日志环形缓冲内部方法 ======
     // 单条日志32B二进制格式：

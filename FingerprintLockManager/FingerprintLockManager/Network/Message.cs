@@ -91,10 +91,17 @@ namespace FingerprintLockManager
             return message;
         }
 
-        /// <summary>生成短消息 ID（时间戳 + 随机数）</summary>
+        /// <summary>
+        /// 生成消息 ID：滚动 ushort（1..65535），与固件二进制 msg_id 对齐。
+        /// 字符串形式便于 CommandService 字典匹配。
+        /// </summary>
+        private static int _msgIdSeq;
         private static string GenerateMsgId()
         {
-            return DateTime.Now.ToString("yyyyMMddHHmmssfff") + Guid.NewGuid().ToString("N").Substring(0, 6);
+            int next = System.Threading.Interlocked.Increment(ref _msgIdSeq);
+            ushort id = (ushort)(next & 0xFFFF);
+            if (id == 0) id = 1;
+            return id.ToString();
         }
 
         /// <summary>

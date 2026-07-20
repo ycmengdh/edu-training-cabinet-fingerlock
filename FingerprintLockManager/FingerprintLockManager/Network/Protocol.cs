@@ -40,6 +40,9 @@ namespace FingerprintLockManager
         /// <summary>指纹录入最终结果（下位机 -> 上位机）</summary>
         public const string CmdAddFingerprintResult = "ADD_FINGERPRINT_RESULT";
 
+        /// <summary>指纹录入过程提示（下位机 -> 上位机：放指/抬指/验证）</summary>
+        public const string CmdEnrollProgress = "ENROLL_PROGRESS";
+
         /// <summary>删除指纹（上位机 -> 下位机）</summary>
         public const string CmdDeleteFingerprint = "DELETE_FINGERPRINT";
 
@@ -136,6 +139,26 @@ namespace FingerprintLockManager
         /// <summary>删除指纹模板响应（根节点 -> 上位机）</summary>
         public const string CmdFpTemplateDeleteResponse = "FP_TEMPLATE_DELETE_RESPONSE";
 
+        // ===== V2.7 设备专属副指纹命令（上位机 <-> 柜子，不经 SD 卡） =====
+
+        /// <summary>录入本机副指纹（上位机 -> 柜子）</summary>
+        public const string CmdAddBackupFingerprint = "ADD_BACKUP_FINGERPRINT";
+
+        /// <summary>请求本机副指纹清单（上位机 -> 柜子）</summary>
+        public const string CmdBackupFpListRequest = "BACKUP_FP_LIST_REQUEST";
+
+        /// <summary>本机副指纹清单响应（柜子 -> 上位机）</summary>
+        public const string CmdBackupFpList = "BACKUP_FP_LIST";
+
+        /// <summary>删除本机副指纹（上位机 -> 柜子）</summary>
+        public const string CmdDeleteBackupFingerprint = "DELETE_BACKUP_FINGERPRINT";
+
+        /// <summary>删除本机副指纹结果（柜子 -> 上位机）</summary>
+        public const string CmdDeleteBackupFingerprintResult = "DELETE_BACKUP_FINGERPRINT_RESULT";
+
+        /// <summary>验证窗口事件（柜子 -> 上位机：enter/timeout/cancel/unlocked）</summary>
+        public const string CmdVerifyWindowEvent = "VERIFY_WINDOW_EVENT";
+
         // ===== 错误码常量（ACK 中 result 字段使用） =====
 
         /// <summary>成功</summary>
@@ -181,6 +204,7 @@ namespace FingerprintLockManager
                 case CommandType.SyncPermissions: return CmdSyncPermissions;
                 case CommandType.AddFingerprint: return CmdAddFingerprint;
                 case CommandType.AddFingerprintResult: return CmdAddFingerprintResult;
+                case CommandType.EnrollProgress: return CmdEnrollProgress;
                 case CommandType.SyncAck: return CmdSyncAck;
                 case CommandType.DeleteFingerprint: return CmdDeleteFingerprint;
                 case CommandType.RestoreFingerprint: return CmdRestoreFingerprint;
@@ -213,6 +237,12 @@ namespace FingerprintLockManager
                 case CommandType.FpTemplateDownloadResponse: return CmdFpTemplateDownloadResponse;
                 case CommandType.DeleteFpTemplate: return CmdDeleteFpTemplate;
                 case CommandType.FpTemplateDeleteResponse: return CmdFpTemplateDeleteResponse;
+                case CommandType.AddBackupFingerprint: return CmdAddBackupFingerprint;
+                case CommandType.BackupFpListRequest: return CmdBackupFpListRequest;
+                case CommandType.BackupFpList: return CmdBackupFpList;
+                case CommandType.DeleteBackupFingerprint: return CmdDeleteBackupFingerprint;
+                case CommandType.DeleteBackupFingerprintResult: return CmdDeleteBackupFingerprintResult;
+                case CommandType.VerifyWindowEvent: return CmdVerifyWindowEvent;
                 default: return null;
             }
         }
@@ -234,6 +264,7 @@ namespace FingerprintLockManager
                 case CmdSyncPermissions: return CommandType.SyncPermissions;
                 case CmdAddFingerprint: return CommandType.AddFingerprint;
                 case CmdAddFingerprintResult: return CommandType.AddFingerprintResult;
+                case CmdEnrollProgress: return CommandType.EnrollProgress;
                 case CmdSyncAck: return CommandType.SyncAck;
                 case CmdDeleteFingerprint: return CommandType.DeleteFingerprint;
                 case CmdRestoreFingerprint: return CommandType.RestoreFingerprint;
@@ -266,6 +297,12 @@ namespace FingerprintLockManager
                 case CmdFpTemplateDownloadResponse: return CommandType.FpTemplateDownloadResponse;
                 case CmdDeleteFpTemplate: return CommandType.DeleteFpTemplate;
                 case CmdFpTemplateDeleteResponse: return CommandType.FpTemplateDeleteResponse;
+                case CmdAddBackupFingerprint: return CommandType.AddBackupFingerprint;
+                case CmdBackupFpListRequest: return CommandType.BackupFpListRequest;
+                case CmdBackupFpList: return CommandType.BackupFpList;
+                case CmdDeleteBackupFingerprint: return CommandType.DeleteBackupFingerprint;
+                case CmdDeleteBackupFingerprintResult: return CommandType.DeleteBackupFingerprintResult;
+                case CmdVerifyWindowEvent: return CommandType.VerifyWindowEvent;
                 default: return null;
             }
         }

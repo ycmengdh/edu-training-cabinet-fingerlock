@@ -26,7 +26,8 @@ namespace FingerprintLockManager
             SetBusy(true, "正在读取根节点权限数据");
             try
             {
-                var users = await Task.Run(App.UserService.GetAllUsers);
+                // V2.7：使用 GetVisibleUsers 实现教师数据范围隔离
+                var users = await Task.Run(App.UserService.GetVisibleUsers);
                 UserListBox.ItemsSource = users;
                 PageStatusText.Text = $"共 {users.Count} 个用户";
             }

@@ -32,15 +32,25 @@ namespace FingerprintLockManager
         public const int MinFrameLength = 7;
 
         /// <summary>
-        /// 将 JSON 字符串编码为完整二进制帧
+        /// 将 JSON 字符串编码为完整二进制帧（过渡兼容；新代码优先使用 <see cref="Encode(byte[])"/>）。
         /// </summary>
         /// <param name="jsonString">JSON 字符串（不含尾部换行）</param>
         /// <returns>完整帧字节数组；输入为空返回 null</returns>
         public static byte[]? Encode(string? jsonString)
         {
             if (string.IsNullOrEmpty(jsonString)) return null;
+            return Encode(Encoding.UTF8.GetBytes(jsonString));
+        }
 
-            byte[] payload = Encoding.UTF8.GetBytes(jsonString);
+        /// <summary>
+        /// 将原始字节负载编码为完整二进制帧（可自动分片）。
+        /// 用于二进制应用消息或 JSON UTF-8 字节。
+        /// </summary>
+        /// <param name="payload">负载字节；null 或空返回 null</param>
+        /// <returns>完整帧（或多帧拼接）字节数组</returns>
+        public static byte[]? Encode(byte[]? payload)
+        {
+            if (payload == null || payload.Length == 0) return null;
             if (payload.Length > MaxMessagePayload) return null;
             if (payload.Length <= NormalPayload)
             {
@@ -87,16 +97,28 @@ namespace FingerprintLockManager
         }
 
         /// <summary>
-        /// 从完整二进制帧解码出 JSON 字符串
+        /// 从完整二进制帧解码出 JSON 字符串（过渡兼容）。
         /// </summary>
         /// <param name="frame">完整帧字节数组</param>
         /// <returns>JSON 字符串；校验失败或长度不足返回 null</returns>
         public static string? Decode(byte[]? frame)
         {
-            if (!TryDecodeFrame(frame, 0, frame?.Length ?? 0,
-                    out byte frameVersion, out byte[]? payload, out _)) return null;
-            if (frameVersion != Version || payload == null) return null;
+            if (!TryDecodeBytes(frame, out byte[]? payload) || payload == null) return null;
             return Encoding.UTF8.GetString(payload);
+        }
+
+        /// <summary>
+        /// 从完整二进制帧解码出原始负载字节（仅普通帧 Version=0x01，不分片）。
+        /// 分片消息请使用 <see cref="FrameStreamDecoder"/>。
+        /// </summary>
+        public static bool TryDecodeBytes(byte[]? frame, out byte[]? payload)
+        {
+            payload = null;
+            if (!TryDecodeFrame(frame, 0, frame?.Length ?? 0,
+                    out byte frameVersion, out byte[]? raw, out _)) return false;
+            if (frameVersion != Version || raw == null) return false;
+            payload = raw;
+            return true;
         }
 
         /// <summary>
@@ -112,11 +134,24 @@ namespace FingerprintLockManager
         public static bool TryDecode(byte[] buffer, int offset, int count, out string? json, out int consumed)
         {
             json = null;
+            if (!TryDecodeBytes(buffer, offset, count, out byte[]? payload, out consumed) ||
+                payload == null) return false;
+            json = Encoding.UTF8.GetString(payload);
+            return true;
+        }
+
+        /// <summary>
+        /// 尝试从缓冲区中解析一帧，返回原始负载字节与消耗的字节数（普通帧）。
+        /// </summary>
+        public static bool TryDecodeBytes(byte[] buffer, int offset, int count,
+            out byte[]? payload, out int consumed)
+        {
+            payload = null;
             consumed = 0;
             if (!TryDecodeFrame(buffer, offset, count, out byte frameVersion,
-                    out byte[]? payload, out consumed)) return false;
-            if (frameVersion != Version || payload == null) return false;
-            json = Encoding.UTF8.GetString(payload);
+                    out byte[]? raw, out consumed)) return false;
+            if (frameVersion != Version || raw == null) return false;
+            payload = raw;
             return true;
         }
 
@@ -237,10 +272,26 @@ namespace FingerprintLockManager
         private DateTime _fragmentStartedUtc;
         private readonly Dictionary<int, byte[]> _fragmentParts = new();
 
+        /// <summary>
+        /// 追加字节并回调完整 JSON 字符串消息（过渡兼容）。
+        /// </summary>
         public void Append(byte[] data, int offset, int count, Action<string> onMessage,
             Action<byte[]>? onUnframedData = null)
         {
-            if (data == null || count <= 0 || onMessage == null) return;
+            if (onMessage == null) return;
+            AppendBytes(data, offset, count,
+                payload => onMessage(Encoding.UTF8.GetString(payload)),
+                onUnframedData);
+        }
+
+        /// <summary>
+        /// 追加字节并回调完整原始负载（支持普通帧与分片重组）。
+        /// 新代码应使用此 API 处理二进制应用消息。
+        /// </summary>
+        public void AppendBytes(byte[] data, int offset, int count, Action<byte[]> onPayload,
+            Action<byte[]>? onUnframedData = null)
+        {
+            if (data == null || count <= 0 || onPayload == null) return;
             EnsureCapacity(_count + count);
             Buffer.BlockCopy(data, offset, _buffer, _count, count);
             _count += count;
@@ -274,11 +325,11 @@ namespace FingerprintLockManager
                         Remove(consumed);
                         if (version == FrameCodec.Version)
                         {
-                            onMessage(Encoding.UTF8.GetString(payload));
+                            onPayload(payload);
                         }
                         else if (version == FrameCodec.FragmentVersion)
                         {
-                            HandleFragment(payload, onMessage);
+                            HandleFragment(payload, onPayload);
                         }
                     }
                     else
@@ -300,7 +351,7 @@ namespace FingerprintLockManager
             ResetFragment();
         }
 
-        private void HandleFragment(byte[] payload, Action<string> onMessage)
+        private void HandleFragment(byte[] payload, Action<byte[]> onPayload)
         {
             if (payload.Length < 4) return;
 
@@ -356,7 +407,7 @@ namespace FingerprintLockManager
             }
 
             ResetFragment();
-            onMessage(Encoding.UTF8.GetString(complete));
+            onPayload(complete);
         }
 
         private void ResetFragment()

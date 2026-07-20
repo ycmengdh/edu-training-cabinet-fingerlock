@@ -19,6 +19,8 @@
 #include "message_handler.h"
 #include "display.h"
 #include "protocol_frame.h"
+#include "app_protocol.h"
+#include "mem_pool.h"
 #ifdef ENABLE_SD_CARD
 #include "sd_storage.h"
 #endif
@@ -40,13 +42,10 @@ void onMessageReceived(const String &message) {
     MessageHandler::handleIncoming(message);
 }
 
-// Root: messages from child cabinet nodes (forwarded by MeshBridge, this is extra logging)
+// Root: messages from child cabinet nodes.
+// MeshBridge::onMeshMessage owns side-effects (HEARTBEAT_ACK / REGISTER) and
+// transparent uplink forward for both binary app envelopes and legacy JSON.
 void onMeshMessage(const uint8_t *fromMac, const String &json) {
-    Debug::printf("[MAIN] Child node %s: %s\n",
-                  MeshComm::macToString(fromMac).c_str(), json.c_str());
-    // Persist child state/logs first, then bridge the original message to the
-    // PC. Root is the only authority allowed to commit business data.
-    MessageHandler::handleMeshMessage(fromMac, json);
     MeshBridge::onMeshMessage(fromMac, json);
 }
 
@@ -75,6 +74,7 @@ void initNTP() {
 
 // ====== Status report ======
 void reportStatus() {
+    MemPool::noteHeapSample();
     String data = "{";
     data += "\"online\":true,";
     data += "\"uptime\":" + String((millis() - bootTime) / 1000) + ",";
@@ -82,6 +82,10 @@ void reportStatus() {
     data += "\"child_count\":" + String(MeshComm::getChildCount()) + ",";
     data += "\"route_count\":" + String(MeshBridge::getRouteCount()) + ",";
     data += "\"uplink_connected\":" + String(MeshBridge::isUplinkConnected() ? "true" : "false") + ",";
+    data += "\"free_heap\":" + String(MemPool::freeInternalHeap()) + ",";
+    data += "\"free_psram\":" + String(MemPool::freePsram()) + ",";
+    data += "\"min_free_heap\":" + String(MemPool::minFreeInternalHeap()) + ",";
+    data += "\"largest_free_block\":" + String(MemPool::largestFreeBlock()) + ",";
 #ifdef ENABLE_SD_CARD
     data += "\"sd_ready\":" + String(SdStorage::isReady() ? "true" : "false") + ",";
     data += "\"sd_total\":" + String((unsigned long)SdStorage::getTotalBytes()) + ",";
@@ -90,9 +94,8 @@ void reportStatus() {
     data += "\"time_synced\":" + String(Storage::isTimeSynced() ? "true" : "false");
     data += "}";
 
-    String json = ProtocolFrame::buildMessage("STATUS_REPORT",
-                                              deviceConfig.device_id, data);
-    MeshBridge::sendToUplink(json);
+    // Binary STATUS_REPORT (payload = data JSON)
+    MessageHandler::sendMessage("STATUS_REPORT", data);
 }
 
 // ====== Initialization ======
@@ -115,6 +118,41 @@ void setup() {
     // 1. Storage init and load device config from NVS
     Storage::begin();
     Storage::loadDeviceConfig(deviceConfig);
+    // Root firmware always acts as Mesh root (USB/AP/STA uplink owner).
+    bool cfgDirty = false;
+    if (!deviceConfig.is_root) {
+        deviceConfig.is_root = true;
+        cfgDirty = true;
+        Debug::println(F("[MAIN] force is_root=true for root firmware"));
+    }
+    // USB 上行时清掉 NVS 里残留的 wifi_ssid，否则 Mesh/WiFi 层可能反复扫热点
+    // 打出 NO_AP_FOUND（业务根本不需要外部 WiFi）。
+    if (deviceConfig.uplink_mode == UPLINK_USB &&
+        deviceConfig.wifi_ssid.length() > 0) {
+        Debug::printf("[MAIN] clear leftover wifi_ssid='%s' (USB uplink, pure mesh)\n",
+                      deviceConfig.wifi_ssid.c_str());
+        deviceConfig.wifi_ssid = "";
+        deviceConfig.wifi_password = "";
+        cfgDirty = true;
+    }
+    if (cfgDirty) {
+        Storage::saveDeviceConfig(deviceConfig);
+    }
+    if (deviceConfig.device_id == DEVICE_ID_DEFAULT ||
+        deviceConfig.device_id.startsWith("CABINET_") ||
+        deviceConfig.device_id == "ROOT_001") {
+        // V2.7：默认 device_id 改为 "ROOT_" + MAC 后 6 字节十六进制（大写、无冒号）
+        // 便于在上位机按硬件身份快速定位根节点
+        uint8_t mac[6];
+        WiFi.macAddress(mac);
+        char id[20];
+        snprintf(id, sizeof(id), "ROOT_%02X%02X%02X%02X%02X%02X",
+                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        deviceConfig.device_id = String(id);
+        deviceConfig.device_name = "Root Node";
+        Storage::saveDeviceConfig(deviceConfig);
+        Debug::printf("[MAIN] set default root device_id=%s\n", deviceConfig.device_id.c_str());
+    }
     Debug::setDeviceId(deviceConfig.device_id);
     Debug::setFraming(deviceConfig.uplink_mode == UPLINK_USB);
 
@@ -201,6 +239,8 @@ void setup() {
 void loop() {
     // 1. Mesh communication (includes MeshBridge update for root)
     MeshComm::update();
+    // Drain deferred mesh event logs (sys_evt task can't safely print)
+    MeshComm::drainEventLog();
     MeshBridge::update();
 
     // 2. Message handler update

@@ -34,6 +34,8 @@
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="10"/>
                 <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="10"/>
+                <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
 
             <Border Grid.Column="0" Style="{StaticResource StatusMetric}">
@@ -72,6 +74,15 @@
                     <TextBlock Text="根节点存储" Style="{StaticResource LabelText}"/>
                     <TextBlock x:Name="StorageValueText" Grid.Row="1" Text="-" Style="{StaticResource MetricValueText}" Margin="0,8,0,4"/>
                     <TextBlock x:Name="StorageDetailText" Grid.Row="2" Text="等待 SD 信息" Foreground="{StaticResource SubTextBrush}" FontSize="10"/>
+                </Grid>
+            </Border>
+
+            <Border Grid.Column="8" Style="{StaticResource StatusMetric}">
+                <Grid>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <TextBlock Text="学生绑定" Style="{StaticResource LabelText}"/>
+                    <TextBlock x:Name="StudentBindValueText" Grid.Row="1" Text="0 / 0" Style="{StaticResource MetricValueText}" Margin="0,8,0,4"/>
+                    <TextBlock x:Name="StudentBindDetailText" Grid.Row="2" Text="已分配权限 / 总学生" Foreground="{StaticResource SubTextBrush}" FontSize="10"/>
                 </Grid>
             </Border>
         </Grid>

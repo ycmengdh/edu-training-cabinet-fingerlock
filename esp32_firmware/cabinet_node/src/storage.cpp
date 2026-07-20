@@ -27,18 +27,57 @@ bool Storage::logPtrLoaded = false;
 // 日志扇区擦除状态缓存（避免重复擦除）
 static bool logSectorErased[LOG_SECTOR_COUNT] = {false};
 
+// Store the four ring-buffer pointers in one NVS blob/commit.  The previous
+// implementation issued four independent NVS commits for every unlock log,
+// unnecessarily holding the main loop and increasing flash wear.
+static const uint32_t LOG_POINTER_MAGIC = 0x4C505432; // "LPT2"
+struct LogPointerState {
+    uint32_t magic;
+    int32_t writePtr;
+    int32_t startPtr;
+    int32_t count;
+    uint32_t sequence;
+};
+
+static_assert(LOG_SECTOR_COUNT * FLASH_SECTOR_SIZE == LOG_STORE_SIZE,
+              "logstore geometry must match the partition table");
+
 void Storage::begin() {
     if (!initialized) {
         prefs.begin("esp32_cfg", false);      // 设备配置 + 权限元数据
-        logPrefs.begin("esp32_log", false);    // 日志指针
         initialized = true;
+
+        // 首次启动时所有字符串键都不存在，ESP32 Arduino Preferences::getString()
+        // 即使有默认值 fallback 也会通过 log_e() 输出 "nvs_get_str len fail: ... NOT_FOUND"
+        // 错误日志。这里通过哨兵键检测首次启动，一次性把所有字段写入默认值，
+        // 后续启动 getString 即可命中 NVS，不再报 NOT_FOUND 警告。
+        if (!prefs.isKey("cfg_init_done")) {
+            DeviceConfig def;
+            def.device_id        = DEVICE_ID_DEFAULT;
+            def.device_name      = "Cabinet Node";
+            def.work_mode        = MODE_MESH;
+            def.is_root          = false;
+            def.uplink_mode      = UPLINK_USB;
+            def.mesh_channel     = MESH_CHANNEL;
+            def.mesh_password    = MESH_PASSWORD;
+            def.wifi_ssid        = "";
+            def.wifi_password    = "";
+            def.server_ip        = UPLINK_SERVER_IP_DEFAULT;
+            def.server_port      = UPLINK_TCP_PORT;
+            def.fingerprint_count = 0;
+            def.perm_version     = 0;
+            def.hmac_enabled     = false;
+            def.hmac_key         = "";
+            saveDeviceConfig(def);
+            prefs.putBool("cfg_init_done", true);
+            Debug::println(F("[STORAGE] first boot: defaults written to NVS"));
+        }
+
         Debug::println(F("[STORAGE] Storage init done"));
 
         // 加载权限缓存
         loadPermCacheFromFlash();
 
-        // 加载日志指针
-        loadLogPointers();
     }
 }
 
@@ -59,7 +98,10 @@ uint32_t Storage::calculateCRC32(const uint8_t *data, size_t len) {
 }
 
 // ====== 权限数据序列化/反序列化 ======
-// 12B 格式：fp_id(2B) + user_id(4B) + lock_perm(1B) + role(1B) + expire_days(4B)
+// V2.7 16B 格式：
+//   fp_id(2B) + user_id_num(4B) + lock_perm(1B) + role(1B) + expire_days(4B)
+//   + local_fp_id(2B) + flags(1B: bit0=is_backup) + reserved(1B)
+// 旧 12B 记录读取时由 deserializePermissionLegacy 迁移。
 void Storage::serializePermission(const UserPermission &perm, uint8_t *buf) {
     uint16_t fpId = (uint16_t)perm.fingerprint_id;
     uint32_t uid = perm.user_id_num;
@@ -68,6 +110,8 @@ void Storage::serializePermission(const UserPermission &perm, uint8_t *buf) {
         if (perm.lock_perm[i]) lockPerm |= (1 << i);
     }
     uint8_t role = (uint8_t)perm.role;
+    uint16_t localId = (uint16_t)perm.local_fp_id;
+    uint8_t flags = perm.is_backup ? 0x01 : 0x00;
 
     buf[0] = (fpId >> 8) & 0xFF;
     buf[1] = fpId & 0xFF;
@@ -82,6 +126,10 @@ void Storage::serializePermission(const UserPermission &perm, uint8_t *buf) {
     buf[9]  = (ed >> 16) & 0xFF;
     buf[10] = (ed >> 8) & 0xFF;
     buf[11] = ed & 0xFF;
+    buf[12] = (localId >> 8) & 0xFF;
+    buf[13] = localId & 0xFF;
+    buf[14] = flags;
+    buf[15] = 0;  // reserved
 }
 
 void Storage::deserializePermission(const uint8_t *buf, UserPermission &perm) {
@@ -95,7 +143,29 @@ void Storage::deserializePermission(const uint8_t *buf, UserPermission &perm) {
     perm.role = (UserRole)buf[7];
     perm.expire_days = ((uint32_t)buf[8] << 24) | ((uint32_t)buf[9] << 16) |
                        ((uint32_t)buf[10] << 8) | buf[11];
+    perm.local_fp_id = ((int)buf[12] << 8) | buf[13];
+    perm.is_backup = (buf[14] & 0x01) != 0;
     perm.user_id = userIdNumToString(perm.user_id_num);
+    perm.name = "";
+    perm.valid = true;
+}
+
+// 旧 12B 记录兼容反序列化（V2.6 及更早）
+static void deserializePermissionLegacy12(const uint8_t *buf, UserPermission &perm) {
+    perm.fingerprint_id = (buf[0] << 8) | buf[1];
+    perm.user_id_num = ((uint32_t)buf[2] << 24) | ((uint32_t)buf[3] << 16) |
+                       ((uint32_t)buf[4] << 8) | buf[5];
+    uint8_t lockPerm = buf[6];
+    for (int i = 0; i < LOCK_COUNT; i++) {
+        perm.lock_perm[i] = (lockPerm & (1 << i)) != 0;
+    }
+    perm.role = (UserRole)buf[7];
+    perm.expire_days = ((uint32_t)buf[8] << 24) | ((uint32_t)buf[9] << 16) |
+                       ((uint32_t)buf[10] << 8) | buf[11];
+    // 迁移：主指纹的 local_fp_id 即 fingerprint_id；is_backup=false
+    perm.local_fp_id = perm.fingerprint_id;
+    perm.is_backup = false;
+    perm.user_id = Storage::userIdNumToString(perm.user_id_num);
     perm.name = "";
     perm.valid = true;
 }
@@ -249,8 +319,40 @@ void Storage::loadPermCacheFromFlash() {
 
     if (actualCount > 0) {
         permCache = new UserPermission[actualCount];
+        // V2.7 兼容：根据 blob 实际长度判断记录是 12B（旧）还是 16B（新）。
+        // 旧记录迁移为 local_fp_id=fingerprint_id, is_backup=false，并触发一次回写以升级格式。
+        size_t aLen = prefs.getBytesLength("perm_a");
+        bool legacyFormat = false;
+        if (aLen > 0) {
+            size_t expectedV2 = (size_t)PERM_HEADER_SIZE + (size_t)actualCount * PERM_RECORD_SIZE;
+            size_t expectedV1 = (size_t)PERM_HEADER_SIZE + (size_t)actualCount * PERM_RECORD_SIZE_V1;
+            if (aLen == expectedV1 && aLen != expectedV2) {
+                legacyFormat = true;
+            }
+        }
+        // B 区长度同样判断（A 区失败时 buf 来自 B 区）
+        if (!legacyFormat) {
+            size_t bLen = prefs.getBytesLength("perm_b");
+            if (bLen > 0) {
+                size_t expectedV2 = (size_t)PERM_HEADER_SIZE + (size_t)actualCount * PERM_RECORD_SIZE;
+                size_t expectedV1 = (size_t)PERM_HEADER_SIZE + (size_t)actualCount * PERM_RECORD_SIZE_V1;
+                if (bLen == expectedV1 && bLen != expectedV2) {
+                    legacyFormat = true;
+                }
+            }
+        }
         for (int i = 0; i < actualCount; i++) {
-            deserializePermission(buf + PERM_HEADER_SIZE + i * PERM_RECORD_SIZE, permCache[i]);
+            const uint8_t *rec = buf + PERM_HEADER_SIZE + i * (legacyFormat ? PERM_RECORD_SIZE_V1 : PERM_RECORD_SIZE);
+            if (legacyFormat) {
+                deserializePermissionLegacy12(rec, permCache[i]);
+            } else {
+                deserializePermission(rec, permCache[i]);
+            }
+        }
+        // 旧格式迁移后立即回写为新 16B 格式
+        if (legacyFormat) {
+            Debug::println(F("[STORAGE] Migrating permission records from V1(12B) to V2(16B)"));
+            persistCache();
         }
     }
 
@@ -389,14 +491,20 @@ bool Storage::loadDeviceConfig(DeviceConfig &cfg) {
     if (!initialized) begin();
 
     cfg.device_id        = prefs.getString("device_id", DEVICE_ID_DEFAULT);
-    cfg.device_name      = prefs.getString("device_name", "ESP32_Fingerprint_Lock");
+    cfg.device_name      = prefs.getString("device_name", "Cabinet Node");
     cfg.work_mode        = (WorkMode)prefs.getUChar("work_mode", (uint8_t)MODE_MESH);
+    // 柜子固件默认永远不是 Root
     cfg.is_root          = prefs.getBool("is_root", false);
+    if (cfg.is_root) {
+        cfg.is_root = false;
+    }
     cfg.uplink_mode      = (UplinkMode)prefs.getUChar("uplink_mode", (uint8_t)UPLINK_USB);
     cfg.mesh_channel     = prefs.getUChar("mesh_channel", MESH_CHANNEL);
     cfg.mesh_password    = prefs.getString("mesh_password", MESH_PASSWORD);
-    cfg.wifi_ssid        = prefs.getString("wifi_ssid", "TrainingRoom_WiFi");
-    cfg.wifi_password    = prefs.getString("wifi_password", "12345678");
+    // ESP-MESH requires real 2.4 GHz router credentials on every node.
+    // Empty defaults fail fast instead of silently scanning a placeholder AP.
+    cfg.wifi_ssid        = prefs.getString("wifi_ssid", "");
+    cfg.wifi_password    = prefs.getString("wifi_password", "");
     cfg.server_ip        = prefs.getString("server_ip", UPLINK_SERVER_IP_DEFAULT);
     cfg.server_port      = prefs.getUShort("server_port", UPLINK_TCP_PORT);
     cfg.fingerprint_count = prefs.getUChar("fp_count", 0);
@@ -453,6 +561,8 @@ bool Storage::saveWorkMode(WorkMode mode) {
 }
 
 // ====== 用户权限（基于内存缓存） ======
+// V2.7：按 fingerprint_id 查找。同时匹配 local_fp_id 以兼容副指纹场景。
+// 验证流程应优先使用 findPermissionByAs608Id(local_fp_id)。
 bool Storage::loadPermission(int fingerprint_id, UserPermission &perm) {
     if (!initialized) begin();
     if (permCache == nullptr || permCacheCount == 0) {
@@ -460,7 +570,8 @@ bool Storage::loadPermission(int fingerprint_id, UserPermission &perm) {
         return false;
     }
     for (int i = 0; i < permCacheCount; i++) {
-        if (permCache[i].fingerprint_id == fingerprint_id) {
+        if (permCache[i].fingerprint_id == fingerprint_id ||
+            permCache[i].local_fp_id == fingerprint_id) {
             perm = permCache[i];
             perm.valid = true;
             return true;
@@ -473,10 +584,10 @@ bool Storage::loadPermission(int fingerprint_id, UserPermission &perm) {
 bool Storage::savePermission(const UserPermission &perm, uint32_t version) {
     if (!initialized) begin();
     if (version > 0) permCacheVersion = version;
-    // 查找是否已存在
+    // 查找是否已存在（按 local_fp_id 匹配，因为 AS608 槽位唯一）
     int existIdx = -1;
     for (int i = 0; i < permCacheCount; i++) {
-        if (permCache[i].fingerprint_id == perm.fingerprint_id) {
+        if (permCache[i].local_fp_id == perm.local_fp_id) {
             existIdx = i;
             break;
         }
@@ -517,7 +628,9 @@ bool Storage::deletePermission(int fingerprint_id) {
     if (!initialized) begin();
     int delIdx = -1;
     for (int i = 0; i < permCacheCount; i++) {
-        if (permCache[i].fingerprint_id == fingerprint_id) {
+        // V2.7：按 fingerprint_id 或 local_fp_id 匹配（AS608 删除时传入的是物理槽位）
+        if (permCache[i].fingerprint_id == fingerprint_id ||
+            permCache[i].local_fp_id == fingerprint_id) {
             delIdx = i;
             break;
         }
@@ -582,30 +695,52 @@ bool Storage::replaceAllPermissions(const UserPermission *users, int count, uint
     if (!initialized) begin();
     if (count < 0 || count > PERM_MAX_USERS || (count > 0 && users == nullptr)) return false;
 
+    // V2.7：全量替换只清除主指纹(is_backup=false)记录，保留本机副指纹(is_backup=true)记录。
+    // 副指纹是设备专属本地数据，不应被全局权限同步覆盖。
+    int backupCount = 0;
+    for (int i = 0; i < permCacheCount; i++) {
+        if (permCache[i].is_backup) backupCount++;
+    }
+    int totalCount = count + backupCount;
+
     UserPermission *newCache = nullptr;
-    if (count > 0) {
-        newCache = new UserPermission[count];
+    if (totalCount > 0) {
+        newCache = new UserPermission[totalCount];
         if (newCache == nullptr) return false;
+        int idx = 0;
+        // 先放入主指纹（来自上位机下发）
         for (int i = 0; i < count; i++) {
-            newCache[i] = users[i];
-            newCache[i].valid = true;
+            newCache[idx] = users[i];
+            newCache[idx].is_backup = false;
+            // 主指纹的 local_fp_id 默认等于 fingerprint_id（除非已被本机占用，则重新分配）
+            if (newCache[idx].local_fp_id <= 0) {
+                newCache[idx].local_fp_id = newCache[idx].fingerprint_id;
+            }
+            newCache[idx].valid = true;
+            idx++;
+        }
+        // 再放入保留的副指纹
+        for (int i = 0; i < permCacheCount; i++) {
+            if (permCache[i].is_backup) {
+                newCache[idx++] = permCache[i];
+            }
         }
     }
 
     // Persist the complete candidate before changing the authoritative RAM
     // cache. A failed transaction therefore keeps the old permissions active.
     uint8_t *buf = nullptr;
-    if (count > 0) {
-        buf = (uint8_t*)malloc(count * PERM_RECORD_SIZE);
+    if (totalCount > 0) {
+        buf = (uint8_t*)malloc(totalCount * PERM_RECORD_SIZE);
         if (buf == nullptr) {
             delete[] newCache;
             return false;
         }
-        for (int i = 0; i < count; i++) {
+        for (int i = 0; i < totalCount; i++) {
             serializePermission(newCache[i], buf + i * PERM_RECORD_SIZE);
         }
     }
-    bool ok = savePermissionTable(buf, count, version);
+    bool ok = savePermissionTable(buf, totalCount, version);
     if (buf) free(buf);
     if (!ok) {
         delete[] newCache;
@@ -614,23 +749,188 @@ bool Storage::replaceAllPermissions(const UserPermission *users, int count, uint
 
     if (permCache) delete[] permCache;
     permCache = newCache;
-    permCacheCount = count;
+    permCacheCount = totalCount;
     permCacheVersion = version;
     permLost = false;
 
     // 更新配置中的版本号
     prefs.putUInt("perm_ver", version);
 
-    Debug::printf("[STORAGE] Full permission replace: %d records, version=%u\n", count, version);
+    Debug::printf("[STORAGE] Full permission replace: %d primary + %d backup = %d records, version=%u\n",
+                  count, backupCount, totalCount, version);
+    return ok;
+}
+
+// ====== 内存缓存持久化（V2.7 副指纹增删复用） ======
+bool Storage::persistCache() {
+    uint8_t *buf = nullptr;
+    if (permCacheCount > 0) {
+        buf = (uint8_t*)malloc(permCacheCount * PERM_RECORD_SIZE);
+        if (buf == nullptr) return false;
+        for (int i = 0; i < permCacheCount; i++) {
+            serializePermission(permCache[i], buf + i * PERM_RECORD_SIZE);
+        }
+    }
+    bool ok = savePermissionTable(buf, permCacheCount, permCacheVersion);
+    if (buf) free(buf);
+    return ok;
+}
+
+// ====== 设备专属副指纹（V2.7） ======
+// 分配一个未占用的 AS608 物理槽位（0..FINGER_MAX_USERS-1）
+// 策略：扫描权限表中已用的 local_fp_id，找最小未占用值。
+int Storage::allocLocalFpId() {
+    if (!initialized) begin();
+    bool used[FINGER_MAX_USERS] = {false};
+    for (int i = 0; i < permCacheCount; i++) {
+        int id = permCache[i].local_fp_id;
+        if (id >= 0 && id < FINGER_MAX_USERS) {
+            used[id] = true;
+        }
+    }
+    for (int id = 0; id < FINGER_MAX_USERS; id++) {
+        if (!used[id]) return id;
+    }
+    return -1;  // 槽位已满
+}
+
+// 按 AS608 物理槽位查找权限记录（验证入口，主/副共用）
+bool Storage::findPermissionByAs608Id(int local_fp_id, UserPermission &perm) {
+    if (!initialized) begin();
+    if (permCache == nullptr || permCacheCount == 0) {
+        perm.valid = false;
+        return false;
+    }
+    for (int i = 0; i < permCacheCount; i++) {
+        if (permCache[i].local_fp_id == local_fp_id) {
+            perm = permCache[i];
+            perm.valid = true;
+            return true;
+        }
+    }
+    perm.valid = false;
+    return false;
+}
+
+// 查找指定用户的主指纹权限记录（用于副指纹权限继承）
+bool Storage::findPrimaryPermission(const String &userId, UserPermission &perm) {
+    if (!initialized) begin();
+    uint32_t uidNum = userIdToNum(userId);
+    if (permCache == nullptr || permCacheCount == 0) {
+        perm.valid = false;
+        return false;
+    }
+    for (int i = 0; i < permCacheCount; i++) {
+        if (permCache[i].user_id_num == uidNum && !permCache[i].is_backup) {
+            perm = permCache[i];
+            perm.valid = true;
+            return true;
+        }
+    }
+    perm.valid = false;
+    return false;
+}
+
+// 添加一条副指纹记录到本地权限表（is_backup=true）
+bool Storage::addBackupFingerprint(const UserPermission &perm) {
+    if (!initialized) begin();
+    if (permCacheCount >= PERM_MAX_USERS) {
+        Debug::println(F("[STORAGE] Permission table full, cannot add backup"));
+        return false;
+    }
+    // 同一用户已有副指纹则拒绝（每人本机最多 1 条副指纹）
+    uint32_t uidNum = perm.user_id_num;
+    for (int i = 0; i < permCacheCount; i++) {
+        if (permCache[i].user_id_num == uidNum && permCache[i].is_backup) {
+            Debug::printf("[STORAGE] Backup fingerprint already exists for user %s\n",
+                          perm.user_id.c_str());
+            return false;
+        }
+    }
+    UserPermission *newCache = new UserPermission[permCacheCount + 1];
+    for (int i = 0; i < permCacheCount; i++) {
+        newCache[i] = permCache[i];
+    }
+    newCache[permCacheCount] = perm;
+    newCache[permCacheCount].is_backup = true;
+    newCache[permCacheCount].valid = true;
+    if (permCache) delete[] permCache;
+    permCache = newCache;
+    permCacheCount++;
+
+    bool ok = persistCache();
+    Debug::printf("[STORAGE] Backup fingerprint added: user=%s local_fp_id=%d ok=%d\n",
+                  perm.user_id.c_str(), perm.local_fp_id, ok ? 1 : 0);
+    return ok;
+}
+
+// 列出所有副指纹记录（用于 BACKUP_FP_LIST 上报）
+int Storage::listBackupFingerprints(UserPermission *out, int maxCount) {
+    if (!initialized) begin();
+    int n = 0;
+    for (int i = 0; i < permCacheCount && n < maxCount; i++) {
+        if (permCache[i].is_backup) {
+            out[n++] = permCache[i];
+        }
+    }
+    return n;
+}
+
+// 删除指定用户的本机副指纹记录
+// 注意：仅删除权限缓存条目，AS608 模板删除由 message_handler 调用 Fingerprint::deleteFingerprint 完成
+bool Storage::deleteBackupFingerprint(const String &userId) {
+    if (!initialized) begin();
+    uint32_t uidNum = userIdToNum(userId);
+    int delIdx = -1;
+    int localId = -1;
+    for (int i = 0; i < permCacheCount; i++) {
+        if (permCache[i].user_id_num == uidNum && permCache[i].is_backup) {
+            delIdx = i;
+            localId = permCache[i].local_fp_id;
+            break;
+        }
+    }
+    if (delIdx < 0) return false;
+
+    UserPermission *newCache = nullptr;
+    if (permCacheCount > 1) {
+        newCache = new UserPermission[permCacheCount - 1];
+        int j = 0;
+        for (int i = 0; i < permCacheCount; i++) {
+            if (i != delIdx) {
+                newCache[j++] = permCache[i];
+            }
+        }
+    }
+    delete[] permCache;
+    permCache = newCache;
+    permCacheCount--;
+
+    bool ok = persistCache();
+    Debug::printf("[STORAGE] Backup fingerprint deleted: user=%s local_fp_id=%d ok=%d\n",
+                  userId.c_str(), localId, ok ? 1 : 0);
     return ok;
 }
 
 // ====== 离线日志（Flash 环形缓冲） ======
 void Storage::loadLogPointers() {
-    logWritePtr = logPrefs.getInt("wr_ptr", 0);
-    logStartPtr = logPrefs.getInt("st_ptr", 0);
-    logCount = logPrefs.getInt("count", 0);
-    logSeqCounter = logPrefs.getUInt("seq", 0);
+    bool loadedV2 = false;
+    LogPointerState state = {};
+    if (logPrefs.getBytesLength("ptrs_v2") == sizeof(state) &&
+        logPrefs.getBytes("ptrs_v2", &state, sizeof(state)) == sizeof(state) &&
+        state.magic == LOG_POINTER_MAGIC) {
+        logWritePtr = state.writePtr;
+        logStartPtr = state.startPtr;
+        logCount = state.count;
+        logSeqCounter = state.sequence;
+        loadedV2 = true;
+    } else {
+        // One-time compatibility migration from the four legacy keys.
+        logWritePtr = logPrefs.getInt("wr_ptr", 0);
+        logStartPtr = logPrefs.getInt("st_ptr", 0);
+        logCount = logPrefs.getInt("count", 0);
+        logSeqCounter = logPrefs.getUInt("seq", 0);
+    }
     logPtrLoaded = true;
 
     // 范围校验
@@ -638,6 +938,10 @@ void Storage::loadLogPointers() {
     if (logStartPtr < 0 || logStartPtr >= LOG_MAX_ENTRIES) logStartPtr = 0;
     if (logCount < 0) logCount = 0;
     if (logCount > LOG_MAX_ENTRIES) logCount = LOG_MAX_ENTRIES;
+
+    if (!loadedV2) {
+        saveLogPointers();
+    }
 
     Debug::printf("[STORAGE] Log pointer loaded: write=%d start=%d count=%d seq=%u\n",
                   logWritePtr, logStartPtr, logCount, logSeqCounter);
@@ -649,10 +953,16 @@ void Storage::loadLogPointers() {
 }
 
 void Storage::saveLogPointers() {
-    logPrefs.putInt("wr_ptr", logWritePtr);
-    logPrefs.putInt("st_ptr", logStartPtr);
-    logPrefs.putInt("count", logCount);
-    logPrefs.putUInt("seq", logSeqCounter);
+    LogPointerState state = {
+        LOG_POINTER_MAGIC,
+        logWritePtr,
+        logStartPtr,
+        logCount,
+        logSeqCounter
+    };
+    if (logPrefs.putBytes("ptrs_v2", &state, sizeof(state)) != sizeof(state)) {
+        Debug::println(F("[STORAGE] Failed to persist log pointers"));
+    }
 }
 
 void Storage::eraseLogSector(int sectorIndex) {
@@ -893,7 +1203,6 @@ bool Storage::isTimeSynced() {
 bool Storage::factoryReset() {
     if (!initialized) begin();
     prefs.clear();
-    logPrefs.clear();
     if (permCache) {
         delete[] permCache;
         permCache = nullptr;

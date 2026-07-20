@@ -35,6 +35,8 @@
                 </Button>
                 <Button x:Name="RestoreFingerprintButton" Style="{StaticResource SecondaryButton}" Margin="8,0,0,0"
                         Content="恢复到柜子" Click="RestoreFingerprintButton_Click"/>
+                <Button x:Name="BatchAssignPermButton" Style="{StaticResource SecondaryButton}" Margin="8,0,0,0"
+                        Content="批量分配柜子权限" Click="BatchAssignPermButton_Click"/>
                 <Button x:Name="EditUserButton" Style="{StaticResource SecondaryButton}" Margin="8,0,0,0"
                         Content="编辑" Click="EditUserButton_Click"/>
                 <Button x:Name="ResetPasswordButton" Style="{StaticResource SecondaryButton}" Margin="8,0,0,0"
@@ -65,7 +67,7 @@
         </Border>
 
         <Border Grid.Row="2" Style="{StaticResource Panel}">
-            <DataGrid x:Name="UserDataGrid" BorderThickness="0" IsReadOnly="True" SelectionMode="Single">
+            <DataGrid x:Name="UserDataGrid" BorderThickness="0" IsReadOnly="True" SelectionMode="Extended">
                 <DataGrid.Columns>
                     <DataGridTextColumn Header="用户 ID" Binding="{Binding UserId}" Width="170"/>
                     <DataGridTextColumn Header="姓名" Binding="{Binding Name}" Width="140"/>

@@ -14,22 +14,41 @@
 #define DEVICE_ID_DEFAULT        "CABINET_001"
 #define FINGER_MAX_USERS         200
 #define STATUS_REPORT_INTERVAL   60000
-#define FIRMWARE_VERSION         "2.5.0"
+#define FIRMWARE_VERSION         "2.7.0-windowfp"
+
+// ===================== 柜机本地交互窗口常量 =====================
+// 指纹验证成功后的操作窗口：用户需在此期间按下对应锁按键开锁。
+// 超时未操作自动清空本次验证权限，灯光熄灭。
+#define VERIFY_WINDOW_MS         10000
+// 指纹识别失败后红灯闪烁的次数与节奏（单次闪烁周期 250ms：125ms亮 + 125ms灭）
+#define FP_LED_FAIL_BLINK_COUNT  3
+#define FP_LED_BLINK_HALF_MS     125
+#define FP_LED_IDENTIFY_HALF_MS  250   // 识别中：500ms 周期慢闪
 
 // ===================== ESP-MESH 网络配置 =====================
 #define MESH_CHANNEL            6
 #define MESH_PASSWORD           "Mesh@2026"
 #define MESH_MAX_NODE           40
 #define MESH_MAX_LAYER          6
-#define MESH_AP_MAX_CONNECTION  10
+// ESP-MESH hard limit is CONFIG_MESH_AP_MAX_CONNECTIONS_DEFAULT = 6.
+// Nodes beyond this count attach via intermediate hops, not directly to Root.
+#define MESH_AP_MAX_CONNECTION  6
 #define MESH_ID                 {0x4D, 0x45, 0x53, 0x48, 0x30, 0x31}
 
-#define MESH_HEARTBEAT_INTERVAL 60000
+// HEARTBEAT 间隔：柜子主动上报周期。短于 ROUTE_TIMEOUT_MS 的 1/3 才能保证
+// 路由表不会因 HEARTBEAT 抖动而过期。10s 间隔实测带宽占用 <20B/s 可忽略。
+#define MESH_HEARTBEAT_INTERVAL 10000
+// 路由过期：3 倍 HEARTBEAT 间隔，留容错余量。
 #define MESH_ROUTE_TIMEOUT_MS   (MESH_HEARTBEAT_INTERVAL * 3UL)
 #define MESH_ROUTE_SWEEP_MS     5000
+// Root 应用层无响应时强制重关联的阈值。原 60s 偏激进，会打断 Mesh 协议栈自愈。
+// 放宽到 120s，让协议栈有足够时间自行恢复 parent 关联。
+#define MESH_FORCE_REASSOC_MS   120000UL
 #define MESH_RECONNECT_BASE_MS  5000
 #define MESH_RECONNECT_MAX_MS   60000
 #define MESH_RX_BUFFER_SIZE     1500
+// Mesh RX queue depth used by mesh_comm (xQueueCreate)
+#define MESH_RX_QUEUE_DEPTH     24
 
 // ===================== 上行链路（Root节点专用） =====================
 #define UPLINK_USB_BAUD         921600
@@ -46,6 +65,7 @@
 // 权限与配置已迁移到 NVS，下列 PERM/CONFIG 偏移仅作历史参考，不再使用。
 // #define PERM_STORE_OFFSET       0x314000
 #define LOG_STORE_OFFSET        0x7E0000
+#define LOG_STORE_SIZE          0x10000
 // #define CONFIG_OFFSET           0x354000
 #define FLASH_SECTOR_SIZE       0x1000
 
@@ -58,19 +78,54 @@
 #define FRAME_HEADER_SIZE       5
 #define FRAME_CRC_SIZE          2
 #define FRAGMENT_HEADER_SIZE    4
-#define FRAGMENT_MAX_TOTAL      255
-#define FRAGMENT_REASSEMBLY_BUF 65536
+// Dual-slot PSRAM reassembly: 8KB/slot covers typical multi-part app payloads
+// without a 64KB internal-heap single slot.
+#define FRAGMENT_MAX_TOTAL      16
+#define FRAGMENT_REASSEMBLY_BUF 8192
+#define FRAGMENT_SLOT_COUNT     2
 #define FRAGMENT_TIMEOUT_MS     5000
 
+// ===================== Reliability / pacing =====================
+#define MESH_SEND_PACING_MS     15
+#define PERM_SYNC_INTER_ROW_MS  40
+#define PERM_SYNC_INTER_NODE_MS 100
+#define RELIABLE_TX_SLOTS       16
+#define RELIABLE_TX_TIMEOUT_MS  800
+#define RELIABLE_TX_MAX_RETRY   3
+#define SD_PART_WINDOW          3
+
+// ===================== App binary protocol =====================
+#define APP_PROTO_VER           0x01
+#define APP_MAGIC_0             0xB1
+#define APP_MAGIC_1             0x0F
+#define APP_DEVICE_ID_MAX       24
+#define APP_SOURCE_ID_MAX       24
+#define APP_ENVELOPE_MIN        18
+#define APP_MAX_PAYLOAD         1400
+#define APP_FLAG_NEEDS_ACK      0x01
+#define APP_FLAG_IS_ACK         0x02
+#define APP_FLAG_IS_ERROR       0x04
+#define APP_FLAG_HAS_HMAC       0x08
+#define APP_FLAG_MULTI_PART     0x10
+#define APP_FLAG_BROADCAST      0x80
+
+// ===================== TX pool sizes (MemPool) =====================
+#define FRAME_TX_POOL_SIZE      4096
+#define MESH_TX_SCRATCH_SIZE    1500
+
 // ===================== 权限数据格式 =====================
+// V2.7：记录从 12B 扩展到 16B，新增 local_fp_id(2B) + is_backup(1B) + reserved(1B)。
+// 旧 12B 记录读取时由 storage.cpp 兼容迁移：local_fp_id = fingerprint_id, is_backup = false。
+// 通过 header 中的 record_size 字段（reserved[0] 复用）区分版本。
 #define PERM_MAGIC              0xA5A55A5A
-#define PERM_RECORD_SIZE        12
+#define PERM_RECORD_SIZE        16
+#define PERM_RECORD_SIZE_V1     12     // 旧版本兼容读取
 #define PERM_HEADER_SIZE        16
 #define PERM_MAX_USERS          200
 
 // ===================== 离线日志格式 =====================
 #define LOG_RECORD_SIZE         32
-#define LOG_SECTOR_COUNT        32
+#define LOG_SECTOR_COUNT        (LOG_STORE_SIZE / FLASH_SECTOR_SIZE)
 #define LOG_ENTRIES_PER_SECTOR  (FLASH_SECTOR_SIZE / LOG_RECORD_SIZE)
 #define LOG_MAX_ENTRIES         (LOG_SECTOR_COUNT * LOG_ENTRIES_PER_SECTOR)
 
@@ -85,9 +140,14 @@
 #define FP_TEMPLATE_BUF_SIZE      (FP_TEMPLATE_SIZE + 64)
 
 // ===================== SD 卡路径常量（根节点使用） =====================
-#define SD_MOUNT_POINT      "/sdcard"
-#define SD_DATA_DIR         "/sdcard/data"
-#define SD_FP_DIR           "/sdcard/data/fingerprints"
+// SD_MMC.begin("/sdcard", ...) 的参数是 VFS 挂载点（prefix），底层访问时
+// 已自动去掉该前缀。因此所有业务路径应以 /sdcard 之后的相对路径书写。
+// 例如：/sdcard/data/version.json 在 SD_MMC.open() 中应写作 /data/version.json。
+// 若直接以 /sdcard 前缀打开，路径会变成 /sdcard/sdcard/data/...（重复前缀）
+// 导致 mkdir / open 全部失败、SD 看似 mount 成功但业务完全不可用。
+#define SD_MOUNT_POINT      "/sdcard"   // 仅作为 VFS prefix，不要拼接到业务路径中
+#define SD_DATA_DIR         "/data"     // 数据目录（相对挂载点）
+#define SD_FP_DIR           "/data/fingerprints"
 
 // ===================== 工作模式枚举 =====================
 enum WorkMode {
@@ -120,6 +180,9 @@ enum ErrorCode {
     ERR_FP_TEMPLATE_FORMAT  = 3001,
     ERR_FP_ID_EXISTS        = 3002,
     ERR_FP_COMM_FAILED      = 3003,
+    ERR_FP_BACKUP_EXISTS    = 3004,   // 该用户本机已有副指纹
+    ERR_FP_BACKUP_LIMIT     = 3005,   // 本机副指纹槽位已满
+    ERR_FP_BACKUP_NOT_FOUND = 3006,   // 指定用户本机无副指纹
     ERR_LOCK_ID_RANGE       = 4001,
     ERR_LOCK_HARDWARE       = 4002,
     ERR_FLASH_WRITE         = 5001,
@@ -131,7 +194,12 @@ enum ErrorCode {
     ERR_NOT_FOUND           = 9102,
     ERR_INTERNAL            = 9103,
     ERR_PERMISSION_DENIED   = 9104,
-    ERR_VERSION_CONFLICT    = 9105
+    ERR_VERSION_CONFLICT    = 9105,
+    // SD 卡不可用：根节点 SD 未挂载或初始化失败。上位机收到此错误码时应
+    // 自动切换为电脑本地缓存模式：SD_SAVE 数据写本地磁盘，SD_QUERY 读本地
+    // 缓存，UPLOAD_FP_TEMPLATE 模板暂存本地，SD 可用后再回传到根节点 SD。
+    // 柜子基本操作（指纹/锁/权限下发）不依赖根节点 SD，照常工作。
+    ERR_SD_NOT_READY        = 9201
 };
 
 // ===================== 设备配置结构体 =====================
@@ -154,8 +222,14 @@ struct DeviceConfig {
 };
 
 // ===================== 用户权限结构体 =====================
+// V2.7：新增 local_fp_id 与 is_backup，支持设备专属副指纹。
+//   - 主指纹：fingerprint_id 由上位机全局分配，下发时 local_fp_id = fingerprint_id
+//   - 副指纹：本机录入，AS608 槽位由 allocLocalFpId() 分配，is_backup=true
+// 验证时按 AS608 物理槽位(local_fp_id)查找权限记录，主/副共用同一权限表。
 struct UserPermission {
-    int fingerprint_id;
+    int fingerprint_id;       // 全局逻辑ID（上位机下发，主指纹用；副指纹时为本机分配的 local_fp_id 副本）
+    int local_fp_id;          // AS608 物理槽位（柜子本地实际存储位置，主/副共用）
+    bool is_backup;           // false=主指纹（全局下发），true=本机副指纹
     uint32_t user_id_num;
     String user_id;
     String name;

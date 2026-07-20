@@ -21,6 +21,12 @@
 #define TFT_HEIGHT           160
 #define TFT_SPI_FREQUENCY    40000000
 
+// TFT_eSPI rotations 1 and 3 are both 160x80 landscape orientations.
+// Change to 3 if the assembled panel is physically upside down.
+#ifndef ROOT_TFT_ROTATION
+#define ROOT_TFT_ROTATION    1
+#endif
+
 // ===================== SD Card (SD_MMC 1-bit mode) =====================
 #ifdef ENABLE_SD_CARD
 #define SD_SCLK_PIN          17

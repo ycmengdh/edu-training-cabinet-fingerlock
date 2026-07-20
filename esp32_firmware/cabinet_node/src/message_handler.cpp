@@ -11,15 +11,21 @@
 #include "lock_control.h"
 #include "mesh_comm.h"
 #include "logger.h"
+#include "led_indicator.h"
 #include "message_hmac.h"
+#include "protocol_frame.h"
+#include "cmd_ids.h"
+#include <string.h>
 #ifdef ENABLE_SD_CARD
 #include "sd_storage.h"
 #endif
 
 // 状态机超时时间
-#define WAIT_FINGER_TIMEOUT_MS  30000   // 等待指纹超时 30 秒
+#define WAIT_FINGER_TIMEOUT_MS  30000   // 等待指纹超时 30 秒（保留用于异常恢复）
 #define PERM_LOST_REPORT_INTERVAL 60000 // PERM_LOST 上报间隔 60 秒
 #define PERMISSION_SYNC_TIMEOUT_MS 30000
+// V2.7：验证成功后的操作窗口（10 秒）
+#define VERIFY_WINDOW_TIMEOUT_MS VERIFY_WINDOW_MS
 
 // 2000-01-01 00:00:00 的 Unix 时间戳
 #define UNIX_2000_01_01  946684800UL
@@ -29,9 +35,13 @@ int MessageHandler::pendingLockId        = -1;
 int MessageHandler::pendingFingerprintId = -1;
 MessageHandler::VerifyState MessageHandler::state = STATE_IDLE;
 unsigned long MessageHandler::stateEnterTime = 0;
+UserPermission MessageHandler::verifiedPerms;
+bool MessageHandler::verifiedPermsValid  = false;
 int  MessageHandler::enrollFingerprintId = -1;
 String MessageHandler::enrollUserId      = "";
 String MessageHandler::enrollRequestMsgId = "";
+String MessageHandler::enrollLastPhaseCode = "";
+bool MessageHandler::enrollIsBackup      = false;
 int  MessageHandler::verifyFailCount     = 0;
 bool MessageHandler::permLostPending     = false;
 unsigned long MessageHandler::lastPermLostReport = 0;
@@ -43,13 +53,72 @@ uint32_t MessageHandler::permissionSyncVersion = 0;
 unsigned long MessageHandler::permissionSyncStartedAt = 0;
 bool MessageHandler::permissionSyncActive = false;
 
+// Rebuild legacy full JSON so existing command handlers keep working when the
+// outer envelope is binary. Payload is the `data` object (JSON) when present.
+static String cabinetAppViewToLegacyJson(const AppMessageView &view) {
+    const char *cmdName = appCmdName(view.cmd_id);
+    if (cmdName == nullptr) cmdName = "UNKNOWN";
+
+    char did[APP_DEVICE_ID_MAX + 1];
+    did[0] = '\0';
+    if (view.device_id_len > 0 && view.device_id != nullptr) {
+        size_t n = view.device_id_len;
+        if (n > APP_DEVICE_ID_MAX) n = APP_DEVICE_ID_MAX;
+        memcpy(did, view.device_id, n);
+        did[n] = '\0';
+    }
+
+    String dataJson = "{}";
+    if (view.payload_len > 0 && view.payload != nullptr) {
+        // CONTROL_LOCK binary payload → JSON data object
+        if (view.cmd_id == CMD_CONTROL_LOCK) {
+            uint8_t lockId = 0, action = 0;
+            if (unpackControlLock(view.payload, view.payload_len, lockId, action)) {
+                dataJson = "{\"lock_id\":" + String(lockId) +
+                           ",\"action\":\"" + String(action == 1 ? "close" : "open") + "\"}";
+            }
+        } else if (view.cmd_id == CMD_TIME_SYNC && view.payload_len >= 4) {
+            uint32_t ts = rdU32(view.payload);
+            dataJson = "{\"timestamp\":" + String(ts) + "}";
+        } else {
+            dataJson = "";
+            dataJson.reserve(view.payload_len + 1);
+            for (uint16_t i = 0; i < view.payload_len; i++) {
+                dataJson += (char)view.payload[i];
+            }
+            if (dataJson.length() == 0 || (dataJson[0] != '{' && dataJson[0] != '[')) {
+                dataJson = "{}";
+            }
+        }
+    }
+
+    String msgId = (view.msg_id != 0) ? String(view.msg_id) : String("");
+    return ProtocolFrame::buildMessage(String(cmdName), String(did), dataJson, msgId);
+}
+
+void MessageHandler::handleIncomingApp(const AppMessageView &view) {
+    if (view.cmd_id == CMD_HEARTBEAT_ACK || view.cmd_id == CMD_ACK) {
+        // Presence / reliability only — no business action.
+        return;
+    }
+    if (view.cmd_id == CMD_HEARTBEAT) {
+        // Cabinets do not answer peer heartbeats.
+        return;
+    }
+    String legacy = cabinetAppViewToLegacyJson(view);
+    handleIncoming(legacy);
+}
+
 void MessageHandler::init() {
-    state = STATE_IDLE;
+    // V2.7：开机即进入常态指纹轮询（不再等待按键触发）
+    state = STATE_WAIT_FINGER;
     pendingLockId = -1;
     pendingFingerprintId = -1;
     stateEnterTime = millis();
+    verifiedPermsValid = false;
     enrollFingerprintId = -1;
     enrollRequestMsgId = "";
+    enrollIsBackup = false;
     verifyFailCount = 0;
     resetPermissionSync();
 
@@ -59,7 +128,8 @@ void MessageHandler::init() {
         Debug::println(F("[MSG] permission data lost, pending PERM_LOST report"));
     }
 
-    Debug::println(F("[MSG] message handler init complete"));
+    FpLed::setOff();
+    Debug::println(F("[MSG] message handler init complete (V2.7 windowed verify)"));
 }
 
 MessageHandler::VerifyState MessageHandler::getState() {
@@ -73,22 +143,59 @@ void MessageHandler::setState(VerifyState s) {
 }
 
 void MessageHandler::onKeyPressed(int lockId) {
-    if (state != STATE_IDLE) {
-        Debug::printf("[MSG] ignore key %d (current state %d busy)\n", lockId, state);
+    // V2.7 流程反转：按键仅在验证窗口内生效（开锁）
+    if (state == STATE_VERIFIED_WINDOW) {
+        if (!verifiedPermsValid) {
+            Debug::println(F("[MSG] window active but no verified perms, ignore key"));
+            return;
+        }
+        openIfPermitted(lockId);
         return;
     }
-    pendingLockId = lockId;
-    setState(STATE_WAIT_FINGER);
-    Debug::printf("[MSG] key %d triggered, waiting for fingerprint...\n", lockId);
+    // 其他状态（WAIT_FINGER / ENROLLING / IDLE）忽略开锁键
+    Debug::printf("[MSG] ignore key %d (current state %d, not in verify window)\n",
+                  lockId, (int)state);
 }
 
 void MessageHandler::onCancel() {
-    if (state == STATE_IDLE) return;  // 空闲时忽略
-    Debug::printf("[MSG] Cancel: state %d -> IDLE\n", state);
-    setState(STATE_IDLE);
+    if (state == STATE_IDLE || state == STATE_WAIT_FINGER) {
+        // 空闲或等待指纹时取消无意义，但允许灭灯复位
+        if (state == STATE_WAIT_FINGER) {
+            FpLed::setOff();
+        }
+        return;
+    }
+    Debug::printf("[MSG] Cancel: state %d -> WAIT_FINGER\n", (int)state);
+
+    if (state == STATE_VERIFIED_WINDOW) {
+        // 取消验证窗口：清空权限，回 WAIT_FINGER
+        sendVerifyWindowEvent("cancel");
+        verifiedPermsValid = false;
+        FpLed::setOff();
+        setState(STATE_WAIT_FINGER);
+        return;
+    }
+
+    if (state == STATE_ENROLLING) {
+        Fingerprint::enrollAbort("user_cancelled");
+        if (enrollRequestMsgId.length() > 0) {
+            String data = "{\"fingerprint_id\":" + String(enrollFingerprintId) +
+                          ",\"user_id\":\"" + enrollUserId +
+                          "\",\"is_backup\":" + String(enrollIsBackup ? "true" : "false") +
+                          ",\"result\":\"fail\",\"message\":\"user_cancelled\"}";
+            sendMessage("ADD_FINGERPRINT_RESULT", data, enrollRequestMsgId);
+        }
+        enrollFingerprintId = -1;
+        enrollUserId = "";
+        enrollRequestMsgId = "";
+        enrollLastPhaseCode = "";
+        enrollIsBackup = false;
+        FpLed::setOff();
+        setState(STATE_WAIT_FINGER);
+    }
 }
 
-// ====== 消息发送（通过 MeshComm） ======
+// ====== 消息发送（通过 MeshComm，二进制信封 + data JSON 负载） ======
 bool MessageHandler::sendMessage(const String &cmd, const String &dataJson,
                                  const String &msgId) {
     return MeshComm::sendMessage(cmd, dataJson, msgId);
@@ -96,12 +203,27 @@ bool MessageHandler::sendMessage(const String &cmd, const String &dataJson,
 
 void MessageHandler::sendAck(const String &msgId, const String &result) {
     if (msgId.length() == 0) return;
+    uint16_t mid = (uint16_t)msgId.toInt();
+    uint8_t pl[48];
+    int pln = packAck(pl, (int)sizeof(pl), mid, 0, result.c_str());
+    if (pln > 0 &&
+        MeshComm::sendApp(CMD_ACK, mid, APP_FLAG_IS_ACK, pl, (uint16_t)pln, nullptr)) {
+        return;
+    }
     String data = "{\"result\":\"" + result + "\"}";
     sendMessage("ACK", data, msgId);
 }
 
 void MessageHandler::sendError(ErrorCode code, const String &message,
                                const String &msgId) {
+    uint16_t mid = msgId.length() > 0 ? (uint16_t)msgId.toInt() : 0;
+    uint8_t pl[160];
+    int pln = packError(pl, (int)sizeof(pl), mid, (uint16_t)code, message.c_str());
+    if (pln > 0 &&
+        MeshComm::sendApp(CMD_ERROR, mid, APP_FLAG_IS_ERROR, pl, (uint16_t)pln, nullptr)) {
+        Debug::printf("[MSG] error response: code=%d msg=%s\n", (int)code, message.c_str());
+        return;
+    }
     String data = "{\"error_code\":" + String((int)code) + ",";
     data += "\"message\":\"" + message + "\"}";
     sendMessage("ERROR", data, msgId);
@@ -117,44 +239,90 @@ bool MessageHandler::isPermissionExpired(const UserPermission &perm) {
     return nowDays > perm.expire_days;
 }
 
-bool MessageHandler::tryLocalPermission(int fingerprintId, int lockId) {
-    // 离线模式：先查本地缓存权限
+// ====== V2.7：窗口化验证辅助方法 ======
+// 验证成功后载入权限到窗口态（不立即开锁）
+bool MessageHandler::loadVerifiedPermission(int as608Id) {
     UserPermission perm;
-    if (Storage::loadPermission(fingerprintId, perm) && perm.valid) {
+    if (Storage::findPermissionByAs608Id(as608Id, perm) && perm.valid) {
         // 检查权限是否过期
         if (isPermissionExpired(perm)) {
-            Logger::log(perm.user_id, fingerprintId, lockId,
+            Logger::log(perm.user_id, as608Id, -1,
                         "open", "fail", "permission_expired");
             Debug::printf("[MSG] permission expired: user=%s\n", perm.user_id.c_str());
-            return true;  // 已处理（失败）
+            return false;
         }
-        if (lockId >= 0 && lockId < LOCK_COUNT && perm.lock_perm[lockId]) {
-            // 本地有权限，开锁
-            LockControl::openLock(lockId);
-            Logger::log(perm.user_id, fingerprintId, lockId,
-                        "open", "success", "local_cache");
-            Debug::printf("[MSG] offline unlock success: user=%s lock=%d\n",
-                          perm.user_id.c_str(), lockId);
-            return true;
-        } else {
-            // 本地权限不足
-            Logger::log(perm.user_id, fingerprintId, lockId,
-                        "open", "fail", "local_no_permission");
-            Debug::printf("[MSG] offline permission denied: user=%s lock=%d\n",
-                          perm.user_id.c_str(), lockId);
-            return true;  // 已处理（失败）
-        }
+        verifiedPerms = perm;
+        verifiedPermsValid = true;
+        return true;
     }
-    return false;  // 本地无缓存，调用方按本地权威策略拒绝
+    return false;
+}
+
+// 在验证窗口态按键时尝试开锁
+bool MessageHandler::openIfPermitted(int lockId) {
+    if (!verifiedPermsValid) return false;
+    if (lockId >= 0 && lockId < LOCK_COUNT && verifiedPerms.lock_perm[lockId]) {
+        // 有权限，开锁
+        LockControl::openLock(lockId);
+        Logger::log(verifiedPerms.user_id, verifiedPerms.local_fp_id, lockId,
+                    "open", "success",
+                    verifiedPerms.is_backup ? "local_backup" : "local_cache");
+        Debug::printf("[MSG] windowed unlock success: user=%s lock=%d backup=%d\n",
+                      verifiedPerms.user_id.c_str(), lockId,
+                      verifiedPerms.is_backup ? 1 : 0);
+        // 开锁后结束窗口
+        sendVerifyWindowEvent("unlocked", lockId);
+        verifiedPermsValid = false;
+        FpLed::setOff();
+        setState(STATE_WAIT_FINGER);
+        return true;
+    } else {
+        // 本地权限不足（窗口未结束，可继续按其他有权限的锁）
+        Logger::log(verifiedPerms.user_id, verifiedPerms.local_fp_id, lockId,
+                    "open", "fail", "no_permission_in_window");
+        Debug::printf("[MSG] no permission for lock %d in window (user=%s)\n",
+                      lockId, verifiedPerms.user_id.c_str());
+        // 红灯短闪一次提示无权限（不结束窗口）
+        FpLed::setFail();
+        return false;
+    }
+}
+
+// 上报验证窗口事件（进入/退出/超时/取消/开锁）
+void MessageHandler::sendVerifyWindowEvent(const char *event, int lockId) {
+    String userId = verifiedPermsValid ? verifiedPerms.user_id : String("");
+    int fpId = verifiedPermsValid ? verifiedPerms.local_fp_id : -1;
+    String data = "{\"event\":\"" + String(event) + "\"";
+    data += ",\"user_id\":\"" + userId + "\"";
+    data += ",\"fingerprint_id\":" + String(fpId);
+    if (lockId >= 0) {
+        data += ",\"lock_id\":" + String(lockId);
+    }
+    data += "}";
+    sendMessage("VERIFY_WINDOW_EVENT", data);
 }
 
 void MessageHandler::checkTimeout() {
     unsigned long now = millis();
-    if (state == STATE_WAIT_FINGER && (now - stateEnterTime > WAIT_FINGER_TIMEOUT_MS)) {
-        Debug::println(F("[MSG] wait fingerprint timeout, return to idle"));
-        state = STATE_IDLE;
-        pendingLockId = -1;
-        pendingFingerprintId = -1;
+    // V2.7：验证窗口超时（10 秒未操作）
+    if (state == STATE_VERIFIED_WINDOW &&
+        (now - stateEnterTime > VERIFY_WINDOW_TIMEOUT_MS)) {
+        Debug::println(F("[MSG] verify window timeout, return to WAIT_FINGER"));
+        sendVerifyWindowEvent("timeout");
+        if (verifiedPermsValid) {
+            Logger::log(verifiedPerms.user_id, verifiedPerms.local_fp_id, -1,
+                        "open", "fail", "window_timeout");
+        }
+        verifiedPermsValid = false;
+        FpLed::setOff();
+        setState(STATE_WAIT_FINGER);
+    }
+    // WAIT_FINGER 异常恢复（30 秒无任何事件，复位 LED）
+    if (state == STATE_WAIT_FINGER &&
+        (now - stateEnterTime > WAIT_FINGER_TIMEOUT_MS)) {
+        // 不退出 WAIT_FINGER（常态轮询），仅复位 LED 到识别中
+        FpLed::setIdentifying();
+        stateEnterTime = now;  // 重置计时
     }
 }
 
@@ -163,8 +331,17 @@ void MessageHandler::startEnroll(int fingerprintId, const String &userId,
     enrollFingerprintId = fingerprintId;
     enrollUserId = userId;
     enrollRequestMsgId = requestMsgId;
+    enrollLastPhaseCode = "";
+    Fingerprint::enrollBegin(fingerprintId);
     setState(STATE_ENROLLING);
-    Debug::printf("[MSG] start enroll fingerprint: id=%d user=%s\n", fingerprintId, userId.c_str());
+    Debug::printf("[MSG] start enroll fingerprint: id=%d user=%s (4+2 steps)\n",
+                  fingerprintId, userId.c_str());
+    // 立即上报第一步提示
+    String prog = "{\"phase\":\"place_1\",\"step\":1,\"total\":6,"
+                  "\"hint\":\"请将手指按在指纹头上（第1/4次）\","
+                  "\"fingerprint_id\":" + String(fingerprintId) + "}";
+    sendMessage("ENROLL_PROGRESS", prog, requestMsgId);
+    enrollLastPhaseCode = "place_1";
 }
 
 void MessageHandler::update() {
@@ -188,78 +365,166 @@ void MessageHandler::update() {
     switch (state) {
         case STATE_WAIT_FINGER: {
             checkTimeout();
-            if (state != STATE_WAIT_FINGER) break;
 
-            // 轮询指纹模块
-            int fpId = Fingerprint::verifyFingerprint();
-            if (fpId >= 0) {
-                // 匹配成功
-                pendingFingerprintId = fpId;
+            // V2.7：常态轮询指纹模块（不再由按键触发）
+            // 识别中：绿灯慢闪
+            if (FpLed::getState() != FpLed::STATE_IDENTIFYING &&
+                FpLed::getState() != FpLed::STATE_FAIL) {
+                FpLed::setIdentifying();
+            }
+
+            int as608Id = Fingerprint::verifyFingerprint();
+            if (as608Id >= 0) {
+                // 匹配成功：尝试载入权限进入 10s 窗口
+                pendingFingerprintId = as608Id;
                 verifyFailCount = 0;
 
                 // Authentication is always decided by the cabinet's local
                 // permission cache. The network is for management/sync only;
                 // it must never be part of the unlock critical path.
-                if (pendingLockId >= 0 &&
-                    !tryLocalPermission(fpId, pendingLockId)) {
-                    Logger::log("", fpId, pendingLockId,
+                if (loadVerifiedPermission(as608Id)) {
+                    // 权限载入成功：进入 10s 操作窗口，绿灯常亮
+                    FpLed::setSuccess();
+                    setState(STATE_VERIFIED_WINDOW);
+                    sendVerifyWindowEvent("enter");
+                    Debug::printf("[MSG] fingerprint verified: as608_id=%d user=%s, enter 10s window\n",
+                                  as608Id, verifiedPerms.user_id.c_str());
+                } else {
+                    // 模板存在但权限缓存未同步或已过期：红灯闪烁
+                    Logger::log("", as608Id, -1,
                                 "open", "fail", "permission_not_synced");
-                    Debug::printf("[MSG] no local permission cache for fp=%d\n", fpId);
+                    Debug::printf("[MSG] no local permission cache for as608_id=%d\n", as608Id);
+                    FpLed::setFail();
+                    // setFail 完成后会自动回 OFF，update() 下一轮会重新 setIdentifying
                 }
-                state = STATE_IDLE;
-                pendingLockId = -1;
-                pendingFingerprintId = -1;
-            } else if (fpId == -2) {
-                // 读取错误（非未匹配），不立即退出，继续等待
+            } else if (as608Id == -1) {
+                // 无手指：继续等待（保持识别中闪烁）
+                // 注意：verifyFingerprint 返回 -1 也可能是"手指放上但未匹配"
+                // AS608 的 getImage 返回 NOFINGER 时无法区分，故不在此处触发失败闪烁
+            } else {
+                // fpId == -2 读取错误，不立即退出，继续等待
             }
-            // fpId == -1 表示无手指，继续等待
+            break;
+        }
+
+        case STATE_VERIFIED_WINDOW: {
+            checkTimeout();
+            // 窗口期内保持绿灯常亮（由 FpLed::update 维护）
+            // 按键事件由 onKeyPressed 处理
             break;
         }
 
         case STATE_ENROLLING: {
-            // 执行指纹录入（阻塞式，由命令触发）
-            bool ok = Fingerprint::enrollFingerprint(enrollFingerprintId);
-            String data = "{\"fingerprint_id\":" + String(enrollFingerprintId) +
-                          ",\"user_id\":\"" + enrollUserId + "\",\"result\":\"" +
-                          (ok ? "success" : "fail") + "\"";
+            // 非阻塞分步录入：4 次采集 + 2 次验证
+            bool changed = Fingerprint::enrollTick();
+            EnrollPhase ph = Fingerprint::enrollPhase();
+            const char *code = Fingerprint::enrollPhaseCode();
 
-            if (ok) {
-                uint8_t templateBuf[FP_TEMPLATE_BUF_SIZE];
-                size_t templateLen = 0;
-                if (Fingerprint::readTemplate(enrollFingerprintId, templateBuf,
-                                              sizeof(templateBuf), templateLen)) {
-                    const char *hexChars = "0123456789ABCDEF";
-                    String templateHex;
-                    templateHex.reserve(templateLen * 2);
-                    for (size_t i = 0; i < templateLen; i++) {
-                        templateHex += hexChars[(templateBuf[i] >> 4) & 0x0F];
-                        templateHex += hexChars[templateBuf[i] & 0x0F];
+            if (changed && code != nullptr && enrollLastPhaseCode != code) {
+                enrollLastPhaseCode = code;
+                if (ph != ENROLL_DONE_OK && ph != ENROLL_DONE_FAIL) {
+                    String prog = "{\"phase\":\"";
+                    prog += code;
+                    prog += "\",\"step\":";
+                    prog += String(Fingerprint::enrollStepIndex());
+                    prog += ",\"total\":";
+                    prog += String(Fingerprint::enrollStepTotal());
+                    prog += ",\"hint\":\"";
+                    // 简单转义引号
+                    const char *hint = Fingerprint::enrollPhaseHint();
+                    for (const char *p = hint; p && *p; ++p) {
+                        if (*p == '"' || *p == '\\') prog += '\\';
+                        prog += *p;
                     }
-                    data += ",\"template_hex\":\"" + templateHex + "\"";
+                    prog += "\",\"fingerprint_id\":";
+                    prog += String(enrollFingerprintId);
+                    prog += ",\"is_backup\":";
+                    prog += enrollIsBackup ? "true" : "false";
+                    prog += "}";
+                    sendMessage("ENROLL_PROGRESS", prog, enrollRequestMsgId);
                 }
-            } else {
-                data += ",\"message\":\"" + Fingerprint::lastError() + "\"";
             }
-            data += "}";
-            sendMessage("ADD_FINGERPRINT_RESULT", data, enrollRequestMsgId);
 
-            if (ok) {
-                // 更新指纹计数
-                DeviceConfig cfg;
-                Storage::loadDeviceConfig(cfg);
-                cfg.fingerprint_count = Fingerprint::getFingerprintCount();
-                Storage::saveDeviceConfig(cfg);
+            if (ph == ENROLL_DONE_OK || ph == ENROLL_DONE_FAIL) {
+                bool ok = (ph == ENROLL_DONE_OK);
+                String data = "{\"fingerprint_id\":" + String(enrollFingerprintId) +
+                              ",\"user_id\":\"" + enrollUserId + "\"" +
+                              ",\"is_backup\":" + String(enrollIsBackup ? "true" : "false") +
+                              ",\"result\":\"" + (ok ? "success" : "fail") + "\"";
+                if (ok) {
+                    uint8_t templateBuf[FP_TEMPLATE_BUF_SIZE];
+                    size_t templateLen = 0;
+                    if (Fingerprint::readTemplate(enrollFingerprintId, templateBuf,
+                                                  sizeof(templateBuf), templateLen) &&
+                        templateLen > 0) {
+                        const char *hexChars = "0123456789ABCDEF";
+                        String templateHex;
+                        templateHex.reserve(templateLen * 2);
+                        for (size_t i = 0; i < templateLen; i++) {
+                            templateHex += hexChars[(templateBuf[i] >> 4) & 0x0F];
+                            templateHex += hexChars[templateBuf[i] & 0x0F];
+                        }
+                        data += ",\"template_hex\":\"" + templateHex + "\"";
+                    }
+                    data += ",\"local_fp_id\":" + String(enrollFingerprintId);
+
+                    // V2.7：副指纹录入成功后写入本地权限表
+                    if (enrollIsBackup) {
+                        UserPermission backupPerm;
+                        // 尝试继承该用户主指纹的权限
+                        if (Storage::findPrimaryPermission(enrollUserId, backupPerm)) {
+                            // 继承主指纹权限
+                            backupPerm.local_fp_id = enrollFingerprintId;
+                            backupPerm.fingerprint_id = enrollFingerprintId;
+                            backupPerm.is_backup = true;
+                            backupPerm.valid = true;
+                        } else {
+                            // 无主指纹：使用默认无权限（上位机需后续下发权限）
+                            backupPerm.fingerprint_id = enrollFingerprintId;
+                            backupPerm.local_fp_id = enrollFingerprintId;
+                            backupPerm.is_backup = true;
+                            backupPerm.user_id = enrollUserId;
+                            backupPerm.user_id_num = Storage::userIdToNum(enrollUserId);
+                            backupPerm.name = "";
+                            backupPerm.role = ROLE_STUDENT;
+                            for (int i = 0; i < LOCK_COUNT; i++) {
+                                backupPerm.lock_perm[i] = false;
+                            }
+                            backupPerm.expire_days = 0xFFFFFFFF;
+                            backupPerm.valid = true;
+                        }
+                        if (Storage::addBackupFingerprint(backupPerm)) {
+                            data += ",\"backup_saved\":true";
+                        } else {
+                            data += ",\"backup_saved\":false";
+                        }
+                    }
+
+                    DeviceConfig cfg;
+                    Storage::loadDeviceConfig(cfg);
+                    cfg.fingerprint_count = Fingerprint::getFingerprintCount();
+                    Storage::saveDeviceConfig(cfg);
+                } else {
+                    data += ",\"message\":\"" + Fingerprint::lastError() + "\"";
+                }
+                data += "}";
+                sendMessage("ADD_FINGERPRINT_RESULT", data, enrollRequestMsgId);
+                // 录入结束回到 WAIT_FINGER
+                enrollFingerprintId = -1;
+                enrollUserId = "";
+                enrollRequestMsgId = "";
+                enrollLastPhaseCode = "";
+                enrollIsBackup = false;
+                FpLed::setOff();
+                setState(STATE_WAIT_FINGER);
             }
-            state = STATE_IDLE;
-            enrollFingerprintId = -1;
-            enrollUserId = "";
-            enrollRequestMsgId = "";
             break;
         }
 
         case STATE_IDLE:
         default:
-            // 空闲，检查是否需要重置失败计数
+            // V2.7：IDLE 仅在异常时出现，自动恢复到 WAIT_FINGER
+            setState(STATE_WAIT_FINGER);
             break;
     }
 }
@@ -327,6 +592,12 @@ void MessageHandler::handleIncoming(const String &message) {
         cmdDeleteFingerprint(data, msgId);
     } else if (strcmp(cmd, "DELETE_ALL_FINGERPRINTS") == 0) {
         cmdDeleteAllFingerprints(msgId);
+    } else if (strcmp(cmd, "ADD_BACKUP_FINGERPRINT") == 0) {
+        cmdAddBackupFingerprint(data, msgId);
+    } else if (strcmp(cmd, "DELETE_BACKUP_FINGERPRINT") == 0) {
+        cmdDeleteBackupFingerprint(data, msgId);
+    } else if (strcmp(cmd, "BACKUP_FP_LIST_REQUEST") == 0) {
+        cmdBackupFpListRequest(msgId);
     } else if (strcmp(cmd, "CONTROL_LOCK") == 0) {
         cmdControlLock(data, msgId);
     } else if (strcmp(cmd, "READ_CONFIG") == 0) {
@@ -412,6 +683,9 @@ void MessageHandler::cmdSyncPermissions(const JsonObject &data, const String &ms
             perm.name    = user["name"] | "";
             perm.role    = (UserRole)(user["role"] | (int)ROLE_STUDENT);
             perm.user_id_num = Storage::userIdToNum(perm.user_id);  // 字符串转数字形式
+            // V2.7：主指纹的 local_fp_id 默认等于 fingerprint_id（AS608 物理槽位）
+            perm.local_fp_id = perm.fingerprint_id;
+            perm.is_backup = false;
 
             JsonObject lp = user["lock_permissions"].as<JsonObject>();
             perm.lock_perm[0] = lp["lock_0"] | false;
@@ -465,6 +739,9 @@ bool MessageHandler::parsePermission(const JsonObject &data, UserPermission &per
     perm.name = data["name"] | "";
     perm.role = (UserRole)(data["role"] | (int)ROLE_STUDENT);
     perm.user_id_num = Storage::userIdToNum(perm.user_id);
+    // V2.7：主指纹的 local_fp_id 默认等于 fingerprint_id
+    perm.local_fp_id = perm.fingerprint_id;
+    perm.is_backup = false;
 
     JsonObject lp = data["lock_permissions"].as<JsonObject>();
     perm.lock_perm[0] = lp["lock_0"] | false;
@@ -575,14 +852,21 @@ void MessageHandler::cmdAddFingerprint(const JsonObject &data, const String &msg
         return;
     }
 
+    // V2.7：录入主指纹时允许从 WAIT_FINGER 进入（常态轮询态）
+    if (state != STATE_WAIT_FINGER && state != STATE_IDLE) {
+        sendError(ERR_INTERNAL, "device busy", msgId);
+        return;
+    }
+
     // 权限缓存中存在该 ID 并不代表传感器已经录入模板。
-    // 必须查询 AS608 自身，否则“先同步权限、后录入”的正常流程会被误判为重复。
+    // 必须查询 AS608 自身，否则"先同步权限、后录入"的正常流程会被误判为重复。
     if (Fingerprint::templateExists(fpId) && !replace) {
         sendError(ERR_FP_ID_EXISTS, "fingerprint id already exists", msgId);
         return;
     }
 
     sendAck(msgId, "enrolling");
+    enrollIsBackup = false;  // 主指纹
     startEnroll(fpId, userId, msgId);
 }
 
@@ -596,7 +880,8 @@ void MessageHandler::cmdRestoreFingerprint(const JsonObject &data, const String 
         sendError(ERR_FP_TEMPLATE_FORMAT, "invalid fingerprint id", msgId);
         return;
     }
-    if (state != STATE_IDLE) {
+    // V2.7：允许从 WAIT_FINGER 进入
+    if (state != STATE_WAIT_FINGER && state != STATE_IDLE) {
         sendError(ERR_INTERNAL, "device busy", msgId);
         return;
     }
@@ -686,6 +971,144 @@ void MessageHandler::cmdDeleteAllFingerprints(const String &msgId) {
     Debug::println(F("[MSG] cleared all fingerprints and permissions"));
 }
 
+// ====== V2.7 副指纹命令 ======
+// ADD_BACKUP_FINGERPRINT: 在本机录入副指纹（仅本机生效，不上报 SD 卡）
+// data: {user_id, lock_permissions?: {lock_0..lock_3}, expire_date?: "YYYY-MM-DD"}
+void MessageHandler::cmdAddBackupFingerprint(const JsonObject &data, const String &msgId) {
+    String userId = data["user_id"] | "";
+    if (userId.length() == 0) {
+        sendError(ERR_BAD_REQUEST, "missing user_id", msgId);
+        return;
+    }
+    if (state != STATE_WAIT_FINGER && state != STATE_IDLE) {
+        sendError(ERR_INTERNAL, "device busy", msgId);
+        return;
+    }
+
+    // 检查该用户是否已有副指纹
+    UserPermission existing;
+    // 通过遍历本地权限表检查（findPrimaryPermission 只查主指纹，这里需要查副指纹）
+    UserPermission tmpList[PERM_MAX_USERS];
+    int backupCount = Storage::listBackupFingerprints(tmpList, PERM_MAX_USERS);
+    uint32_t uidNum = Storage::userIdToNum(userId);
+    for (int i = 0; i < backupCount; i++) {
+        if (tmpList[i].user_id_num == uidNum) {
+            sendError(ERR_FP_BACKUP_EXISTS, "backup fingerprint already exists for this user", msgId);
+            return;
+        }
+    }
+
+    // 分配本地 AS608 槽位
+    int localId = Storage::allocLocalFpId();
+    if (localId < 0) {
+        sendError(ERR_FP_BACKUP_LIMIT, "no free AS608 slot for backup fingerprint", msgId);
+        return;
+    }
+
+    // 检查 AS608 该槽位是否已被占用（理论上 allocLocalFpId 已排除，但双重保险）
+    if (Fingerprint::templateExists(localId)) {
+        // 槽位有模板但权限表无记录：先删除残留模板
+        Fingerprint::deleteFingerprint(localId);
+        Debug::printf("[MSG] cleaned orphan template at slot %d before backup enroll\n", localId);
+    }
+
+    sendAck(msgId, "enrolling_backup");
+
+    // 走录入流程（标记 is_backup=true）
+    enrollFingerprintId = localId;
+    enrollUserId = userId;
+    enrollRequestMsgId = msgId;
+    enrollLastPhaseCode = "";
+    enrollIsBackup = true;
+
+    // 解析可选的权限参数（未提供则录入后继承主指纹权限）
+    // 权限在录入完成后由 update() 的 ENROLL_DONE_OK 分支写入
+
+    Fingerprint::enrollBegin(localId);
+    setState(STATE_ENROLLING);
+    Debug::printf("[MSG] start enroll BACKUP fingerprint: local_id=%d user=%s\n",
+                  localId, userId.c_str());
+
+    // 立即上报第一步提示
+    String prog = "{\"phase\":\"place_1\",\"step\":1,\"total\":6,"
+                  "\"hint\":\"请将手指按在指纹头上（副指纹录入 1/4）\","
+                  "\"fingerprint_id\":" + String(localId) +
+                  ",\"is_backup\":true}";
+    sendMessage("ENROLL_PROGRESS", prog, msgId);
+    enrollLastPhaseCode = "place_1";
+}
+
+// DELETE_BACKUP_FINGERPRINT: 删除指定用户的本机副指纹
+// data: {user_id}
+void MessageHandler::cmdDeleteBackupFingerprint(const JsonObject &data, const String &msgId) {
+    String userId = data["user_id"] | "";
+    if (userId.length() == 0) {
+        sendError(ERR_BAD_REQUEST, "missing user_id", msgId);
+        return;
+    }
+
+    // 查找该用户的副指纹记录以获取 AS608 槽位
+    UserPermission tmpList[PERM_MAX_USERS];
+    int backupCount = Storage::listBackupFingerprints(tmpList, PERM_MAX_USERS);
+    uint32_t uidNum = Storage::userIdToNum(userId);
+    int targetLocalId = -1;
+    for (int i = 0; i < backupCount; i++) {
+        if (tmpList[i].user_id_num == uidNum) {
+            targetLocalId = tmpList[i].local_fp_id;
+            break;
+        }
+    }
+    if (targetLocalId < 0) {
+        sendError(ERR_FP_BACKUP_NOT_FOUND, "no backup fingerprint for this user", msgId);
+        return;
+    }
+
+    // 从 AS608 删除模板
+    bool as608Ok = Fingerprint::deleteFingerprint(targetLocalId);
+    // 从本地权限表删除记录
+    bool storageOk = Storage::deleteBackupFingerprint(userId);
+
+    DeviceConfig cfg;
+    Storage::loadDeviceConfig(cfg);
+    cfg.fingerprint_count = Fingerprint::getFingerprintCount();
+    Storage::saveDeviceConfig(cfg);
+
+    String respData = "{\"user_id\":\"" + userId + "\"" +
+                      ",\"local_fp_id\":" + String(targetLocalId) +
+                      ",\"as608_deleted\":" + String(as608Ok ? "true" : "false") +
+                      ",\"storage_deleted\":" + String(storageOk ? "true" : "false") +
+                      ",\"result\":\"" + (storageOk ? "success" : "fail") + "\"}";
+    sendMessage("DELETE_BACKUP_FINGERPRINT_RESULT", respData, msgId);
+    sendAck(msgId, storageOk ? "backup_deleted" : "backup_delete_failed");
+    Debug::printf("[MSG] deleted backup fingerprint: user=%s local_id=%d\n",
+                  userId.c_str(), targetLocalId);
+}
+
+// BACKUP_FP_LIST_REQUEST: 上报本机所有副指纹清单
+void MessageHandler::cmdBackupFpListRequest(const String &msgId) {
+    UserPermission tmpList[PERM_MAX_USERS];
+    int count = Storage::listBackupFingerprints(tmpList, PERM_MAX_USERS);
+
+    String data = "{\"count\":" + String(count) + ",\"backups\":[";
+    for (int i = 0; i < count; i++) {
+        if (i > 0) data += ",";
+        data += "{\"user_id\":\"" + tmpList[i].user_id + "\"";
+        data += ",\"user_id_num\":" + String(tmpList[i].user_id_num);
+        data += ",\"local_fp_id\":" + String(tmpList[i].local_fp_id);
+        data += ",\"role\":" + String((int)tmpList[i].role);
+        data += ",\"lock_permissions\":{";
+        for (int j = 0; j < LOCK_COUNT; j++) {
+            if (j > 0) data += ",";
+            data += "\"lock_" + String(j) + "\":" + String(tmpList[i].lock_perm[j] ? "true" : "false");
+        }
+        data += "}}";
+    }
+    data += "]}";
+    sendMessage("BACKUP_FP_LIST", data, msgId);
+    sendAck(msgId, "backup_list_sent");
+    Debug::printf("[MSG] reported %d backup fingerprints\n", count);
+}
+
 void MessageHandler::cmdControlLock(const JsonObject &data, const String &msgId) {
     int lockId = data["lock_id"] | -1;
     String action = data["action"] | "open";
@@ -695,6 +1118,9 @@ void MessageHandler::cmdControlLock(const JsonObject &data, const String &msgId)
     }
     if (action == "open") {
         if (LockControl::openLock(lockId)) {
+            // Return the command result before Flash erase/write and NVS
+            // persistence.  Lock control ACK latency must not depend on log IO.
+            sendAck(msgId, action);
             Logger::log("remote", -1, lockId, "open", "success", "remote_control");
         } else {
             sendError(ERR_LOCK_HARDWARE, "lock open failed", msgId);
@@ -702,10 +1128,10 @@ void MessageHandler::cmdControlLock(const JsonObject &data, const String &msgId)
         }
     } else {
         LockControl::closeLock(lockId);
+        sendAck(msgId, action);
         Logger::log("remote", -1, lockId, "close", "success", "remote_control");
     }
     Debug::printf("[MSG] remote control lock %d %s\n", lockId, action.c_str());
-    sendAck(msgId, action);
 }
 
 void MessageHandler::cmdReadConfig(const String &msgId) {
@@ -766,6 +1192,10 @@ void MessageHandler::cmdReadStatus(const String &msgId) {
     data += "\"perm_version\":" + String(Storage::getPermissionVersion()) + ",";
     data += "\"mesh_layer\":" + String(MeshComm::getMeshLayer()) + ",";
     data += "\"child_count\":" + String(MeshComm::getChildCount()) + ",";
+    data += "\"free_heap\":" + String(ESP.getFreeHeap()) + ",";
+    data += "\"mesh_send_failures\":" + String(MeshComm::getSendFailureCount()) + ",";
+    data += "\"mesh_queue_full\":" + String(MeshComm::getQueueFullCount()) + ",";
+    data += "\"mesh_recoveries\":" + String(MeshComm::getRecoveryCount()) + ",";
     data += "\"work_mode\":\"" + String(Storage::loadWorkMode() == MODE_MESH ? "mesh" : "debug") + "\",";
     data += "\"time_synced\":" + String(Storage::isTimeSynced() ? "true" : "false");
     data += "}";
@@ -826,7 +1256,11 @@ void MessageHandler::cmdRegister(const String &msgId) {
     data += "\"is_root\":" + String(cfg.is_root ? "true" : "false") + ",";
     data += "\"firmware_version\":\"" FIRMWARE_VERSION "\",";
     data += "\"mesh_mac\":\"" + MeshComm::getMeshMac() + "\",";
-    data += "\"mesh_layer\":" + String(MeshComm::getMeshLayer());
+    data += "\"mesh_layer\":" + String(MeshComm::getMeshLayer()) + ",";
+    data += "\"free_heap\":" + String(ESP.getFreeHeap()) + ",";
+    data += "\"mesh_send_failures\":" + String(MeshComm::getSendFailureCount()) + ",";
+    data += "\"mesh_queue_full\":" + String(MeshComm::getQueueFullCount()) + ",";
+    data += "\"mesh_recoveries\":" + String(MeshComm::getRecoveryCount());
     data += "}";
     sendMessage("REGISTER_RESPONSE", data, msgId);
     Debug::println(F("[MSG] REGISTER query responded"));
@@ -888,7 +1322,7 @@ void MessageHandler::cmdSdQuery(const JsonObject &data, const String &msgId) {
     }
 
     if (!SdStorage::isReady()) {
-        sendError(ERR_INTERNAL, "sd card not ready", msgId);
+        sendError(ERR_SD_NOT_READY, "sd card not ready", msgId);
         return;
     }
 
@@ -923,7 +1357,7 @@ void MessageHandler::cmdSdSave(const JsonObject &data, const String &msgId) {
     }
 
     if (!SdStorage::isReady()) {
-        sendError(ERR_INTERNAL, "sd card not ready", msgId);
+        sendError(ERR_SD_NOT_READY, "sd card not ready", msgId);
         return;
     }
 
@@ -1007,7 +1441,7 @@ void MessageHandler::cmdUploadFpTemplate(const JsonObject &data, const String &m
     }
 
     if (!SdStorage::isReady()) {
-        sendError(ERR_INTERNAL, "sd card not ready", msgId);
+        sendError(ERR_SD_NOT_READY, "sd card not ready", msgId);
         return;
     }
 
@@ -1064,7 +1498,7 @@ void MessageHandler::cmdDownloadFpTemplate(const JsonObject &data, const String 
     }
 
     if (!SdStorage::isReady()) {
-        sendError(ERR_INTERNAL, "sd card not ready", msgId);
+        sendError(ERR_SD_NOT_READY, "sd card not ready", msgId);
         return;
     }
 
@@ -1124,7 +1558,7 @@ void MessageHandler::cmdDeleteFpTemplate(const JsonObject &data, const String &m
     }
 
     if (!SdStorage::isReady()) {
-        sendError(ERR_INTERNAL, "sd card not ready", msgId);
+        sendError(ERR_SD_NOT_READY, "sd card not ready", msgId);
         return;
     }
 

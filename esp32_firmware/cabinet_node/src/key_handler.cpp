@@ -1,6 +1,6 @@
 /**
  * key_handler.cpp - 5 路按键处理实现
- * Key1-4: 开锁键(GPIO 19,20,21,47), Key5: 取消键(GPIO 48)
+ * K1-K4 开锁: GPIO 47/48/45/39, K5 取消: GPIO 40
  * 上拉输入，按下为 LOW，含消抖和长按检测
  */
 #include "key_handler.h"

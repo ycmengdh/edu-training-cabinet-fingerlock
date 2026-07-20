@@ -39,8 +39,11 @@ namespace FingerprintLockManager
             }
         }
 
-        /// <summary>收到一行 JSON 消息事件</summary>
+        /// <summary>收到一行 JSON 消息事件（过渡兼容）</summary>
         public event Action<string>? LineReceived;
+
+        /// <summary>收到完整应用层负载字节</summary>
+        public event Action<byte[]>? PayloadReceived;
 
         /// <summary>客户端连接状态变化事件（参数为是否至少有一个连接）</summary>
         public event Action<bool>? ConnectionChanged;
@@ -91,8 +94,22 @@ namespace FingerprintLockManager
             }
         }
 
-        /// <summary>发送一条 JSON 消息（编码为二进制协议帧）</summary>
+        /// <summary>发送一条 JSON 消息（编码为二进制协议帧，过渡兼容）</summary>
         public bool Send(string jsonLine)
+        {
+            byte[]? frame = FrameCodec.Encode(jsonLine.TrimEnd('\n', '\r'));
+            return WriteFrameToAll(frame);
+        }
+
+        /// <summary>发送应用层负载字节（内部封帧）</summary>
+        public bool SendPayload(byte[] appPayload)
+        {
+            if (appPayload == null || appPayload.Length == 0) return false;
+            byte[]? frame = FrameCodec.Encode(appPayload);
+            return WriteFrameToAll(frame);
+        }
+
+        private bool WriteFrameToAll(byte[]? frame)
         {
             List<TcpClientState> snapshot;
             lock (_clientsLock)
@@ -104,8 +121,6 @@ namespace FingerprintLockManager
                 LastError = "尚无根节点连接到 TCP 服务端";
                 return false;
             }
-
-            byte[]? frame = FrameCodec.Encode(jsonLine.TrimEnd('\n', '\r'));
             if (frame == null) return false;
             bool anySuccess = false;
             foreach (var c in snapshot)
@@ -160,8 +175,19 @@ namespace FingerprintLockManager
                 {
                     int count = await state.Stream.ReadAsync(buffer, 0, buffer.Length, token);
                     if (count == 0) break;
-                    state.Decoder.Append(buffer, 0, count,
-                        json => LineReceived?.Invoke(json),
+                    state.Decoder.AppendBytes(buffer, 0, count,
+                        payload =>
+                        {
+                            PayloadReceived?.Invoke(payload);
+                            if (payload.Length > 0 && (payload[0] == (byte)'{' || payload[0] == (byte)'['))
+                            {
+                                try
+                                {
+                                    LineReceived?.Invoke(System.Text.Encoding.UTF8.GetString(payload));
+                                }
+                                catch { }
+                            }
+                        },
                         bytes => UnframedDataReceived?.Invoke(bytes));
                 }
             }
