@@ -9,6 +9,9 @@ namespace FingerprintLockManager
         private readonly DispatcherTimer _refreshTimer;
         private bool _loading;
 
+        private bool IsDirectUart => string.Equals(ConfigHelper.Current.LinkMode, "Uart",
+            StringComparison.OrdinalIgnoreCase);
+
         public DashboardPage()
         {
             InitializeComponent();
@@ -21,6 +24,7 @@ namespace FingerprintLockManager
         private async void OnLoaded(object sender, RoutedEventArgs e)
         {
             App.MeshBridge.ConnectionChanged += OnConnectionChanged;
+            App.MessageHandler.OnStatusResponse += OnStatusResponse;
             _refreshTimer.Start();
             await LoadSnapshotAsync();
         }
@@ -29,10 +33,17 @@ namespace FingerprintLockManager
         {
             _refreshTimer.Stop();
             App.MeshBridge.ConnectionChanged -= OnConnectionChanged;
+            App.MessageHandler.OnStatusResponse -= OnStatusResponse;
         }
 
         private void OnConnectionChanged(bool connected) =>
             Dispatcher.BeginInvoke(new Action(async () => await LoadSnapshotAsync()));
+
+        private void OnStatusResponse(string deviceId, string statusJson)
+        {
+            if (!IsDirectUart) return;
+            Dispatcher.BeginInvoke(new Action(ApplyDirectSnapshot));
+        }
 
         private async void RefreshButton_Click(object sender, RoutedEventArgs e) =>
             await LoadSnapshotAsync();
@@ -46,6 +57,18 @@ namespace FingerprintLockManager
             UpdateLinkMetric();
             try
             {
+                if (IsDirectUart)
+                {
+                    PageStatusText.Text = "正在读取当前柜机状态";
+                    DeviceClient? direct = GetDirectCabinet();
+                    if (direct != null)
+                        App.MeshBridge.Send(direct.DeviceId, Protocol.CmdReadStatus);
+                    await Task.Delay(180);
+                    ApplyDirectSnapshot();
+                    return;
+                }
+
+                ApplyNormalMetricLabels();
                 if (!App.SdStorageService.IsAvailable)
                     throw new RootDataUnavailableException("根节点数据服务尚未连接");
 
@@ -96,6 +119,70 @@ namespace FingerprintLockManager
             PopulateStudentBindMetric();
         }
 
+        private void ApplyDirectSnapshot()
+        {
+            DeviceClient? cabinet = GetDirectCabinet();
+            bool connected = cabinet?.IsOnline == true && App.MeshBridge.IsConnected;
+            DeviceRuntimeStatus status = cabinet?.Status ?? new DeviceRuntimeStatus();
+
+            LinkMetricLabel.Text = "柜机直连";
+            DeviceMetricLabel.Text = "当前柜机";
+            SyncMetricLabel.Text = "权限记录";
+            StorageMetricLabel.Text = "指纹数量";
+            StudentBindMetricLabel.Text = "柜门状态";
+
+            LinkStatusDot.Fill = FindResource(connected ? "SuccessBrush" : "DangerBrush")
+                as System.Windows.Media.Brush;
+            LinkValueText.Text = connected ? "已连接" : "已断开";
+            LinkDetailText.Text = string.IsNullOrWhiteSpace(ConfigHelper.Current.UartSerialPortName)
+                ? "柜机串口"
+                : ConfigHelper.Current.UartSerialPortName;
+
+            DeviceValueText.Text = connected ? "1 / 1" : "0 / 1";
+            DeviceDetailText.Text = cabinet == null
+                ? "等待柜机响应"
+                : string.IsNullOrWhiteSpace(cabinet.DeviceName)
+                    ? cabinet.DeviceId
+                    : $"{cabinet.DeviceName} · {cabinet.DeviceId}";
+            SyncValueText.Text = status.PermissionCount.ToString();
+            SyncDetailText.Text = $"权限版本 {status.PermissionVersion}";
+            StorageValueText.Text = status.FingerprintCount.ToString();
+            StorageDetailText.Text = "柜机内已录入指纹";
+
+            int openLocks = status.LockStatus?.Count(value => value != 0) ?? 0;
+            StudentBindValueText.Text = openLocks == 0 ? "全部关闭" : $"{openLocks} 路开启";
+            StudentBindDetailText.Text = $"运行时间 {status.UptimeText}";
+            PageStatusText.Text = connected
+                ? $"已直连 {cabinet?.DeviceId} · 应急维护模式"
+                : "柜机串口直连已断开";
+
+            AlertDataGrid.ItemsSource = null;
+            AlertCountText.Text = "应急模式";
+            try
+            {
+                RecentLogDataGrid.ItemsSource = LogDatabase.ReadAllUnlock()
+                    .OrderByDescending(log => log.CreateTime).Take(12).ToList();
+            }
+            catch
+            {
+                RecentLogDataGrid.ItemsSource = null;
+            }
+            PendingLogText.Text = "本机日志";
+            RefreshTimeText.Text = $"最近刷新 {DateTime.Now:yyyy-MM-dd HH:mm:ss}";
+        }
+
+        private static DeviceClient? GetDirectCabinet() => App.MeshBridge.GetOnlineDevices()
+            .FirstOrDefault(device => !DeviceService.IsTrueRoot(device));
+
+        private void ApplyNormalMetricLabels()
+        {
+            LinkMetricLabel.Text = "根节点链路";
+            DeviceMetricLabel.Text = "柜子在线";
+            SyncMetricLabel.Text = "权限一致";
+            StorageMetricLabel.Text = "根节点存储";
+            StudentBindMetricLabel.Text = "学生绑定";
+        }
+
         /// <summary>
         /// V2.7：统计已分配权限覆盖的学生数与总学生数。
         /// 教师仅统计本班学生（数据范围隔离）。
@@ -143,10 +230,12 @@ namespace FingerprintLockManager
             bool rootAvailable = App.SdStorageService.IsAvailable;
             LinkStatusDot.Fill = FindResource(connected ? "SuccessBrush" : "DangerBrush")
                 as System.Windows.Media.Brush;
-            LinkValueText.Text = rootAvailable ? "数据可用" : connected ? "等待根节点" : "未连接";
+            LinkValueText.Text = IsDirectUart
+                ? connected ? "已连接" : "未连接"
+                : rootAvailable ? "数据可用" : connected ? "等待根节点" : "未连接";
             LinkDetailText.Text = App.MeshBridge.CurrentType switch
             {
-                TransportType.UsbSerial => "USB 串口",
+                TransportType.UsbSerial => IsDirectUart ? "柜机串口直连" : "组网U盘连接",
                 TransportType.TcpClient => "TCP 客户端",
                 TransportType.TcpServer => "TCP 服务端",
                 _ => "链路未启动"

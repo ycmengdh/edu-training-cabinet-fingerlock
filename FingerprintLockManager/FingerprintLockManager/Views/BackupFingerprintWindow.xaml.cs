@@ -7,12 +7,37 @@ namespace FingerprintLockManager
     /// 流程：选择柜子+用户 -> 发送 ADD_BACKUP_FINGERPRINT -> 监听 ENROLL_PROGRESS ->
     ///       录入成功后弹窗二选一：①覆盖全局主指纹 ②仅作为本机备用指纹
     /// </summary>
-    public partial class BackupFingerprintWindow : Window
+    public partial class BackupFingerprintWindow : BorderlessWindow
     {
         public BackupFingerprintWindow()
         {
             InitializeComponent();
             LoadData();
+        }
+
+        public BackupFingerprintWindow(string? presetDeviceId, string? presetUserId = null)
+            : this()
+        {
+            SelectById(DeviceCombo, presetDeviceId);
+            SelectById(UserCombo, presetUserId);
+        }
+
+        private static void SelectById(System.Windows.Controls.ComboBox comboBox, string? id)
+        {
+            if (string.IsNullOrWhiteSpace(id)) return;
+            for (int index = 0; index < comboBox.Items.Count; index++)
+            {
+                object item = comboBox.Items[index];
+                string? itemId = item switch
+                {
+                    DeviceItem device => device.DeviceId,
+                    UserItem user => user.UserId,
+                    _ => null
+                };
+                if (!string.Equals(itemId, id, StringComparison.OrdinalIgnoreCase)) continue;
+                comboBox.SelectedIndex = index;
+                break;
+            }
         }
 
         private void LoadData()

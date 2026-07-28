@@ -13,11 +13,21 @@
 #include "protocol_frame.h"
 #include "message_hmac.h"
 #include "cmd_ids.h"
+#include "app_protocol.h"
 #include "mem_pool.h"
+#include <mbedtls/base64.h>
 #include <string.h>
+#include <stdlib.h>
 #ifdef ENABLE_SD_CARD
 #include "sd_storage.h"
 static void syncPermissionsToCabinet(const uint8_t *mac, const char *deviceId);
+static uint32_t composePermissionVersion(uint32_t usersVersion,
+                                         uint32_t permissionsVersion) {
+    uint32_t value = 2166136261U;
+    value = (value ^ usersVersion) * 16777619U;
+    value = (value ^ permissionsVersion) * 16777619U;
+    return value == 0 ? 1U : value;
+}
 #endif
 
 // Rebuild a legacy full JSON message so existing handlers keep working while
@@ -36,18 +46,29 @@ static String appViewToLegacyJson(const AppMessageView &view) {
         did[n] = '\0';
     }
 
-    String dataJson;
+    String dataJson = "{}";
     if (view.payload_len > 0 && view.payload != nullptr) {
-        // Prefer UTF-8 JSON object payload for complex cmds.
-        dataJson.reserve(view.payload_len + 1);
-        for (uint16_t i = 0; i < view.payload_len; i++) {
-            dataJson += (char)view.payload[i];
+        // Binary control payloads must be expanded before JSON dispatch.
+        if (view.cmd_id == CMD_TIME_SYNC && view.payload_len >= 4) {
+            uint32_t ts = rdU32(view.payload);
+            dataJson = "{\"timestamp\":" + String(ts) + "}";
+        } else if (view.cmd_id == CMD_CONTROL_LOCK) {
+            uint8_t lockId = 0, action = 0;
+            if (unpackControlLock(view.payload, view.payload_len, lockId, action)) {
+                dataJson = "{\"lock_id\":" + String(lockId) +
+                           ",\"action\":\"" + String(action == 1 ? "close" : "open") + "\"}";
+            }
+        } else {
+            // Prefer UTF-8 JSON object payload for complex cmds.
+            dataJson = "";
+            dataJson.reserve(view.payload_len + 1);
+            for (uint16_t i = 0; i < view.payload_len; i++) {
+                dataJson += (char)view.payload[i];
+            }
+            if (dataJson.length() == 0 || (dataJson[0] != '{' && dataJson[0] != '[')) {
+                dataJson = "{}";
+            }
         }
-        if (dataJson.length() == 0 || (dataJson[0] != '{' && dataJson[0] != '[')) {
-            dataJson = "{}";
-        }
-    } else {
-        dataJson = "{}";
     }
 
     String msgId = (view.msg_id != 0) ? String(view.msg_id) : String("");
@@ -98,7 +119,17 @@ void MessageHandler::handleMeshMessageApp(const uint8_t *fromMac, const uint8_t 
         return;
     }
 
-    // REGISTER and other side-effects: reuse JSON side-effect path with rebuilt msg.
+    // Only commands with Root-side effects go through the heavy JSON path.
+    // STATUS_RESPONSE / STATUS_REPORT / enroll results etc. are pure uplink
+    // forwards — converting them used to allocate a 16KB DynamicJsonDocument
+    // on every cabinet reply and stall the Mesh main loop.
+    if (view.cmd_id != CMD_REGISTER &&
+        view.cmd_id != CMD_LOG_REPORT &&
+        view.cmd_id != CMD_STATUS_REPORT &&
+        view.cmd_id != CMD_PERM_LOST) {
+        return;
+    }
+
     String legacy = appViewToLegacyJson(view);
     handleMeshMessage(fromMac, legacy);
 }
@@ -118,10 +149,17 @@ void MessageHandler::handleMeshMessage(const uint8_t *fromMac, const String &mes
     // 心跳必须形成双向闭环。Root 的 ACK 既证明下行可达，也让柜子能区分
     // “仍关联着父节点”和“Root 应用层确实能收发消息”。心跳不触碰 SD。
     if (strcmp(cmd, "HEARTBEAT") == 0) {
-        String ack = ProtocolFrame::buildMessage(
-            "HEARTBEAT_ACK", deviceId, "{\"result\":\"ok\"}",
-            String(doc["msg_id"] | ""));
-        if (!MeshComm::sendToNode(fromMac, ack)) {
+        // Binary HEARTBEAT_ACK (align with handleMeshMessageApp path).
+        uint16_t mid = (uint16_t)(doc["msg_id"] | 0);
+        uint8_t pl[16];
+        int pln = packAck(pl, (int)sizeof(pl), mid, 0, "ok");
+        if (pln < 0) pln = 0;
+        uint8_t out[160];
+        String rootMac = MeshComm::getMeshMac();
+        int n = appEncode(out, (int)sizeof(out), CMD_HEARTBEAT_ACK,
+                          mid == 0 ? appNextMsgId() : mid, 0, APP_FLAG_IS_ACK,
+                          deviceId, rootMac.c_str(), pl, (uint16_t)pln, 0);
+        if (n <= 0 || !MeshComm::sendToNodeApp(fromMac, out, (uint16_t)n)) {
             Debug::printf("[MSG] HEARTBEAT_ACK to %s failed\n", deviceId);
         }
         return;
@@ -129,137 +167,80 @@ void MessageHandler::handleMeshMessage(const uint8_t *fromMac, const String &mes
 
 #ifdef ENABLE_SD_CARD
     if (strcmp(cmd, "LOG_REPORT") == 0) {
-        // Access logs are runtime-only.  Acknowledge legacy cabinet batches
-        // so old firmware stops retrying, but do not write them to the SD card.
-        String ack = ProtocolFrame::buildMessage(
-            "LOG_REPORT_ACK", deviceId,
-            "{\"result\":\"success\"}",
-            String(doc["msg_id"] | ""));
-        MeshComm::sendToNode(fromMac, ack);
-    } else if (strcmp(cmd, "REGISTER") == 0) {
-        // 仅 REGISTER（新设备首次注册）写 SD 卡——这是数据确实更新的场景。
-        // 此前 HEARTBEAT(10s) + STATUS_REPORT(60s) 都触发 SD read+write 32KB
-        // JSON，长时间运行后 SD 卡 FATFS 累积卡顿，主循环阻塞几百毫秒，
-        // mesh_rx 队列塞满（8×1508B=12KB），Mesh 协议栈底层缓冲也满，
-        // 整个 Mesh 网络停摆——表现为"前面通讯正常，运行一段时间后就不行了"。
-        // HEARTBEAT 的 last_seen 由 MeshBridge 路由表 lastSeen 字段维护
-        // （MESH_ROUTE_TIMEOUT_MS=30s 过期），STATUS_REPORT 的实时状态
-        // 由上位机收到原始消息时直接处理，都不需要落 SD 卡。
-        String devicesJson;
-        DynamicJsonDocument devicesDoc(32768);
-        JsonArray devices = devicesDoc.to<JsonArray>();
-        if (SdStorage::readTable("devices", devicesJson) && devicesJson.length() > 0) {
-            devicesDoc.clear();
-            if (deserializeJson(devicesDoc, devicesJson)) {
-                devicesDoc.clear();
-                devices = devicesDoc.to<JsonArray>();
-            } else {
-                devices = devicesDoc.as<JsonArray>();
-            }
-        }
-
-        // 检查设备是否已存在且关键字段未变化——只在确实更新时才写 SD 卡
-        bool needWrite = false;
-        JsonObject record;
-        for (JsonObject candidate : devices) {
-            if (String((const char *)(candidate["device_id"] | "")) == deviceId) {
-                record = candidate;
-                break;
-            }
-        }
-        if (record.isNull()) {
-            // 新设备：创建记录并写 SD
-            record = devices.createNestedObject();
-            needWrite = true;
-        }
-        // 检查关键字段是否变化（device_name / mesh_mac / firmware_version）
-        String newName = doc["data"]["device_name"] | deviceId;
-        String newMac = MeshComm::macToString(fromMac);
-        String newFw = doc["data"].containsKey("firmware_version") ?
-                       String((const char *)doc["data"]["firmware_version"]) : String("");
-        String oldName = record["device_name"] | "";
-        String oldMac = record["mesh_mac"] | "";
-        String oldFw = record["firmware_version"] | "";
-        if (oldName != newName || oldMac != newMac || oldFw != newFw || !record["online"]) {
-            needWrite = true;
-        }
-        if (needWrite) {
-            record["device_id"] = deviceId;
-            record["device_name"] = newName;
-            record["is_root"] = false;
-            record["online"] = true;
-            record["last_seen"] = (uint32_t)time(nullptr);
-            record["mesh_mac"] = newMac;
-            if (newFw.length() > 0) {
-                record["firmware_version"] = newFw;
-            }
-
-            String output;
-            serializeJson(devices, output);
-            SdStorage::writeTable("devices", output);
-            Debug::printf("[MSG] device %s registered/updated in SD\n", deviceId);
+        // Access logs are runtime-only. Acknowledge so cabinets stop retrying.
+        uint16_t mid = (uint16_t)(doc["msg_id"] | 0);
+        const char *payload = "{\"result\":\"success\"}";
+        uint8_t out[192];
+        String rootMac = MeshComm::getMeshMac();
+        int n = appEncode(out, (int)sizeof(out), CMD_LOG_REPORT_ACK,
+                          mid == 0 ? appNextMsgId() : mid, 0, APP_FLAG_IS_ACK,
+                          deviceId, rootMac.c_str(),
+                          (const uint8_t *)payload, (uint16_t)strlen(payload), 0);
+        if (n > 0) {
+            MeshComm::sendToNodeApp(fromMac, out, (uint16_t)n);
         } else {
-            // 仅更新内存中 online 状态（不写 SD）
-            record["online"] = true;
-            record["last_seen"] = (uint32_t)time(nullptr);
+            MeshComm::sendToNode(fromMac, ProtocolFrame::buildMessage(
+                "LOG_REPORT_ACK", deviceId, "{\"result\":\"success\"}",
+                String(doc["msg_id"] | "")));
         }
+    } else if (strcmp(cmd, "REGISTER") == 0) {
+        // Presence is runtime state owned by MeshBridge's route table. Persisting
+        // online/offline transitions makes SD latency part of the heartbeat path
+        // and can stall every cabinet. Device business metadata remains managed
+        // by the existing host <-> SD synchronization flow.
 
-        syncPermissionsToCabinet(fromMac, deviceId);
+        // REGISTER is also a reconnect announcement, so it must be idempotent.
+        // Only cabinets behind the Root's authoritative version need a full
+        // permission transaction; equal versions must not rewrite cabinet Flash.
+        bool hasCabinetPermVersion = doc["data"].containsKey("perm_version");
+        uint32_t cabinetPermVersion = doc["data"]["perm_version"] | 0U;
+        uint32_t globalVersion, usersVersion, classesVersion, permissionsVersion;
+        uint32_t devicesVersion, fingerprintVersion, logsVersion;
+        SdStorage::readVersion(globalVersion, usersVersion, classesVersion,
+                               permissionsVersion, devicesVersion,
+                               fingerprintVersion, logsVersion);
+        uint32_t rootPermVersion = composePermissionVersion(
+            usersVersion, permissionsVersion);
+        if (!hasCabinetPermVersion || cabinetPermVersion != rootPermVersion) {
+            syncPermissionsToCabinet(fromMac, deviceId);
+        } else if (cabinetPermVersion == rootPermVersion) {
+            Debug::printf("[MSG] permission sync skipped for %s: version=%u current\n",
+                          deviceId, cabinetPermVersion);
+        }
 
         time_t currentTime = time(nullptr);
         if (currentTime > 1700000000) {
             String timeData = "{\"timestamp\":" + String((uint32_t)currentTime) + "}";
-            MeshComm::sendToNode(fromMac, ProtocolFrame::buildMessage(
-                "TIME_SYNC", deviceId, timeData));
+            uint8_t out[160];
+            String rootMac = MeshComm::getMeshMac();
+            int n = appEncode(out, (int)sizeof(out), CMD_TIME_SYNC, appNextMsgId(), 0, 0,
+                              deviceId, rootMac.c_str(),
+                              (const uint8_t *)timeData.c_str(), (uint16_t)timeData.length(), 0);
+            if (n > 0) {
+                MeshComm::sendToNodeApp(fromMac, out, (uint16_t)n);
+            } else {
+                MeshComm::sendToNode(fromMac, ProtocolFrame::buildMessage(
+                    "TIME_SYNC", deviceId, timeData));
+            }
         }
     } else if (strcmp(cmd, "STATUS_REPORT") == 0) {
         // STATUS_REPORT 不写 SD 卡：实时状态由上位机收到原始消息时直接处理，
-        // last_seen 由 MeshBridge 路由表 lastSeen 字段维护（30s 过期）。
-        // 设备掉线由 handleDeviceOffline 处理（只在状态变化时写 SD，已实现）。
+        // last_seen 由 MeshBridge 路由表 lastSeen 字段维护（7s 过期）。
+        // Device presence remains in the route table and is never persisted here.
         // 高频状态路径不输出日志，避免 USB 日志反压 Mesh 主循环。
     }
 #endif
 }
 
 void MessageHandler::handleDeviceOffline(const String &deviceId) {
-#ifdef ENABLE_SD_CARD
-    String devicesJson;
-    DynamicJsonDocument devicesDoc(32768);
-    if (!SdStorage::readTable("devices", devicesJson) ||
-        deserializeJson(devicesDoc, devicesJson) || !devicesDoc.is<JsonArray>()) {
-        Debug::printf("[MSG] cannot mark %s offline: devices table unavailable\n",
-                      deviceId.c_str());
-        return;
-    }
-
-    bool changed = false;
-    for (JsonObject record : devicesDoc.as<JsonArray>()) {
-        if (String((const char *)(record["device_id"] | "")) == deviceId) {
-            if (record["online"] | false) {
-                record["online"] = false;
-                record["offline_time"] = (uint32_t)time(nullptr);
-                changed = true;
-            }
-            break;
-        }
-    }
-    if (changed) {
-        String output;
-        serializeJson(devicesDoc, output);
-        if (!SdStorage::writeTable("devices", output)) {
-            Debug::printf("[MSG] failed to persist offline state for %s\n", deviceId.c_str());
-        }
-    }
-#else
     (void)deviceId;
-#endif
 }
 
 #ifdef ENABLE_SD_CARD
 static bool isAllowedTable(const String &table) {
     return table == "version" || table == "users" || table == "classes" ||
            table == "permissions" || table == "role_permissions" ||
-           table == "devices" || table == "logs";
+           table == "devices" || table == "fingerprints" || table == "logs";
 }
 
 static uint32_t getTableVersion(const String &table) {
@@ -272,11 +253,133 @@ static uint32_t getTableVersion(const String &table) {
     if (table == "classes") return classesVersion;
     if (table == "permissions" || table == "role_permissions") return permissionsVersion;
     if (table == "devices") return devicesVersion;
+    if (table == "fingerprints") return fingerprintVersion;
     if (table == "logs") return logsVersion;
     return globalVersion;
 }
 
-static void syncPermissionsToCabinet(const uint8_t *mac, const char *deviceId) {
+// Deferred permission sync queue — avoids deep stack + long blocking on REGISTER.
+// Documents live on heap so loopTask stack stays shallow.
+struct PendingPermSync {
+    uint8_t mac[6];
+    char deviceId[APP_DEVICE_ID_MAX + 1];
+    bool active;
+};
+
+static PendingPermSync s_permQueue[MESH_MAX_NODE];
+static uint8_t s_permQHead = 0;
+static uint8_t s_permQTail = 0;
+static uint8_t s_permQCount = 0;
+
+static DynamicJsonDocument *s_usersDoc = nullptr;
+static DynamicJsonDocument *s_rolesDoc = nullptr;
+static DynamicJsonDocument *s_overridesDoc = nullptr;
+static uint8_t s_syncMac[6];
+static char s_syncDeviceId[APP_DEVICE_ID_MAX + 1];
+static uint32_t s_syncVersion = 0;
+static int s_syncTotal = 0;
+static int s_syncSequence = 0;
+static int s_syncUserIndex = 0;
+static uint8_t s_syncPhase = 0; // 0 idle, 1 begin, 2 rows, 3 commit
+static unsigned long s_syncNextMs = 0;
+static unsigned long s_syncNotBeforeMs = 0;
+static bool s_syncAllSent = true;
+static bool s_permissionDataDirty = false;
+static unsigned long s_permissionDataChangedAt = 0;
+
+static bool queuePermissionSync(const uint8_t *mac, const char *deviceId) {
+    if (mac == nullptr || deviceId == nullptr || deviceId[0] == '\0') return false;
+    if (s_syncPhase != 0 &&
+        strncmp(s_syncDeviceId, deviceId, APP_DEVICE_ID_MAX) == 0) {
+        memcpy(s_syncMac, mac, 6);
+        return true;
+    }
+    for (uint8_t i = 0; i < MESH_MAX_NODE; i++) {
+        if (s_permQueue[i].active &&
+            strncmp(s_permQueue[i].deviceId, deviceId, APP_DEVICE_ID_MAX) == 0) {
+            memcpy(s_permQueue[i].mac, mac, 6);
+            return true;
+        }
+    }
+    if (s_permQCount >= MESH_MAX_NODE) {
+        Debug::printf("[MSG] permission sync queue full, drop %s\n", deviceId);
+        return false;
+    }
+    PendingPermSync &slot = s_permQueue[s_permQTail];
+    memset(&slot, 0, sizeof(slot));
+    memcpy(slot.mac, mac, 6);
+    strncpy(slot.deviceId, deviceId, APP_DEVICE_ID_MAX);
+    slot.deviceId[APP_DEVICE_ID_MAX] = '\0';
+    slot.active = true;
+    s_permQTail = (uint8_t)((s_permQTail + 1) % MESH_MAX_NODE);
+    s_permQCount++;
+    return true;
+}
+
+static void schedulePermissionSyncAfterDataChange(const String &table) {
+    if (table != "users" && table != "permissions" &&
+        table != "role_permissions") return;
+    s_permissionDataDirty = true;
+    s_permissionDataChangedAt = millis();
+}
+
+static void queuePermissionSyncForOnlineCabinets() {
+    int known = MeshBridge::getRouteKnownCount();
+    int queued = 0;
+    for (int index = 0; index < known; index++) {
+        char deviceId[APP_DEVICE_ID_MAX + 1];
+        uint8_t mac[6];
+        if (!MeshBridge::getRouteDeviceId(index, deviceId, sizeof(deviceId)) ||
+            !MeshBridge::lookupRoute(String(deviceId), mac)) continue;
+        if (queuePermissionSync(mac, deviceId)) queued++;
+    }
+    Debug::printf("[MSG] permission data changed: queued %d online cabinets\n", queued);
+}
+
+static bool sendCabinetApp(const uint8_t *mac, const char *deviceId,
+                           uint16_t cmdId, const String &dataObj) {
+    uint8_t *out = MemPool::meshTxScratch();
+    size_t cap = MemPool::meshTxScratchSize();
+    if (out == nullptr || cap < 64) return false;
+    String rootMac = MeshComm::getMeshMac();
+    int n = appEncode(out, (int)cap, cmdId, appNextMsgId(), 0, 0,
+                      deviceId, rootMac.c_str(),
+                      (const uint8_t *)dataObj.c_str(), (uint16_t)dataObj.length(), 0);
+    if (n <= 0) return false;
+    return MeshComm::sendToNodeApp(mac, out, (uint16_t)n);
+}
+
+static void freeSyncDocs() {
+    if (s_usersDoc) { delete s_usersDoc; s_usersDoc = nullptr; }
+    if (s_rolesDoc) { delete s_rolesDoc; s_rolesDoc = nullptr; }
+    if (s_overridesDoc) { delete s_overridesDoc; s_overridesDoc = nullptr; }
+}
+
+static bool startNextPermissionSync() {
+    if (s_syncPhase != 0) return false;
+    if (s_permQCount == 0) return false;
+    if ((int32_t)(millis() - s_syncNotBeforeMs) < 0) return false;
+
+    PendingPermSync slot = s_permQueue[s_permQHead];
+    s_permQueue[s_permQHead].active = false;
+    s_permQHead = (uint8_t)((s_permQHead + 1) % MESH_MAX_NODE);
+    s_permQCount--;
+    if (!slot.active) return false;
+
+    memcpy(s_syncMac, slot.mac, 6);
+    strncpy(s_syncDeviceId, slot.deviceId, APP_DEVICE_ID_MAX);
+    s_syncDeviceId[APP_DEVICE_ID_MAX] = '\0';
+
+    freeSyncDocs();
+    s_usersDoc = new DynamicJsonDocument(24576);
+    s_rolesDoc = new DynamicJsonDocument(4096);
+    s_overridesDoc = new DynamicJsonDocument(12288);
+    if (!s_usersDoc || !s_rolesDoc || !s_overridesDoc) {
+        freeSyncDocs();
+        Debug::printf("[MSG] permission sync to %s aborted: OOM\n", s_syncDeviceId);
+        return false;
+    }
+
     uint32_t globalVersion, usersVersion, classesVersion, permissionsVersion;
     uint32_t devicesVersion, fingerprintVersion, logsVersion;
     SdStorage::readVersion(globalVersion, usersVersion, classesVersion,
@@ -284,116 +387,158 @@ static void syncPermissionsToCabinet(const uint8_t *mac, const char *deviceId) {
                             fingerprintVersion, logsVersion);
 
     String usersJson, roleJson, permissionsJson;
-    DynamicJsonDocument usersDoc(32768);
-    DynamicJsonDocument rolesDoc(8192);
-    DynamicJsonDocument overridesDoc(16384);
     if (!SdStorage::readTable("users", usersJson) ||
         !SdStorage::readTable("role_permissions", roleJson) ||
         !SdStorage::readTable("permissions", permissionsJson) ||
-        deserializeJson(usersDoc, usersJson) || !usersDoc.is<JsonArray>() ||
-        deserializeJson(rolesDoc, roleJson) || !rolesDoc.is<JsonArray>() ||
-        deserializeJson(overridesDoc, permissionsJson) || !overridesDoc.is<JsonArray>()) {
-        Debug::printf("[MSG] permission sync to %s aborted: root data unavailable\n", deviceId);
-        return;
+        deserializeJson(*s_usersDoc, usersJson) || !s_usersDoc->is<JsonArray>() ||
+        deserializeJson(*s_rolesDoc, roleJson) || !s_rolesDoc->is<JsonArray>() ||
+        deserializeJson(*s_overridesDoc, permissionsJson) || !s_overridesDoc->is<JsonArray>()) {
+        freeSyncDocs();
+        Debug::printf("[MSG] permission sync to %s aborted: root data unavailable\n",
+                      s_syncDeviceId);
+        return false;
     }
 
-    JsonArray users = usersDoc.as<JsonArray>();
-    JsonArray roles = rolesDoc.as<JsonArray>();
-    JsonArray overrides = overridesDoc.as<JsonArray>();
     int total = 0;
-    for (JsonObject user : users) {
+    for (JsonObject user : s_usersDoc->as<JsonArray>()) {
         int fingerprintId = user["fingerprint_id"] | -1;
         const char *userId = user["user_id"] | "";
         bool enabled = user["enabled"] | true;
         if (enabled && fingerprintId >= 0 && strlen(userId) > 0) total++;
     }
     if (total > PERM_MAX_USERS) {
+        freeSyncDocs();
         Debug::printf("[MSG] permission sync to %s aborted: %d users exceed limit\n",
-                      deviceId, total);
+                      s_syncDeviceId, total);
+        return false;
+    }
+
+    s_syncVersion = composePermissionVersion(usersVersion, permissionsVersion);
+    s_syncTotal = total;
+    s_syncSequence = 0;
+    s_syncUserIndex = 0;
+    s_syncAllSent = true;
+    s_syncPhase = 1;
+    s_syncNextMs = millis();
+    return true;
+}
+
+static void processPermissionSyncStep() {
+    if (s_syncPhase == 0) {
+        startNextPermissionSync();
+        return;
+    }
+    unsigned long now = millis();
+    if (now < s_syncNextMs) return;
+
+    if (s_syncPhase == 1) {
+        String beginData = "{\"version\":" + String(s_syncVersion) +
+                           ",\"total\":" + String(s_syncTotal) + "}";
+        s_syncAllSent = sendCabinetApp(s_syncMac, s_syncDeviceId,
+                                       CMD_BEGIN_PERMISSION_SYNC, beginData);
+        s_syncPhase = s_syncAllSent ? 2 : 0;
+        s_syncNextMs = now + PERM_SYNC_INTER_ROW_MS;
+        if (!s_syncAllSent) {
+            freeSyncDocs();
+            Debug::printf("[MSG] permission transaction to %s: begin failed\n",
+                          s_syncDeviceId);
+        }
         return;
     }
 
-    // Helper: unicast one binary app message with JSON data payload to a cabinet.
-    auto sendBin = [&](uint16_t cmdId, const String &dataObj) -> bool {
-        uint8_t out[1400];
-        String rootMac = MeshComm::getMeshMac();
-        // device_id=目标柜逻辑ID；source_id=根节点 MAC
-        int n = appEncode(out, (int)sizeof(out), cmdId, appNextMsgId(), 0, 0,
-                          deviceId, rootMac.c_str(),
-                          (const uint8_t *)dataObj.c_str(), (uint16_t)dataObj.length(), 0);
-        if (n <= 0) return false;
-        return MeshComm::sendToNodeApp(mac, out, (uint16_t)n);
-    };
-
-    // Pace unicast rows so 40-cabinet REGISTER storms cannot flood Mesh TX.
-    // BEGIN + N×SYNC + COMMIT; inter-row delay from config_common.h.
-    String beginData = "{\"version\":" + String(globalVersion) +
-                       ",\"total\":" + String(total) + "}";
-    bool allSent = sendBin(CMD_BEGIN_PERMISSION_SYNC, beginData);
-    delay(PERM_SYNC_INTER_ROW_MS);
-
-    int sequence = 0;
-    for (JsonObject user : users) {
-        if (!allSent) break;
-        int fingerprintId = user["fingerprint_id"] | -1;
-        String userId = user["user_id"] | "";
-        bool enabled = user["enabled"] | true;
-        if (!enabled || fingerprintId < 0 || userId.length() == 0) continue;
-
-        const char *role = user["role"] | "student";
-        bool lockPermissions[4] = {false, false, false, false};
-        for (JsonObject roleItem : roles) {
-            if (String((const char *)(roleItem["role"] | "")) == role) {
-                lockPermissions[0] = roleItem["lock_0"] | false;
-                lockPermissions[1] = roleItem["lock_1"] | false;
-                lockPermissions[2] = roleItem["lock_2"] | false;
-                lockPermissions[3] = roleItem["lock_3"] | false;
-                break;
-            }
+    if (s_syncPhase == 2) {
+        if (!s_usersDoc || !s_rolesDoc || !s_overridesDoc) {
+            s_syncPhase = 0;
+            return;
         }
-        for (JsonObject overrideItem : overrides) {
-            if (String((const char *)(overrideItem["user_id"] | "")) != userId) continue;
-            int lockId = overrideItem["lock_id"] | -1;
-            if (lockId >= 0 && lockId < LOCK_COUNT) {
-                lockPermissions[lockId] = overrideItem["has_access"] | false;
+        JsonArray users = s_usersDoc->as<JsonArray>();
+        JsonArray roles = s_rolesDoc->as<JsonArray>();
+        JsonArray overrides = s_overridesDoc->as<JsonArray>();
+        int userCount = (int)users.size();
+
+        while (s_syncUserIndex < userCount) {
+            JsonObject user = users[s_syncUserIndex++];
+            int fingerprintId = user["fingerprint_id"] | -1;
+            String userId = user["user_id"] | "";
+            bool enabled = user["enabled"] | true;
+            if (!enabled || fingerprintId < 0 || userId.length() == 0) continue;
+
+            const char *role = user["role"] | "student";
+            bool lockPermissions[4] = {false, false, false, false};
+            for (JsonObject roleItem : roles) {
+                if (String((const char *)(roleItem["role"] | "")) == role) {
+                    lockPermissions[0] = roleItem["lock_0"] | false;
+                    lockPermissions[1] = roleItem["lock_1"] | false;
+                    lockPermissions[2] = roleItem["lock_2"] | false;
+                    lockPermissions[3] = roleItem["lock_3"] | false;
+                    break;
+                }
             }
+            for (JsonObject overrideItem : overrides) {
+                if (String((const char *)(overrideItem["user_id"] | "")) != userId) continue;
+                int lockId = overrideItem["lock_id"] | -1;
+                if (lockId >= 0 && lockId < LOCK_COUNT) {
+                    lockPermissions[lockId] = overrideItem["has_access"] | false;
+                }
+            }
+            if (strcmp(role, "admin") != 0) lockPermissions[0] = false;
+
+            int roleCode = strcmp(role, "admin") == 0 ? (int)ROLE_ADMIN :
+                           (strcmp(role, "teacher") == 0 ? (int)ROLE_TEACHER : (int)ROLE_STUDENT);
+            DynamicJsonDocument permissionDoc(768);
+            permissionDoc["version"] = s_syncVersion;
+            permissionDoc["total"] = s_syncTotal;
+            permissionDoc["sequence"] = s_syncSequence++;
+            permissionDoc["fingerprint_id"] = fingerprintId;
+            permissionDoc["user_id"] = userId;
+            permissionDoc["name"] = user["name"] | "";
+            permissionDoc["role"] = roleCode;
+            JsonObject lockObject = permissionDoc.createNestedObject("lock_permissions");
+            lockObject["lock_0"] = lockPermissions[0];
+            lockObject["lock_1"] = lockPermissions[1];
+            lockObject["lock_2"] = lockPermissions[2];
+            lockObject["lock_3"] = lockPermissions[3];
+            String data;
+            serializeJson(permissionDoc, data);
+            s_syncAllSent = sendCabinetApp(s_syncMac, s_syncDeviceId,
+                                           CMD_SYNC_PERMISSION, data) && s_syncAllSent;
+            s_syncNextMs = now + PERM_SYNC_INTER_ROW_MS;
+            if (!s_syncAllSent) {
+                freeSyncDocs();
+                s_syncPhase = 0;
+                Debug::printf("[MSG] permission transaction to %s: row send failed\n",
+                              s_syncDeviceId);
+            }
+            return; // one row per step
         }
 
-        // Defense in depth: malformed or manually edited root data must not
-        // grant the system lock to a teacher or student.
-        if (strcmp(role, "admin") != 0) lockPermissions[0] = false;
-
-        // Compact JSON row — avoids nested DynamicJsonDocument per user when possible.
-        // Keep ArduinoJson for name/user_id escaping safety.
-        DynamicJsonDocument permissionDoc(768);
-        permissionDoc["version"] = globalVersion;
-        permissionDoc["total"] = total;
-        permissionDoc["sequence"] = sequence++;
-        permissionDoc["fingerprint_id"] = fingerprintId;
-        permissionDoc["user_id"] = userId;
-        permissionDoc["name"] = user["name"] | "";
-        permissionDoc["role"] = strcmp(role, "admin") == 0 ? (int)ROLE_ADMIN :
-                                  (strcmp(role, "teacher") == 0 ? (int)ROLE_TEACHER : (int)ROLE_STUDENT);
-        JsonObject lockObject = permissionDoc.createNestedObject("lock_permissions");
-        lockObject["lock_0"] = lockPermissions[0];
-        lockObject["lock_1"] = lockPermissions[1];
-        lockObject["lock_2"] = lockPermissions[2];
-        lockObject["lock_3"] = lockPermissions[3];
-        String data;
-        serializeJson(permissionDoc, data);
-        allSent = sendBin(CMD_SYNC_PERMISSION, data) && allSent;
-        delay(PERM_SYNC_INTER_ROW_MS);
-        yield();
+        s_syncPhase = 3;
+        s_syncNextMs = now + PERM_SYNC_INTER_ROW_MS;
+        return;
     }
 
-    if (allSent) {
-        delay(PERM_SYNC_INTER_ROW_MS);
-        String commitData = "{\"version\":" + String(globalVersion) +
-                            ",\"total\":" + String(total) + "}";
-        allSent = sendBin(CMD_COMMIT_PERMISSION_SYNC, commitData);
+    if (s_syncPhase == 3) {
+        if (s_syncAllSent) {
+            String commitData = "{\"version\":" + String(s_syncVersion) +
+                                ",\"total\":" + String(s_syncTotal) + "}";
+            s_syncAllSent = sendCabinetApp(s_syncMac, s_syncDeviceId,
+                                           CMD_COMMIT_PERMISSION_SYNC, commitData);
+        }
+        Debug::printf("[MSG] permission transaction to %s: %d records, version=%u, %s\n",
+                      s_syncDeviceId, s_syncTotal, s_syncVersion,
+                      s_syncAllSent ? "sent" : "aborted");
+        freeSyncDocs();
+        s_syncPhase = 0;
+        s_syncNotBeforeMs = now + PERM_SYNC_INTER_NODE_MS;
+        return;
     }
-    Debug::printf("[MSG] permission transaction to %s: %d records, version=%u, %s\n",
-                  deviceId, total, globalVersion, allSent ? "sent" : "aborted");
+}
+
+static void syncPermissionsToCabinet(const uint8_t *mac, const char *deviceId) {
+    // Queue only — heavy work runs in MessageHandler::update() with shallow stack.
+    if (queuePermissionSync(mac, deviceId)) {
+        Debug::printf("[MSG] permission sync queued for %s\n", deviceId);
+    }
 }
 #endif
 
@@ -421,28 +566,41 @@ bool MessageHandler::sendMessage(const String &cmd, const String &dataJson,
         if (cmdId == CMD_ERROR) flags |= APP_FLAG_IS_ERROR;
 
         const String &data = dataJson.length() > 0 ? dataJson : String("{}");
-        if (data.length() <= APP_MAX_PAYLOAD) {
+        // Uplink allows larger app payloads (A5 frame fragments). Prefer binary always.
+        if (data.length() <= APP_MAX_PAYLOAD_FRAME) {
+            int need = (int)(APP_ENVELOPE_MIN + data.length() + 32);
             uint8_t *scratch = MemPool::meshTxScratch();
             size_t scratchSize = MemPool::meshTxScratchSize();
-            // Prefer a larger buffer for SD responses that still fit one frame.
-            uint8_t local[1600];
             uint8_t *out = scratch;
             int outSize = (int)scratchSize;
-            if (out == nullptr || outSize < (int)(APP_ENVELOPE_MIN + data.length() + 32)) {
-                out = local;
-                outSize = (int)sizeof(local);
+            uint8_t *heapOut = nullptr;
+            if (out == nullptr || outSize < need) {
+                heapOut = (uint8_t *)malloc((size_t)need);
+                out = heapOut;
+                outSize = need;
             }
-            String selfMac = MeshComm::getMeshMac();
-            int n = appEncode(out, outSize, cmdId, mid, 0, flags,
-                              cfg.device_id.c_str(), selfMac.c_str(),
-                              (const uint8_t *)data.c_str(), (uint16_t)data.length(), 0);
-            if (n > 0) return MeshBridge::sendToUplinkBytes(out, (uint16_t)n);
+            if (out != nullptr) {
+                String selfMac = MeshComm::getMeshMac();
+                int n = appEncode(out, outSize, cmdId, mid, 0, flags,
+                                  cfg.device_id.c_str(), selfMac.c_str(),
+                                  (const uint8_t *)data.c_str(), (uint16_t)data.length(), 0);
+                bool ok = false;
+                if (n > 0) ok = MeshBridge::sendToUplinkBytes(out, (uint16_t)n);
+                if (heapOut) free(heapOut);
+                if (ok) return true;
+            } else if (heapOut) {
+                free(heapOut);
+            }
+        } else {
+            Debug::printf("[MSG] uplink payload too large cmd=%s len=%u (use PART)\n",
+                          cmd.c_str(), (unsigned)data.length());
+            return false;
         }
     }
 
-    // Legacy full JSON fallback (unknown cmd or oversized single payload)
-    String json = ProtocolFrame::buildMessage(cmd, cfg.device_id, dataJson, msgId);
-    return MeshBridge::sendToUplink(json);
+    // Unknown cmd: do not emit full JSON.
+    Debug::printf("[MSG] unknown/unencodable cmd '%s' dropped\n", cmd.c_str());
+    return false;
 }
 
 void MessageHandler::sendAck(const String &msgId, const String &result) {
@@ -488,12 +646,20 @@ void MessageHandler::sendError(ErrorCode code, const String &message,
 }
 
 void MessageHandler::update() {
-    // Root node has no state machine to update (no fingerprint/lock)
+#ifdef ENABLE_SD_CARD
+    if (s_permissionDataDirty && millis() - s_permissionDataChangedAt >= 1000 &&
+        s_syncPhase == 0 && s_permQCount == 0) {
+        s_permissionDataDirty = false;
+        queuePermissionSyncForOnlineCabinets();
+    }
+    // Drain deferred permission sync (one step / loop to keep stack shallow).
+    processPermissionSyncStep();
+#endif
 }
 
 // ====== Command dispatch ======
 void MessageHandler::handleIncoming(const String &message) {
-    DynamicJsonDocument doc(65536);
+    DynamicJsonDocument doc(49152);
     DeserializationError err = deserializeJson(doc, message);
     if (err) {
         Debug::printf("[MSG] JSON parse failed: %s\n", err.c_str());
@@ -599,8 +765,19 @@ void MessageHandler::cmdTimeSync(const JsonObject &data, const String &msgId) {
         Debug::printf("[MSG] time synced: %u\n", timestamp);
 
         String timeData = "{\"timestamp\":" + String(timestamp) + "}";
-        int propagated = MeshBridge::broadcastToCabinets(
-            ProtocolFrame::buildMessage("TIME_SYNC", "", timeData));
+        // Prefer binary TIME_SYNC envelope for cabinets; JSON fallback if encode fails.
+        int propagated = 0;
+        uint8_t out[160];
+        String rootMac = MeshComm::getMeshMac();
+        int n = appEncode(out, (int)sizeof(out), CMD_TIME_SYNC, appNextMsgId(), 0,
+                          APP_FLAG_BROADCAST, "", rootMac.c_str(),
+                          (const uint8_t *)timeData.c_str(), (uint16_t)timeData.length(), 0);
+        if (n > 0) {
+            propagated = MeshBridge::broadcastToCabinetsApp(out, (uint16_t)n);
+        } else {
+            propagated = MeshBridge::broadcastToCabinets(
+                ProtocolFrame::buildMessage("TIME_SYNC", "", timeData));
+        }
         Debug::printf("[MSG] time propagated to %d cabinets\n", propagated);
         sendAck(msgId, "time_synced");
     } else {
@@ -654,6 +831,8 @@ void MessageHandler::cmdReadStatus(const String &msgId) {
     data += "\"child_count\":" + String(MeshComm::getChildCount()) + ",";
     data += "\"route_count\":" + String(MeshBridge::getRouteCount()) + ",";
     data += "\"uplink_connected\":" + String(MeshBridge::isUplinkConnected() ? "true" : "false") + ",";
+    data += "\"mesh_link_rssi\":" + String(MeshComm::getLinkRssi()) + ",";
+    data += "\"mesh_assoc_expire\":" + String(MeshComm::getApAssocExpireSeconds()) + ",";
     data += "\"work_mode\":\"" + String(Storage::loadWorkMode() == MODE_MESH ? "mesh" : "debug") + "\",";
 #ifdef ENABLE_SD_CARD
     data += "\"sd_ready\":" + String(SdStorage::isReady() ? "true" : "false") + ",";
@@ -767,10 +946,25 @@ void MessageHandler::cmdSdQuery(const JsonObject &data, const String &msgId) {
         return;
     }
 
+    // Missing/empty tables are valid business state (e.g. classes=[]).
+    // Always answer with a JSON array so host SD->business.db pull can proceed.
     String outJson;
-    if (!SdStorage::readTable(table, outJson)) {
-        sendError(ERR_NOT_FOUND, "table not found or empty", msgId);
-        return;
+    if (!SdStorage::readTable(table, outJson) || outJson.length() == 0) {
+        outJson = "[]";
+        Debug::printf("[MSG] SD_QUERY %s: empty/missing -> []\n", table.c_str());
+    } else {
+        char first = 0;
+        for (unsigned i = 0; i < outJson.length(); i++) {
+            char ch = outJson[i];
+            if (ch != ' ' && ch != '\t' && ch != '\r' && ch != '\n') {
+                first = ch;
+                break;
+            }
+        }
+        if (first != '[' && first != '{') {
+            outJson = "[]";
+            Debug::printf("[MSG] SD_QUERY %s: non-json content -> []\n", table.c_str());
+        }
     }
 
     String response = "{\"table\":\"" + table + "\",\"version\":";
@@ -794,8 +988,89 @@ void MessageHandler::cmdSdSave(const JsonObject &data, const String &msgId) {
     uint32_t baseVersion = data["base_version"] | 0;
     bool enforceVersion = data["enforce_version"] | false;
 
-    if (!isAllowedTable(table) || json.length() == 0) {
-        sendError(ERR_BAD_REQUEST, "missing table or json", msgId);
+    if (!isAllowedTable(table)) {
+        sendError(ERR_BAD_REQUEST, "table is not allowed", msgId);
+        return;
+    }
+
+    bool chunked = data.containsKey("chunk_base64");
+    String uploadId = data["upload_id"] | "";
+    uint32_t partIndex = data["part_index"] | 0;
+    uint32_t partTotal = data["part_total"] | 0;
+    uint32_t totalBytes = data["total_bytes"] | 0;
+    String chunkBase64 = data["chunk_base64"] | "";
+
+    if (chunked) {
+        if (uploadId.length() == 0 || uploadId.length() > 40 ||
+            partTotal == 0 || partIndex >= partTotal || totalBytes == 0 ||
+            chunkBase64.length() == 0 || chunkBase64.length() > 3600) {
+            String bad = "{\"table\":\"" + table +
+                         "\",\"result\":\"fail\",\"error\":\"invalid_chunk\"}";
+            sendMessage("SD_SAVE_RESPONSE", bad, msgId);
+            return;
+        }
+
+        bool knownChunk = SdStorage::isTableUploadChunkKnown(
+            table, uploadId, partIndex, partTotal);
+        if (!knownChunk && (enforceVersion || baseVersion > 0)) {
+            uint32_t currentVer = getTableVersion(table);
+            if (currentVer != baseVersion) {
+                String conflict = "{\"error\":\"version_conflict\",\"current_version\":";
+                conflict += String(currentVer);
+                conflict += ",\"base_version\":" + String(baseVersion) + "}";
+                sendMessage("SD_SAVE_RESPONSE", conflict, msgId);
+                Debug::printf("[MSG] SD_SAVE %s chunk version conflict: base=%u current=%u\n",
+                              table.c_str(), baseVersion, currentVer);
+                return;
+            }
+        }
+
+        size_t decodedCapacity = (chunkBase64.length() / 4U) * 3U + 3U;
+        uint8_t *decoded = (uint8_t *)malloc(decodedCapacity);
+        size_t decodedLength = 0;
+        int decodeResult = decoded == nullptr ? -1 : mbedtls_base64_decode(
+            decoded, decodedCapacity, &decodedLength,
+            (const unsigned char *)chunkBase64.c_str(), chunkBase64.length());
+        if (decodeResult != 0 || decodedLength == 0) {
+            if (decoded) free(decoded);
+            String bad = "{\"table\":\"" + table +
+                         "\",\"result\":\"fail\",\"error\":\"base64_decode_failed\"}";
+            sendMessage("SD_SAVE_RESPONSE", bad, msgId);
+            return;
+        }
+
+        uint32_t expectedPart = 0;
+        TableUploadChunkResult chunkResult = SdStorage::writeTableChunk(
+            table, uploadId, partIndex, partTotal, totalBytes,
+            decoded, decodedLength, expectedPart);
+        free(decoded);
+
+        String response = "{\"table\":\"" + table + "\",\"upload_id\":\"" +
+                          uploadId + "\",\"part_index\":" + String(partIndex) +
+                          ",\"part_total\":" + String(partTotal);
+        if (chunkResult == TableUploadChunkResult::Complete) {
+            response += ",\"result\":\"success\",\"version\":";
+            response += String(getTableVersion(table));
+            schedulePermissionSyncAfterDataChange(table);
+        } else if (chunkResult == TableUploadChunkResult::Accepted ||
+                   chunkResult == TableUploadChunkResult::Duplicate) {
+            response += ",\"result\":\"part_ok\",\"expected_part\":";
+            response += String(expectedPart);
+        } else if (chunkResult == TableUploadChunkResult::OutOfOrder) {
+            response += ",\"result\":\"fail\",\"error\":\"out_of_order\",\"expected_part\":";
+            response += String(expectedPart);
+        } else if (chunkResult == TableUploadChunkResult::Invalid) {
+            response += ",\"result\":\"fail\",\"error\":\"invalid_chunk\"";
+        } else {
+            response += ",\"result\":\"fail\",\"error\":\"sd_write_failed\"";
+        }
+        response += "}";
+        sendMessage("SD_SAVE_RESPONSE", response, msgId);
+        return;
+    }
+
+    if (json.length() == 0) {
+        sendError(ERR_BAD_REQUEST, "missing json", msgId);
         return;
     }
 
@@ -828,10 +1103,13 @@ void MessageHandler::cmdSdSave(const JsonObject &data, const String &msgId) {
     }
 
     bool ok = SdStorage::writeTable(table, json);
+    if (ok) schedulePermissionSyncAfterDataChange(table);
     String resp = "{\"table\":\"" + table + "\",\"result\":";
     resp += ok ? "\"success\"" : "\"fail\"";
     if (ok) {
         resp += ",\"version\":";
+        resp += String(getTableVersion(table));
+        resp += ",\"global_version\":";
         resp += String(SdStorage::getGlobalVersion());
     }
     resp += "}";
@@ -976,15 +1254,24 @@ void MessageHandler::cmdDeleteFpTemplate(const JsonObject &data, const String &m
     }
 
     String userId = data["user_id"] | "";
+    int fingerIndex = data["finger_index"] | 0;
     if (userId.length() == 0) {
         sendError(ERR_BAD_REQUEST, "missing user_id", msgId);
         return;
     }
 
-    bool ok = SdStorage::deleteTemplate(userId);
+    if (fingerIndex < 0 || fingerIndex > FP_MAX_TEMPLATES_PER_USER) {
+        sendError(ERR_BAD_REQUEST, "finger_index out of range", msgId);
+        return;
+    }
+    bool ok = fingerIndex > 0
+        ? SdStorage::deleteTemplate(userId, fingerIndex)
+        : SdStorage::deleteTemplate(userId);
     if (ok) SdStorage::incrementVersion("fingerprints");
 
-    String resp = "{\"user_id\":\"" + userId + "\",\"result\":";
+    String resp = "{\"user_id\":\"" + userId + "\",\"finger_index\":";
+    resp += String(fingerIndex);
+    resp += ",\"result\":";
     resp += ok ? "\"success\"" : "\"fail\"";
     resp += "}";
     sendMessage("FP_TEMPLATE_DELETE_RESPONSE", resp, msgId);

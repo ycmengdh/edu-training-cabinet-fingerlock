@@ -1,7 +1,7 @@
 namespace FingerprintLockManager
 {
     /// <summary>
-    /// 角色默认权限服务，数据存放在根节点 role_permissions.json。
+    /// 角色默认权限服务。模板只用于初始化新用户，不直接改变已有用户权限。
     /// </summary>
     public class RolePermissionService
     {
@@ -21,19 +21,14 @@ namespace FingerprintLockManager
         public bool SetRolePermission(RolePermission rolePermission)
         {
             if (rolePermission == null || string.IsNullOrWhiteSpace(rolePermission.Role)) return false;
-            rolePermission = PermissionPolicy.Normalize(rolePermission);
-            var root = new RootDataService();
-            var items = root.Read<RolePermission>("role_permissions");
-            rolePermission.UpdateTime = DateTime.Now;
-            var existing = items.FirstOrDefault(r => r.Role == rolePermission.Role);
-            if (existing == null) items.Add(rolePermission);
-            else items[items.IndexOf(existing)] = rolePermission;
-            return root.Save("role_permissions", items);
+            return SetAll(new[] { rolePermission });
         }
 
         public bool SetAll(IEnumerable<RolePermission> rolePermissions)
         {
             if (rolePermissions == null) return false;
+            EnsureAdministrator();
+
             var incoming = rolePermissions
                 .Where(r => r != null && !string.IsNullOrWhiteSpace(r.Role))
                 .Select(PermissionPolicy.Normalize)
@@ -42,6 +37,8 @@ namespace FingerprintLockManager
 
             var root = new RootDataService();
             var items = root.Read<RolePermission>("role_permissions");
+            if (!SnapshotExistingUserPermissions(root, items)) return false;
+
             foreach (var pair in incoming)
             {
                 pair.Value.UpdateTime = DateTime.Now;
@@ -51,6 +48,24 @@ namespace FingerprintLockManager
                 else items[items.IndexOf(existing)] = pair.Value;
             }
             return root.Save("role_permissions", items);
+        }
+
+        public List<UserPermission> CreateDefaultUserPermissions(string userId, string role)
+        {
+            if (string.IsNullOrWhiteSpace(userId)) return new List<UserPermission>();
+
+            bool[] defaults = GetRolePermission(role).ToArray();
+            PermissionPolicy.Enforce(role, defaults);
+            DateTime now = DateTime.Now;
+            return Enumerable.Range(0, defaults.Length)
+                .Select(lockId => new UserPermission
+                {
+                    UserId = userId,
+                    LockId = lockId,
+                    HasAccess = defaults[lockId],
+                    UpdateTime = now
+                })
+                .ToList();
         }
 
         public void InitDefaultRolePermissions()
@@ -65,17 +80,70 @@ namespace FingerprintLockManager
 
         public bool[] GetFinalPermissions(string userId)
         {
-            var user = App.UserService.GetUser(userId);
-            if (user == null) return new bool[4];
-            var result = GetRolePermission(user.Role).ToArray();
-            foreach (var item in new RootDataService().Read<UserPermission>("permissions")
-                         .Where(p => p.UserId == userId))
+            return new PermissionService().GetFinalPermissions(userId);
+        }
+
+        private static void EnsureAdministrator()
+        {
+            if (!DataScopeContext.Instance.IsAdmin)
+                throw new UnauthorizedAccessException("只有系统管理员可以修改角色默认权限");
+        }
+
+        private static bool SnapshotExistingUserPermissions(
+            RootDataService root,
+            IReadOnlyCollection<RolePermission> currentRoles)
+        {
+            List<User> users = root.Read<User>("users");
+            if (users.Count == 0) return true;
+
+            List<UserPermission> permissions = root.Read<UserPermission>("permissions");
+            var existingLocks = new Dictionary<string, HashSet<int>>(StringComparer.OrdinalIgnoreCase);
+            foreach (UserPermission permission in permissions)
             {
-                if (item.LockId >= 0 && item.LockId < result.Length)
-                    result[item.LockId] = item.HasAccess;
+                if (!existingLocks.TryGetValue(permission.UserId, out HashSet<int>? lockIds))
+                {
+                    lockIds = new HashSet<int>();
+                    existingLocks[permission.UserId] = lockIds;
+                }
+                lockIds.Add(permission.LockId);
             }
-            PermissionPolicy.Enforce(user.Role, result);
-            return result;
+
+            var roleMap = currentRoles.ToDictionary(
+                role => role.Role,
+                PermissionPolicy.Normalize,
+                StringComparer.OrdinalIgnoreCase);
+            DateTime now = DateTime.Now;
+            bool changed = false;
+
+            foreach (User user in users)
+            {
+                if (!existingLocks.TryGetValue(user.UserId, out HashSet<int>? lockIds))
+                {
+                    lockIds = new HashSet<int>();
+                    existingLocks[user.UserId] = lockIds;
+                }
+
+                bool[] defaults = (roleMap.TryGetValue(user.Role, out RolePermission? rolePermission)
+                        ? rolePermission
+                        : BuildDefault(user.Role))
+                    .ToArray();
+                PermissionPolicy.Enforce(user.Role, defaults);
+
+                for (int lockId = 0; lockId < defaults.Length; lockId++)
+                {
+                    if (!lockIds.Add(lockId)) continue;
+                    permissions.Add(new UserPermission
+                    {
+                        UserId = user.UserId,
+                        LockId = lockId,
+                        HasAccess = defaults[lockId],
+                        UpdateTime = now
+                    });
+                    changed = true;
+                }
+            }
+
+            return !changed || root.Save("permissions", permissions);
         }
 
         private static RolePermission BuildDefault(string role)

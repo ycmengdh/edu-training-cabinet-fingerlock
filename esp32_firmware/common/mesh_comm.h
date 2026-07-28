@@ -14,6 +14,7 @@ class MeshComm {
 public:
     typedef void (*MessageCallback)(const String &message);
     typedef void (*MeshMessageCallback)(const uint8_t *fromMac, const String &json);
+    typedef void (*PeerConnectionCallback)(const uint8_t *mac, bool connected);
 
     static void init();
     static void update();
@@ -32,10 +33,13 @@ public:
 
     static void setMessageCallback(MessageCallback cb);
     static void setMeshMessageCallback(MeshMessageCallback cb);
+    static void setPeerConnectionCallback(PeerConnectionCallback cb);
 
-    // Mesh 已连父节点，或柜子 UART0 主机协议口已就绪
+    // 任一可用管理链路；柜子同时维护 Mesh 和 UART0。
     static bool isConnected();
+    static bool isMeshConnected();
     static bool isUartHostReady();
+    static bool isUartHostConnected();
 
     static WorkMode getMode();
     static bool isRoot();
@@ -50,6 +54,9 @@ public:
     static uint32_t getSendFailureCount();
     static uint32_t getQueueFullCount();
     static uint32_t getRecoveryCount();
+    static uint32_t getDuplicateReplayCount();
+    static int getLinkRssi();
+    static int getApAssocExpireSeconds();
 
     static String macToString(const uint8_t *mac);
     static void parseMacString(const String &str, uint8_t *mac);
@@ -81,6 +88,7 @@ private:
 
     static MessageCallback msgCb;
     static MeshMessageCallback meshMsgCb;
+    static PeerConnectionCallback peerConnectionCb;
 
     struct MeshMessage {
         uint8_t fromMac[6];
@@ -104,6 +112,7 @@ private:
                              uint8_t reason = 0);
 
     static bool initMesh();
+    static bool restartCabinetMeshStack();
     static void meshEventHandler(void *arg, esp_event_base_t event_base,
                                  int32_t event_id, void *event_data);
     static void meshReceiveTask(void *arg);
@@ -112,6 +121,10 @@ private:
     static bool initUartHost();
     static void updateUartHost();
     static bool uartHostSendRaw(const String &raw);
+    static bool sendControlAppToMesh(uint16_t cmdId, uint16_t msgId,
+                                     const uint8_t *payload, uint16_t payloadLen);
+    static bool sendAppRawToMesh(const uint8_t *appMsg, uint16_t len);
+    static bool sendAppRawToUart(const uint8_t *appMsg, uint16_t len);
     static void uartHostProcessIncoming();
     static void uartHostAnnounceRegister();
 

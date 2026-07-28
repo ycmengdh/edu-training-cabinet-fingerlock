@@ -38,20 +38,28 @@ namespace FingerprintLockManager
         private readonly object _traceLock = new object();
         private readonly Queue<CommunicationTraceEntry> _recentTrace = new Queue<CommunicationTraceEntry>();
         private ITransport? _transport;
+        private Timer? _healthTimer;
+        private int _protocolConnectedFlag;
+        private int _healthProbeBusy;
         private long _sentCount;
         private long _receivedCount;
+        private string _lastSendFailReason = "";
+        private DateTime _lastSendFailAt = DateTime.MinValue;
 
         private const int MaxTraceEntries = 5000;
-        // 柜子每 10 秒发一次 HEARTBEAT；允许丢失两个周期并留 5 秒调度余量。
-        private static readonly TimeSpan CabinetOfflineTimeout = TimeSpan.FromSeconds(35);
-        // Root 当前每 60 秒发一次 STATUS_REPORT，使用独立的较长超时。
-        private static readonly TimeSpan RootOfflineTimeout = TimeSpan.FromSeconds(75);
+        private static readonly TimeSpan CabinetOfflineTimeout = TimeSpan.FromSeconds(7);
+        private static readonly TimeSpan RootOfflineTimeout = TimeSpan.FromSeconds(5);
+        private static readonly TimeSpan ProtocolSilenceTimeout = TimeSpan.FromMilliseconds(4500);
+        private const int HealthProbeIntervalMs = 1000;
 
         /// <summary>当前传输实例</summary>
         public ITransport? Transport => _transport;
 
         /// <summary>链路是否已连接</summary>
-        public bool IsConnected => _transport?.IsConnected ?? false;
+        public bool IsConnected => IsPhysicalConnected &&
+            Volatile.Read(ref _protocolConnectedFlag) == 1;
+
+        public bool IsPhysicalConnected => _transport?.IsConnected ?? false;
 
         /// <summary>当前传输类型</summary>
         public TransportType? CurrentType { get; private set; }
@@ -130,15 +138,20 @@ namespace FingerprintLockManager
             Interlocked.Exchange(ref _receivedCount, 0);
             LastSentTime = null;
             LastReceivedTime = null;
+            Interlocked.Exchange(ref _protocolConnectedFlag, 0);
             RecordTrace(CommunicationDirection.System, "链路", $"启动 {_transport.Description}");
 
             _transport.Start();
+            _healthTimer = new Timer(HealthTimerTick, null, 100, HealthProbeIntervalMs);
         }
 
         /// <summary>停止桥接器并释放传输资源</summary>
         public void Stop()
         {
             if (_transport == null) return;
+
+            try { _healthTimer?.Dispose(); } catch { }
+            _healthTimer = null;
 
             _transport.LineReceived -= OnLineReceived;
             _transport.PayloadReceived -= OnPayloadReceived;
@@ -163,7 +176,7 @@ namespace FingerprintLockManager
                 d.IsOnline = false;
                 DeviceDisconnected?.Invoke(d);
             }
-            OnConnectionChanged(false);
+            SetProtocolConnected(false);
         }
 
         /// <summary>
@@ -255,17 +268,23 @@ namespace FingerprintLockManager
             }
         }
 
-        /// <summary>收到应用层负载：二进制信封优先，遗留 JSON 兼容。</summary>
+        /// <summary>
+        /// 收到应用层负载。
+        /// 统一协议：外层 A5/5A 帧 + 应用层 B1/0F 二进制信封；
+        /// 复杂 data 仍在信封 payload 内以 UTF-8 JSON 承载。
+        /// 整包 JSON 仅作旧固件兼容，正常链路不应再出现。
+        /// </summary>
         private void OnPayloadReceived(byte[] payload)
         {
             Interlocked.Increment(ref _receivedCount);
             LastReceivedTime = DateTime.Now;
+            SetProtocolConnected(true);
             try
             {
                 Message? msg = null;
                 AppMessage? app = null;
 
-                // 1) 标准二进制信封
+                // 1) 标准二进制信封（主路径）
                 if (BinaryMessageCodec.TryDecode(payload, out app) && app != null)
                 {
                     msg = AppMessageMapper.ToMessage(app);
@@ -277,13 +296,23 @@ namespace FingerprintLockManager
                     RecordTrace(CommunicationDirection.System, "BIN 重同步",
                         $"offset 找到魔数后解码成功 cmd=0x{app.CmdId:X4}");
                 }
-                // 3) 遗留整包 JSON
+                // 3) 遗留整包 JSON（兼容旧固件；新链路应全部走二进制信封）
                 else if (payload.Length > 0 && (payload[0] == (byte)'{' || payload[0] == (byte)'['))
                 {
                     string line = Encoding.UTF8.GetString(payload);
-                    RecordTrace(CommunicationDirection.Receive, "协议 JSON",
-                        line.Length > 240 ? line.Substring(0, 240) + "..." : line);
                     msg = Message.FromJson(line);
+                    // 固件 Debug::LOG 旧路径：整包 JSON cmd=LOG，按固件日志展示，不标协议异常。
+                    if (msg != null && string.Equals(msg.Cmd, Protocol.CmdDebugLog, StringComparison.OrdinalIgnoreCase))
+                    {
+                        string logText = FormatDebugLog(msg);
+                        RecordTrace(CommunicationDirection.Receive, "固件日志(旧)",
+                            logText.Length > 400 ? logText.Substring(0, 400) + "..." : logText);
+                    }
+                    else
+                    {
+                        RecordTrace(CommunicationDirection.System, "协议异常(整包JSON)",
+                            line.Length > 240 ? line.Substring(0, 240) + "..." : line);
+                    }
                 }
                 else
                 {
@@ -302,8 +331,18 @@ namespace FingerprintLockManager
 
                 if (app != null)
                 {
-                    RecordTrace(CommunicationDirection.Receive, "协议 BIN",
-                        $"cmd=0x{app.CmdId:X4}({msg.Cmd}) did='{msg.DeviceId}' src='{msg.SourceDeviceId}' mid={msg.MsgId} plen={app.Payload?.Length ?? 0} onlineCab={OnlineCabinetCount}");
+                    if (string.Equals(msg.Cmd, Protocol.CmdDebugLog, StringComparison.OrdinalIgnoreCase) ||
+                        app.CmdId == CmdIds.DebugLog)
+                    {
+                        string logText = FormatDebugLog(msg);
+                        RecordTrace(CommunicationDirection.Receive, "固件日志",
+                            logText.Length > 400 ? logText.Substring(0, 400) + "..." : logText);
+                    }
+                    else
+                    {
+                        RecordTrace(CommunicationDirection.Receive, "协议 BIN",
+                            $"cmd=0x{app.CmdId:X4}({msg.Cmd}) did='{msg.DeviceId}' src='{msg.SourceDeviceId}' mid={msg.MsgId} plen={app.Payload?.Length ?? 0} onlineCab={OnlineCabinetCount}");
+                    }
                 }
 
                 // 节点唯一身份优先 MAC：
@@ -363,7 +402,16 @@ namespace FingerprintLockManager
                         $"消息无 MAC/device_id: cmd={msg.Cmd} mid={msg.MsgId} known={KnownDeviceCount}");
                 }
 
-                MessageReceived?.Invoke(device, msg);
+                // Transport guarantees one ordered dispatch stream. Invoke in
+                // that order so ACK/status/business frames cannot overtake.
+                try
+                {
+                    MessageReceived?.Invoke(device, msg);
+                }
+                catch (Exception invEx)
+                {
+                    RecordTrace(CommunicationDirection.System, "业务回调异常", invEx.Message);
+                }
             }
             catch (Exception ex)
             {
@@ -416,14 +464,16 @@ namespace FingerprintLockManager
                 // 1) 主键精确命中（MAC 或旧逻辑 ID）
                 if (!_devices.TryGetValue(identityKey, out existing))
                 {
-                    // 2) 按 MAC 查
+                    // 有 MAC 时绝不按逻辑 ID 合并，否则重复 device_id 会把两台
+                    // 物理柜机折叠成一台，造成在线状态和命令目标串设备。
                     if (!string.IsNullOrEmpty(meshMac))
                     {
                         existing = _devices.Values.FirstOrDefault(d =>
                             string.Equals(NormalizeMac(d.MeshMac), meshMac, StringComparison.OrdinalIgnoreCase));
                     }
-                    // 3) 按逻辑 device_id 查（兼容旧会话）
-                    if (existing == null && !string.IsNullOrEmpty(logicalDeviceId))
+                    // 无 MAC 的旧固件才允许按逻辑 ID 兼容归并。
+                    if (existing == null && string.IsNullOrEmpty(meshMac) &&
+                        !string.IsNullOrEmpty(logicalDeviceId))
                     {
                         existing = _devices.Values.FirstOrDefault(d =>
                             string.Equals(d.DeviceId, logicalDeviceId, StringComparison.OrdinalIgnoreCase));
@@ -496,11 +546,27 @@ namespace FingerprintLockManager
                 {
                     device.IsRoot = false;
                 }
+
+                if ((string.Equals(msg.Cmd, Protocol.CmdStatusResponse, StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(msg.Cmd, Protocol.CmdStatusReport, StringComparison.OrdinalIgnoreCase)) &&
+                    msg.Data is Newtonsoft.Json.Linq.JObject statusData)
+                {
+                    try
+                    {
+                        device.Status = statusData.ToObject<DeviceRuntimeStatus>() ?? new DeviceRuntimeStatus();
+                        device.LastStatusAt = DateTime.Now;
+                    }
+                    catch
+                    {
+                    }
+                }
             }
 
             if (becameOnline)
             {
-                DeviceConnected?.Invoke(device);
+                // SerialTransport 已把 PayloadReceived 放到线程池；这里在锁外按序通知，
+                // 既不会重入串口 I/O，也保证上线事件先于本次收包处理完成。
+                try { DeviceConnected?.Invoke(device); } catch { }
             }
 
             return device;
@@ -578,15 +644,30 @@ namespace FingerprintLockManager
                 {
                     Interlocked.Increment(ref _sentCount);
                     LastSentTime = DateTime.Now;
+                    string tableHint = "";
+                    if (msg.Data is Newtonsoft.Json.Linq.JObject data &&
+                        data["table"] != null)
+                    {
+                        tableHint = $" table={data["table"]}";
+                    }
                     RecordTrace(CommunicationDirection.Transmit, "协议 BIN",
-                        $"cmd=0x{app.CmdId:X4}({msg.Cmd}) did={msg.DeviceId} mid={msg.MsgId} plen={app.Payload?.Length ?? 0}");
+                        $"cmd=0x{app.CmdId:X4}({msg.Cmd}) did={msg.DeviceId} mid={msg.MsgId}" +
+                        $" plen={app.Payload?.Length ?? 0}{tableHint}");
                 }
                 else
                 {
                     string reason = string.IsNullOrWhiteSpace(_transport.LastError)
                         ? "物理链路未连接或写入失败"
                         : _transport.LastError;
-                    RecordTrace(CommunicationDirection.System, "发送失败", reason);
+                    // 去抖：同一原因 1.5s 内只记一条，避免日志被发送失败刷屏
+                    DateTime now = DateTime.Now;
+                    if (!string.Equals(_lastSendFailReason, reason, StringComparison.Ordinal) ||
+                        (now - _lastSendFailAt).TotalMilliseconds >= 1500)
+                    {
+                        _lastSendFailReason = reason;
+                        _lastSendFailAt = now;
+                        RecordTrace(CommunicationDirection.System, "发送失败", reason);
+                    }
                 }
                 return sent;
             }
@@ -599,32 +680,14 @@ namespace FingerprintLockManager
 
         private bool SendJson(string json)
         {
-            // 兼容旧调用：尝试解析为 Message 后走二进制；失败则按 UTF-8 JSON 封帧。
+            // 统一：能解析为 Message 则走二进制信封；无法识别的字符串不再发送裸 JSON。
             var msg = Message.FromJson(json);
             if (msg != null && !string.IsNullOrEmpty(msg.Cmd))
                 return SendMessageBinary(msg);
 
-            if (_transport == null)
-            {
-                RecordTrace(CommunicationDirection.System, "发送失败", "链路尚未启动");
-                return false;
-            }
-
-            bool sent = _transport.Send(json);
-            if (sent)
-            {
-                Interlocked.Increment(ref _sentCount);
-                LastSentTime = DateTime.Now;
-                RecordTrace(CommunicationDirection.Transmit, "协议 JSON", json);
-            }
-            else
-            {
-                string reason = string.IsNullOrWhiteSpace(_transport.LastError)
-                    ? "物理链路未连接或写入失败"
-                    : _transport.LastError;
-                RecordTrace(CommunicationDirection.System, "发送失败", reason);
-            }
-            return sent;
+            RecordTrace(CommunicationDirection.System, "发送失败",
+                "拒绝发送非协议 JSON（请使用 Message/二进制信封）");
+            return false;
         }
 
         private void OnTransportDiagnostic(string message) =>
@@ -634,7 +697,14 @@ namespace FingerprintLockManager
         {
             if (bytes == null || bytes.Length == 0) return;
             string content = FormatUnframedData(bytes);
-            RecordTrace(CommunicationDirection.Receive, "原始数据", content);
+            bool bootLog = content.Contains("ESP-ROM", StringComparison.OrdinalIgnoreCase) ||
+                content.Contains("rst:0x", StringComparison.OrdinalIgnoreCase) ||
+                content.Contains("[CABINET_BOOT]", StringComparison.OrdinalIgnoreCase) ||
+                content.Contains("[ROOT_BOOT]", StringComparison.OrdinalIgnoreCase);
+            bool brownout = content.Contains("BROWNOUT", StringComparison.OrdinalIgnoreCase) ||
+                content.Contains("RESET_REASON=9", StringComparison.OrdinalIgnoreCase);
+            RecordTrace(bootLog ? CommunicationDirection.System : CommunicationDirection.Receive,
+                brownout ? "设备供电异常/重启" : bootLog ? "设备启动/重启" : "原始数据", content);
         }
 
         /// <summary>链路连接状态变化</summary>
@@ -642,9 +712,52 @@ namespace FingerprintLockManager
         {
             RecordTrace(CommunicationDirection.System, "物理链路",
                 connected ? "已连接" : "已断开");
-            ConnectionChanged?.Invoke(connected);
+            if (!connected)
+                SetProtocolConnected(false);
+        }
 
-            // 链路断开时，标记所有设备离线
+        private void HealthTimerTick(object? state)
+        {
+            ITransport? transport = _transport;
+            if (transport?.IsConnected != true)
+            {
+                SetProtocolConnected(false);
+                return;
+            }
+
+            DateTime now = DateTime.Now;
+            if (LastReceivedTime.HasValue && now - LastReceivedTime.Value >= ProtocolSilenceTimeout)
+                SetProtocolConnected(false);
+
+            if (Interlocked.Exchange(ref _healthProbeBusy, 1) != 0) return;
+            try
+            {
+                var probe = Message.Create(Protocol.CmdReadStatus, "");
+                AppMessage app = AppMessageMapper.ToApp(probe);
+                byte[] payload = BinaryMessageCodec.Encode(app);
+                if (transport.SendPayload(payload))
+                {
+                    Interlocked.Increment(ref _sentCount);
+                    LastSentTime = now;
+                }
+            }
+            catch { }
+            finally
+            {
+                Interlocked.Exchange(ref _healthProbeBusy, 0);
+            }
+        }
+
+        private void SetProtocolConnected(bool connected)
+        {
+            int next = connected ? 1 : 0;
+            int previous = Interlocked.Exchange(ref _protocolConnectedFlag, next);
+            if (previous == next) return;
+
+            RecordTrace(CommunicationDirection.System, "协议链路",
+                connected ? "已响应" : "无响应");
+            try { ConnectionChanged?.Invoke(connected); } catch { }
+
             if (!connected)
             {
                 List<DeviceClient> disconnected = new List<DeviceClient>();
@@ -657,10 +770,8 @@ namespace FingerprintLockManager
                         disconnected.Add(device);
                     }
                 }
-                foreach (var d in disconnected)
-                {
-                    DeviceDisconnected?.Invoke(d);
-                }
+                foreach (var device in disconnected)
+                    try { DeviceDisconnected?.Invoke(device); } catch { }
             }
         }
 
@@ -682,7 +793,31 @@ namespace FingerprintLockManager
                 _recentTrace.Enqueue(entry);
                 while (_recentTrace.Count > MaxTraceEntries) _recentTrace.Dequeue();
             }
-            TraceAdded?.Invoke(entry);
+            // 订阅方可能是 UI；异常不得回灌串口 I/O 路径。
+            try { TraceAdded?.Invoke(entry); }
+            catch (Exception invEx)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MeshBridge] TraceAdded: {invEx.Message}");
+            }
+        }
+
+
+        private static string FormatDebugLog(Message msg)
+        {
+            try
+            {
+                if (msg.Data is Newtonsoft.Json.Linq.JObject jo)
+                {
+                    string m = jo["msg"]?.ToString()
+                               ?? jo["message"]?.ToString()
+                               ?? jo.ToString(Newtonsoft.Json.Formatting.None);
+                    string level = jo["level"]?.ToString() ?? "INFO";
+                    string did = string.IsNullOrEmpty(msg.DeviceId) ? "" : msg.DeviceId;
+                    return string.IsNullOrEmpty(did) ? $"[{level}] {m}" : $"[{level}] {did}: {m}";
+                }
+            }
+            catch { }
+            return msg.Cmd ?? "LOG";
         }
 
         private static string FormatUnframedData(byte[] bytes)

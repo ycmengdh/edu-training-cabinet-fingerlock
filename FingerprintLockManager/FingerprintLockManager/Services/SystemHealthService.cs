@@ -35,7 +35,7 @@ namespace FingerprintLockManager
                 {
                     Severity = SystemAlertSeverity.Warning,
                     Source = "Mesh",
-                    Message = "尚未发现柜子节点",
+                    Message = "尚未发现柜子",
                     ActionHint = "检查柜子供电和 Mesh 配置"
                 });
             }
@@ -51,7 +51,7 @@ namespace FingerprintLockManager
                     {
                         Severity = SystemAlertSeverity.Critical,
                         Source = source,
-                        Message = "柜子节点离线",
+                        Message = "柜子离线",
                         ActionHint = "检查供电、天线和 Mesh 路由"
                     });
                     continue;
@@ -151,7 +151,7 @@ namespace FingerprintLockManager
                 {
                     Severity = SystemAlertSeverity.Warning,
                     Source = "固件版本",
-                    Message = "柜子节点运行多个固件版本",
+                    Message = "柜子运行多个固件版本",
                     ActionHint = "核对兼容性并制定统一升级批次"
                 });
             }

@@ -49,6 +49,28 @@ namespace FingerprintLockManager
             await LoadTemplatesAsync();
         }
 
+        private void TestFingerprintButton_Click(object sender, RoutedEventArgs e)
+        {
+            FingerprintTemplate? selected = TemplateDataGrid.SelectedItem as FingerprintTemplate;
+            OpenTestWindow(selected);
+        }
+
+        private void TestOneButton_Click(object sender, RoutedEventArgs e)
+        {
+            if ((sender as Button)?.Tag is not int fingerprintId) return;
+            OpenTestWindow(_allTemplates.FirstOrDefault(item => item.FingerprintId == fingerprintId));
+        }
+
+        private void OpenTestWindow(FingerprintTemplate? template)
+        {
+            var window = new FingerprintTestWindow(
+                template?.UserId, template?.FingerprintId, null)
+            {
+                Owner = Window.GetWindow(this)
+            };
+            window.ShowDialog();
+        }
+
         /// <summary>上传全部到 SD</summary>
         private async void UploadAllButton_Click(object sender, RoutedEventArgs e)
         {
@@ -116,19 +138,31 @@ namespace FingerprintLockManager
             {
                 int totalSuccess = 0;
                 int totalFail = 0;
+                var failDetails = new List<string>();
                 foreach (var template in selected)
                 {
-                    var result = await App.FingerprintTemplateService.DistributeToDevicesAsync(
+                    var result = await App.FingerprintTemplateService.DistributeToDevicesDetailedAsync(
                         template.FingerprintId, targets);
                     foreach (var pair in result)
                     {
-                        if (pair.Value) totalSuccess++;
-                        else totalFail++;
+                        if (pair.Value.ok) totalSuccess++;
+                        else
+                        {
+                            totalFail++;
+                            if (failDetails.Count < 5)
+                            {
+                                failDetails.Add(
+                                    $"指纹{template.FingerprintId} → {pair.Key}: {pair.Value.error}");
+                            }
+                        }
                     }
                 }
 
+                string detail = failDetails.Count == 0
+                    ? ""
+                    : "\n\n失败原因：\n" + string.Join("\n", failDetails);
                 MessageBox.Show(
-                    $"下发完成。\n成功：{totalSuccess}\n失败：{totalFail}",
+                    $"下发完成。\n成功：{totalSuccess}\n失败：{totalFail}{detail}",
                     totalFail == 0 ? "下发完成" : "下发部分完成",
                     MessageBoxButton.OK,
                     totalFail == 0 ? MessageBoxImage.Information : MessageBoxImage.Warning);
@@ -246,12 +280,19 @@ namespace FingerprintLockManager
             SetBusy(true, $"正在下发指纹 {fingerprintId} 到 {targets.Count} 个柜子");
             try
             {
-                var result = await App.FingerprintTemplateService.DistributeToDevicesAsync(
+                var result = await App.FingerprintTemplateService.DistributeToDevicesDetailedAsync(
                     fingerprintId, targets);
-                int success = result.Count(p => p.Value);
-                int fail = result.Count(p => !p.Value);
+                int success = result.Count(p => p.Value.ok);
+                int fail = result.Count(p => !p.Value.ok);
+                var failDetails = result.Where(p => !p.Value.ok)
+                    .Take(5)
+                    .Select(p => $"{p.Key}: {p.Value.error}")
+                    .ToList();
+                string detail = failDetails.Count == 0
+                    ? ""
+                    : "\n\n失败原因：\n" + string.Join("\n", failDetails);
                 MessageBox.Show(
-                    $"下发完成。\n成功：{success}\n失败：{fail}",
+                    $"下发完成。\n成功：{success}\n失败：{fail}{detail}",
                     fail == 0 ? "下发完成" : "下发部分完成",
                     MessageBoxButton.OK,
                     fail == 0 ? MessageBoxImage.Information : MessageBoxImage.Warning);

@@ -45,10 +45,12 @@ public:
     static void addRoute(const String &deviceId, const uint8_t *mac);
     // 查找 device_id 对应的 MAC，找到返回 true
     static bool lookupRoute(const String &deviceId, uint8_t *mac);
-    // 获取当前活跃路由数（30s 内有心跳/REGISTER）
+    // 获取当前活跃路由数（7s 内有心跳/REGISTER）
     static int getRouteCount();
     // 获取已知（曾连上）的总路由数（含已过期但未回收的条目）
     static int getRouteKnownCount();
+    // Process a direct Mesh peer event deferred into the Arduino main loop.
+    static void handlePeerConnection(const uint8_t *mac, bool connected);
     // 获取第 N 个路由条目的 deviceId（用于屏幕展示前几个柜子）
     // 返回 true 表示 outFilled 已填充
     static bool getRouteDeviceId(int index, char *outBuf, size_t bufSize);
@@ -57,6 +59,7 @@ public:
 
     // 向所有当前有效柜子路由广播业务 JSON
     static int broadcastToCabinets(const String &json);
+    static int broadcastToCabinetsApp(const uint8_t *appMsg, uint16_t len);
 
 private:
     // 路由表条目
@@ -94,6 +97,11 @@ private:
 
     // 写入数据到当前上行链路
     static bool writeUplink(const uint8_t *data, int len);
+
+    // Host protocol activity gates unsolicited cabinet forwarding only. Mesh
+    // routing and cabinet ACK processing continue regardless of host state.
+    static bool isHostProtocolActive();
+    static void setHostProtocolActive(bool active);
 
     // 读取上行链路字节并送入协议帧解码器
     static void readUplink();

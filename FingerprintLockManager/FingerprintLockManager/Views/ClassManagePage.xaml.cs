@@ -9,6 +9,14 @@ namespace FingerprintLockManager
         public ClassManagePage()
         {
             InitializeComponent();
+            if (string.Equals(App.CurrentUser?.Role, "teacher", StringComparison.OrdinalIgnoreCase))
+            {
+                AddButton.Visibility = Visibility.Collapsed;
+                EditButton.Visibility = Visibility.Collapsed;
+                ToggleButton.Visibility = Visibility.Collapsed;
+                DeleteButton.Visibility = Visibility.Collapsed;
+                PageStatusText.Text = "打开负责的班级，维护学生、指纹和柜子权限";
+            }
             Loaded += async (_, _) => await LoadAsync();
         }
 
@@ -17,7 +25,25 @@ namespace FingerprintLockManager
             SetBusy(true, "正在读取班级数据");
             try
             {
-                List<ClassInfo> classes = await Task.Run(App.ClassService.GetAll);
+                List<ClassInfo> classes = await Task.Run(() =>
+                {
+                    var items = App.ClassService.GetVisible();
+                    var users = App.UserService.GetAllUsers();
+                    foreach (var item in items)
+                    {
+                        var teachers = users
+                            .Where(user => string.Equals(user.Role, "teacher", StringComparison.OrdinalIgnoreCase)
+                                && string.Equals(user.ClassId, item.ClassId, StringComparison.OrdinalIgnoreCase))
+                            .Select(user => string.IsNullOrWhiteSpace(user.Name) ? user.UserId : user.Name)
+                            .Where(name => !string.IsNullOrWhiteSpace(name))
+                            .ToList();
+                        item.TeacherText = teachers.Count == 0 ? "未分配" : string.Join("、", teachers);
+                        item.StudentCount = users.Count(user =>
+                            string.Equals(user.Role, "student", StringComparison.OrdinalIgnoreCase)
+                            && string.Equals(user.ClassId, item.ClassId, StringComparison.OrdinalIgnoreCase));
+                    }
+                    return items;
+                });
                 ClassDataGrid.ItemsSource = classes;
                 PageStatusText.Text = $"共 {classes.Count} 个班级";
             }
@@ -88,6 +114,74 @@ namespace FingerprintLockManager
             }
         }
 
+        private void OpenButton_Click(object sender, RoutedEventArgs e)
+        {
+            OpenSelectedClass(ClassDataGrid.SelectedItem as ClassInfo);
+        }
+
+        private void ClassDataGrid_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
+        {
+            if (e.OriginalSource is DependencyObject source &&
+                FindVisualParent<DataGridRow>(source) == null) return;
+            OpenSelectedClass(ClassDataGrid.SelectedItem as ClassInfo);
+        }
+
+        private void OpenRowButton_Click(object sender, RoutedEventArgs e)
+        {
+            OpenSelectedClass((sender as FrameworkElement)?.Tag as ClassInfo);
+        }
+
+        private void CabinetSyncButton_Click(object sender, RoutedEventArgs e) =>
+            OpenCabinetSync(ClassDataGrid.SelectedItem as ClassInfo);
+
+        private void CabinetSyncRowButton_Click(object sender, RoutedEventArgs e) =>
+            OpenCabinetSync((sender as FrameworkElement)?.Tag as ClassInfo);
+
+        private void OpenCabinetSync(ClassInfo? selected)
+        {
+            if (selected == null)
+            {
+                MessageBox.Show("请先选择班级", "提示");
+                return;
+            }
+            var window = new ClassCabinetSyncWindow(selected.ClassId, selected.Name)
+            {
+                Owner = Window.GetWindow(this)
+            };
+            window.ShowDialog();
+            _ = LoadAsync();
+        }
+
+        private void OpenSelectedClass(ClassInfo? selected)
+        {
+            if (selected == null)
+            {
+                MessageBox.Show("请先选择班级", "提示");
+                return;
+            }
+            NavigationService?.Navigate(new ClassStudentsPage(selected.ClassId, selected.Name));
+        }
+
+        private static T? FindVisualParent<T>(DependencyObject? child) where T : DependencyObject
+        {
+            while (child != null)
+            {
+                if (child is T match) return match;
+                child = System.Windows.Media.VisualTreeHelper.GetParent(child);
+            }
+            return null;
+        }
+
+        private async void DeleteRowButton_Click(object sender, RoutedEventArgs e)
+        {
+            if ((sender as FrameworkElement)?.Tag is not ClassInfo selected) return;
+            ClassDataGrid.SelectedItem = selected;
+            if (MessageBox.Show($"确认删除班级「{selected.Name}」？\n若仍有用户绑定该班级将无法删除。",
+                    "确认删除", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
+                return;
+            await DeleteClassAsync(selected);
+        }
+
         private async void ToggleButton_Click(object sender, RoutedEventArgs e)
         {
             if (ClassDataGrid.SelectedItem is not ClassInfo selected)
@@ -124,6 +218,11 @@ namespace FingerprintLockManager
                     "确认删除", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
                 return;
 
+            await DeleteClassAsync(selected);
+        }
+
+        private async Task DeleteClassAsync(ClassInfo selected)
+        {
             SetBusy(true, "正在删除班级");
             try
             {
@@ -213,6 +312,8 @@ namespace FingerprintLockManager
             RefreshButton.IsEnabled = !busy;
             AddButton.IsEnabled = !busy;
             EditButton.IsEnabled = !busy;
+            OpenButton.IsEnabled = !busy;
+            CabinetSyncButton.IsEnabled = !busy;
             ToggleButton.IsEnabled = !busy;
             DeleteButton.IsEnabled = !busy;
             if (!string.IsNullOrEmpty(status)) PageStatusText.Text = status;

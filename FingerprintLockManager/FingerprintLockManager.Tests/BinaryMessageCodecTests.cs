@@ -137,6 +137,40 @@ public class BinaryMessageCodecTests
     }
 
     [Fact]
+    public void CabinetStatusPayload_MapsToExistingStatusFields()
+    {
+        byte[] payload = new byte[BinaryMessageCodec.CabinetStatusPayload.Size];
+        payload[0] = BinaryMessageCodec.CabinetStatusPayload.Version;
+        payload[1] = 0x05;
+        payload[2] = 2;
+        payload[3] = 0x03;
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(4, 4), 1234);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(8, 2), 7);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(10, 2), 42);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(12, 4), 60);
+        payload[20] = unchecked((byte)-55);
+        payload[21] = 120;
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(22, 2), 22);
+
+        Message message = AppMessageMapper.ToMessage(new AppMessage
+        {
+            CmdId = CmdIds.StatusResponse,
+            MsgId = 9,
+            DeviceId = "CABINET_001",
+            Payload = payload,
+        });
+
+        var data = Assert.IsType<Newtonsoft.Json.Linq.JObject>(message.Data);
+        Assert.Equal(1234u, data.Value<uint>("uptime"));
+        Assert.Equal(7, data.Value<int>("fingerprint_count"));
+        Assert.Equal(60u, data.Value<uint>("perm_version"));
+        Assert.Equal(-55, data.Value<int>("mesh_link_rssi"));
+        Assert.Equal("mesh", data.Value<string>("work_mode"));
+        Assert.True(data.Value<bool>("time_synced"));
+        Assert.Equal(new[] { 1, 0, 1, 0 }, data["lock_status"]!.Values<int>());
+    }
+
+    [Fact]
     public void ControlLockPayload_RoundTrips()
     {
         byte[] packed = BinaryMessageCodec.ControlLockPayload.Pack(3, 1);

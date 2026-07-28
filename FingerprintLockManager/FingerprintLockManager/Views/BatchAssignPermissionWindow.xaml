@@ -1,0 +1,63 @@
+<local:BorderlessWindow x:Class="FingerprintLockManager.BatchAssignPermissionWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:FingerprintLockManager"
+        Title="批量分配柜子权限" Height="560" Width="560"
+        WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
+        Background="{StaticResource BackgroundBrush}">
+    <Grid Margin="24,20,24,22">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <StackPanel>
+            <TextBlock Text="批量分配柜子权限" Style="{StaticResource TitleText}"/>
+            <TextBlock x:Name="SummaryText"
+                       Text="为所选用户写入锁权限，绑定柜子并同步到在线设备"
+                       Foreground="{StaticResource SubTextBrush}" FontSize="11" Margin="0,5,0,0"
+                       TextWrapping="Wrap"/>
+        </StackPanel>
+
+        <Grid Grid.Row="1" Margin="0,16,0,12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="16"/>
+                <ColumnDefinition Width="200"/>
+            </Grid.ColumnDefinitions>
+
+            <Border Style="{StaticResource Panel}" Padding="14">
+                <DockPanel>
+                    <TextBlock DockPanel.Dock="Top" Text="在线柜子（可多选）"
+                               Style="{StaticResource LabelText}" Margin="0,0,0,8"/>
+                    <ListBox x:Name="CabinetList" SelectionMode="Extended" BorderThickness="0"
+                             Background="Transparent"/>
+                </DockPanel>
+            </Border>
+
+            <Border Grid.Column="2" Style="{StaticResource Panel}" Padding="14">
+                <StackPanel>
+                    <TextBlock Text="锁权限" Style="{StaticResource LabelText}" Margin="0,0,0,10"/>
+                    <CheckBox x:Name="Lock0Check" Content="Lock 0  系统锁" Margin="0,0,0,10"/>
+                    <CheckBox x:Name="Lock1Check" Content="Lock 1  实训柜 1" IsChecked="True" Margin="0,0,0,10"/>
+                    <CheckBox x:Name="Lock2Check" Content="Lock 2  实训柜 2" IsChecked="True" Margin="0,0,0,10"/>
+                    <CheckBox x:Name="Lock3Check" Content="Lock 3  实训柜 3" Margin="0,0,0,4"/>
+                    <TextBlock Text="系统锁仅管理员可勾选"
+                               Foreground="{StaticResource SubTextBrush}" FontSize="11" Margin="0,12,0,0"
+                               TextWrapping="Wrap"/>
+                </StackPanel>
+            </Border>
+        </Grid>
+
+        <TextBlock x:Name="StatusText" Grid.Row="2"
+                   Foreground="{StaticResource SubTextBrush}" FontSize="11"
+                   Margin="0,0,0,12" TextWrapping="Wrap"/>
+
+        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Content="取消" Style="{StaticResource SecondaryButton}" Click="CancelButton_Click"/>
+            <Button x:Name="ApplyButton" Content="保存并同步" Margin="8,0,0,0" Click="ApplyButton_Click"/>
+        </StackPanel>
+    </Grid>
+</local:BorderlessWindow>

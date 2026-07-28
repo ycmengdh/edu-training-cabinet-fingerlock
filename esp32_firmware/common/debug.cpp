@@ -6,11 +6,15 @@
 #include "debug.h"
 #include "config_common.h"
 #include "protocol_frame.h"
+#include "app_protocol.h"
+#include "cmd_ids.h"
+#include "serial_uplink.h"
 #include <stdarg.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
 bool   Debug::framing    = false;
+bool   Debug::outputEnabled = true;
 String Debug::lineBuffer;
 String Debug::deviceId   = "";
 
@@ -23,6 +27,7 @@ static SemaphoreHandle_t debugOutputMutex = nullptr;
 void Debug::init() {
     // framing 由 main.cpp 通过 setFraming() 设置
     // deviceId 由 main.cpp 通过 setDeviceId() 设置
+    SerialUplink::begin();
     if (debugOutputMutex == nullptr) {
         debugOutputMutex = xSemaphoreCreateRecursiveMutex();
     }
@@ -38,6 +43,15 @@ void Debug::setFraming(bool enable) {
 
 bool Debug::isFraming() {
     return framing;
+}
+
+void Debug::setOutputEnabled(bool enable) {
+    outputEnabled = enable;
+    if (!enable) lineBuffer = "";
+}
+
+bool Debug::isOutputEnabled() {
+    return outputEnabled;
 }
 
 // ====== JSON 转义 ======
@@ -75,38 +89,48 @@ String Debug::escapeJson(const String &s) {
 // Serial.write → Serial.flush → USB CDC) overflowed the stack and caused
 // CORRUPT HEAP / stack canary panics.
 void Debug::sendFramed(const String &msg) {
-    // Escape the message into a heap-allocated buffer
+    // Binary app envelope CMD_DEBUG_LOG + JSON data payload.
+    // Avoids legacy full-JSON messages that host flags as 协议异常.
     String escaped = escapeJson(msg);
+    size_t cap = 48 + escaped.length();
+    char *dataBuf = (char *)malloc(cap);
+    if (dataBuf == nullptr) return;
+    snprintf(dataBuf, cap, "{\"level\":\"INFO\",\"msg\":\"%s\"}", escaped.c_str());
 
-    // Build the JSON directly into a heap-allocated buffer
-    // Format: {"cmd":"LOG","device_id":"<id>","data":{"level":"INFO","msg":"<msg>"}}
-    size_t cap = 80 + deviceId.length() + escaped.length();
-    char *jsonBuf = (char *)malloc(cap);
-    if (jsonBuf == nullptr) {
+    size_t dataLen = strlen(dataBuf);
+    int need = APP_ENVELOPE_MIN + (int)deviceId.length() + (int)dataLen + 8;
+    if (need < 64) need = 64;
+    uint8_t *appBuf = (uint8_t *)malloc((size_t)need);
+    if (appBuf == nullptr) {
+        free(dataBuf);
         return;
     }
-    snprintf(jsonBuf, cap,
-             "{\"cmd\":\"LOG\",\"device_id\":\"%s\",\"data\":{\"level\":\"INFO\",\"msg\":\"%s\"}}",
-             deviceId.c_str(), escaped.c_str());
+    int appLen = appEncode(appBuf, need, CMD_DEBUG_LOG, appNextMsgId(), 0, 0,
+                           deviceId.c_str(), nullptr,
+                           (const uint8_t *)dataBuf, (uint16_t)dataLen, 0);
+    free(dataBuf);
+    if (appLen <= 0) {
+        free(appBuf);
+        return;
+    }
 
-    // Encode to protocol frame and send
-    String jsonStr(jsonBuf);  // shallow copy needed by ProtocolFrame::encode
-    int frameCapacity = ProtocolFrame::getEncodedCapacity(jsonStr);
+    int frameCapacity = ProtocolFrame::getEncodedCapacityBytes(appLen);
     if (frameCapacity > 0) {
-        uint8_t *frameBuf = (uint8_t *)malloc(frameCapacity);
+        uint8_t *frameBuf = (uint8_t *)malloc((size_t)frameCapacity);
         if (frameBuf != nullptr) {
-            int frameLen = ProtocolFrame::encode(jsonStr, frameBuf, frameCapacity);
+            int frameLen = ProtocolFrame::encodeBytes(appBuf, appLen, frameBuf, frameCapacity);
             if (frameLen > 0) {
-                Serial.write(frameBuf, frameLen);
+                SerialUplink::write(frameBuf, (size_t)frameLen);
             }
             free(frameBuf);
         }
     }
-    free(jsonBuf);
+    free(appBuf);
 }
 
 // ====== 核心输出 ======
 void Debug::output(const String &msg, bool newline) {
+    if (!outputEnabled) return;
     if (debugOutputMutex != nullptr) {
         xSemaphoreTakeRecursive(debugOutputMutex, portMAX_DELAY);
     }
@@ -119,11 +143,13 @@ void Debug::output(const String &msg, bool newline) {
             lineBuffer = "";
         }
     } else {
-        // 裸文本模式：直接 Serial 输出
+        // 裸文本模式：经 SerialUplink 输出，避免与协议帧写交叉
         if (newline) {
-            Serial.println(msg);
+            String line = msg;
+            line += "\n";
+            SerialUplink::writeText(line.c_str());
         } else {
-            Serial.print(msg);
+            SerialUplink::writeText(msg.c_str());
         }
     }
 

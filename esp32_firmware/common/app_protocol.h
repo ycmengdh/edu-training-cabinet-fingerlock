@@ -49,6 +49,13 @@ int packHeartbeat(uint8_t* out, int outSize, uint32_t freeHeap, uint32_t freePsr
 int packAck(uint8_t* out, int outSize, uint16_t refMsgId, uint16_t resultCode, const char* tag);
 int packError(uint8_t* out, int outSize, uint16_t refMsgId, uint16_t errorCode, const char* msg);
 int packControlLock(uint8_t* out, int outSize, uint8_t lockId, uint8_t action);
+int packCabinetStatus(uint8_t* out, int outSize,
+                      uint32_t uptime, uint8_t lockMask, uint8_t meshLayer,
+                      uint8_t flags, uint16_t fingerprintCount,
+                      uint16_t permissionCount, uint32_t permissionVersion,
+                      uint16_t sendFailures, uint16_t queueFull,
+                      int8_t rssi, uint8_t assocExpire,
+                      uint16_t fpPollMaxMs);
 
 // Unpack counterparts
 bool unpackHeartbeat(const uint8_t* p, uint16_t len,

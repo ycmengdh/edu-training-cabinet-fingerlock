@@ -36,6 +36,10 @@ namespace FingerprintLockManager
         /// </summary>
         bool CanModify(User target);
 
+        bool CanCreate(User target);
+
+        bool CanUpdate(User existing, User updated);
+
         /// <summary>
         /// 获取当前用户的可见班级 ID 集合（用于过滤）。
         /// Admin 返回 null 表示不限制；Teacher 返回 [本班ClassId]；
@@ -48,5 +52,9 @@ namespace FingerprintLockManager
         /// 写操作调用此方法做防御性校验。
         /// </summary>
         void EnsureCanModify(User target);
+
+        void EnsureCanCreate(User target);
+
+        void EnsureCanUpdate(User existing, User updated);
     }
 }

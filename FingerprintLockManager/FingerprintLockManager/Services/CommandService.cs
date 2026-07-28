@@ -11,7 +11,7 @@ namespace FingerprintLockManager
         private readonly ConcurrentDictionary<string, BroadcastPending> _pendingBroadcasts = new();
 
         /// <summary>
-        /// 发送命令并等待 ACK。超时后以相同 msg_id 重试，间隔 500/1000/2000ms，最多 3 次。
+        /// 发送命令并等待 ACK。超时后以相同 msg_id 重试，间隔 250/500/1000ms，最多发送 4 次。
         /// </summary>
         public async Task<CommandResult> SendAsync(
             string deviceId, Message message, int timeoutMs = 5000)
@@ -24,9 +24,9 @@ namespace FingerprintLockManager
             if (!_pending.TryAdd(message.MsgId, tcs))
                 return CommandResult.Failed("消息编号冲突");
 
-            // 同 msg_id 最多发送 3 次：初始 + 超时后重试，间隔 500/1000/2000ms
-            int[] retryDelaysMs = { 500, 1000, 2000 };
-            const int maxAttempts = 3;
+            // 同 msg_id 最多发送 4 次；柜机按 msg_id 重放响应，不重复执行业务。
+            int[] retryDelaysMs = { 250, 500, 1000 };
+            const int maxAttempts = 4;
             int attempt = 0;
             DateTime deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
 
@@ -128,10 +128,12 @@ namespace FingerprintLockManager
         public event Action<string, int, int, string>? EnrollProgressChanged;
 
         public async Task<FingerprintEnrollmentResult> EnrollFingerprintAsync(
-            string deviceId, string userId, int fingerprintId, bool replace = false,
+            string deviceId, string userId = "", int fingerprintId = 0, bool replace = true,
             int timeoutMs = 180_000,
             Action<string, int, int, string>? onProgress = null)
         {
+            // 新流程：fingerprint_id=0 表示由柜子自动分配（录入到临时槽 ID=0，
+            // 检测通过后迁移到 allocLocalFpId() 分配的真实 ID 并回报）。
             var message = Message.Create(Protocol.CmdAddFingerprint, deviceId, new
             {
                 fingerprint_id = fingerprintId,
@@ -188,6 +190,158 @@ namespace FingerprintLockManager
                 replace
             });
             return await SendAsync(deviceId, message, timeoutMs);
+        }
+
+        public async Task<CommandResult> StartFingerprintTestAsync(
+            string deviceId, int fingerprintId, byte[] templateBytes,
+            string testToken, int timeoutMs = 15_000)
+        {
+            if (fingerprintId <= 0 || templateBytes == null || templateBytes.Length == 0 ||
+                string.IsNullOrWhiteSpace(testToken))
+            {
+                return CommandResult.Failed("指纹测试参数无效");
+            }
+
+            var message = Message.Create(Protocol.CmdStartFingerprintTest, deviceId, new
+            {
+                fingerprint_id = fingerprintId,
+                template_hex = Convert.ToHexString(templateBytes),
+                test_token = testToken
+            });
+            return await SendAsync(deviceId, message, timeoutMs);
+        }
+
+        public Task<CommandResult> StopFingerprintTestAsync(
+            string deviceId, string testToken, int timeoutMs = 8_000)
+        {
+            var message = Message.Create(Protocol.CmdStopFingerprintTest, deviceId, new
+            {
+                test_token = testToken ?? ""
+            });
+            return SendAsync(deviceId, message, timeoutMs);
+        }
+
+        public async Task<PermissionProbeResult?> QueryPermissionAsync(
+            string deviceId, string userId, int timeoutMs = 8_000)
+        {
+            var message = Message.Create(Protocol.CmdReadPermissions, deviceId,
+                new { user_id = userId });
+            var completion = new TaskCompletionSource<PermissionProbeResult>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            void Handler(string responseDeviceId, string msgId, PermissionProbeResult result)
+            {
+                if (string.Equals(msgId, message.MsgId, StringComparison.Ordinal) &&
+                    string.Equals(responseDeviceId, deviceId, StringComparison.OrdinalIgnoreCase))
+                    completion.TrySetResult(result);
+            }
+            App.MessageHandler.OnPermissionsResponse += Handler;
+            try
+            {
+                DateTime deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+                int[] waits = { 600, 1200, timeoutMs };
+                foreach (int requestedWait in waits)
+                {
+                    if (!App.MeshBridge.SendToDevice(deviceId, message)) return null;
+                    int remaining = (int)Math.Max(0, (deadline - DateTime.UtcNow).TotalMilliseconds);
+                    if (remaining == 0) break;
+                    Task completed = await Task.WhenAny(completion.Task,
+                        Task.Delay(Math.Min(requestedWait, remaining)));
+                    if (completed == completion.Task) return await completion.Task;
+                }
+                int finalRemaining = (int)Math.Max(0, (deadline - DateTime.UtcNow).TotalMilliseconds);
+                if (finalRemaining > 0)
+                {
+                    Task completed = await Task.WhenAny(completion.Task, Task.Delay(finalRemaining));
+                    if (completed == completion.Task) return await completion.Task;
+                }
+                return null;
+            }
+            finally
+            {
+                App.MessageHandler.OnPermissionsResponse -= Handler;
+            }
+        }
+
+        public async Task<FingerprintProbeResult?> QueryFingerprintAsync(
+            string deviceId, int fingerprintId, byte[] templateBytes,
+            int timeoutMs = 12_000)
+        {
+            uint expectedCrc32 = ComputeTemplateCrc32(templateBytes);
+            var message = Message.Create(Protocol.CmdCheckFingerprint, deviceId, new
+            {
+                fingerprint_id = fingerprintId,
+                expected_crc32 = expectedCrc32
+            });
+            var completion = new TaskCompletionSource<FingerprintProbeResult>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            void Handler(string responseDeviceId, string msgId, FingerprintProbeResult result)
+            {
+                if (string.Equals(msgId, message.MsgId, StringComparison.Ordinal) &&
+                    string.Equals(responseDeviceId, deviceId, StringComparison.OrdinalIgnoreCase))
+                    completion.TrySetResult(result);
+            }
+            App.MessageHandler.OnFingerprintCheckResponse += Handler;
+            try
+            {
+                DateTime deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+                int[] waits = { 800, 1600, timeoutMs };
+                foreach (int requestedWait in waits)
+                {
+                    if (!App.MeshBridge.SendToDevice(deviceId, message)) return null;
+                    int remaining = (int)Math.Max(0, (deadline - DateTime.UtcNow).TotalMilliseconds);
+                    if (remaining == 0) break;
+                    Task completed = await Task.WhenAny(completion.Task,
+                        Task.Delay(Math.Min(requestedWait, remaining)));
+                    if (completed == completion.Task) return await completion.Task;
+                }
+                int finalRemaining = (int)Math.Max(0, (deadline - DateTime.UtcNow).TotalMilliseconds);
+                if (finalRemaining > 0)
+                {
+                    Task completed = await Task.WhenAny(completion.Task, Task.Delay(finalRemaining));
+                    if (completed == completion.Task) return await completion.Task;
+                }
+                return null;
+            }
+            finally
+            {
+                App.MessageHandler.OnFingerprintCheckResponse -= Handler;
+            }
+        }
+
+        public Task<CommandResult> UpsertPermissionAsync(
+            string deviceId, User user, bool[] permissions, uint version,
+            int timeoutMs = 8_000)
+        {
+            PermissionPolicy.Enforce(user.Role, permissions);
+            var message = Message.Create(Protocol.CmdSyncPermission, deviceId, new
+            {
+                fingerprint_id = user.FingerprintId,
+                user_id = user.UserId,
+                name = user.Name,
+                role = user.Role switch { "admin" => 0, "teacher" => 1, _ => 2 },
+                lock_permissions = new
+                {
+                    lock_0 = permissions.ElementAtOrDefault(0),
+                    lock_1 = permissions.ElementAtOrDefault(1),
+                    lock_2 = permissions.ElementAtOrDefault(2),
+                    lock_3 = permissions.ElementAtOrDefault(3)
+                },
+                version
+            });
+            return SendAsync(deviceId, message, timeoutMs);
+        }
+
+        public static uint ComputeTemplateCrc32(byte[] bytes)
+        {
+            if (bytes == null || bytes.Length == 0) return 0;
+            uint crc = 0xFFFFFFFFU;
+            foreach (byte value in bytes)
+            {
+                crc ^= value;
+                for (int bit = 0; bit < 8; bit++)
+                    crc = (crc >> 1) ^ ((crc & 1U) != 0 ? 0xEDB88320U : 0U);
+            }
+            return crc ^ 0xFFFFFFFFU;
         }
 
         /// <summary>
@@ -434,6 +588,36 @@ namespace FingerprintLockManager
         {
             ErrorMessage = message
         };
+    }
+
+    public sealed class FingerprintTestEvent
+    {
+        public string DeviceId { get; init; } = "";
+        public string Event { get; init; } = "";
+        public string TestToken { get; init; } = "";
+        public int FingerprintId { get; init; } = -1;
+        public int Confidence { get; init; }
+        public int IdleTimeoutSeconds { get; init; } = 60;
+    }
+
+    public sealed class PermissionProbeResult
+    {
+        public bool Found { get; init; }
+        public string UserId { get; init; } = "";
+        public int FingerprintId { get; init; } = -1;
+        public int Role { get; init; } = 2;
+        public bool[] Permissions { get; init; } = new bool[4];
+        public uint Version { get; init; }
+    }
+
+    public sealed class FingerprintProbeResult
+    {
+        public int FingerprintId { get; init; } = -1;
+        public bool Exists { get; init; }
+        public bool Readable { get; init; }
+        public bool Matches { get; init; }
+        public uint ExpectedCrc32 { get; init; }
+        public uint ActualCrc32 { get; init; }
     }
 
     public sealed class BroadcastCommandResult

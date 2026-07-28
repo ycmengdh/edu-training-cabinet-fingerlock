@@ -4,7 +4,7 @@ using System.Windows.Controls;
 
 namespace FingerprintLockManager
 {
-    public partial class SettingsWindow : Window
+    public partial class SettingsWindow : BorderlessWindow
     {
         public SettingsWindow()
         {
@@ -15,6 +15,10 @@ namespace FingerprintLockManager
         private void OnLoaded(object sender, RoutedEventArgs e)
         {
             var cfg = ConfigHelper.Current;
+            AppearanceThemeBox.ItemsSource = new[] { "浅色", "深色" };
+            AppearanceThemeBox.SelectedIndex = cfg.AppearanceTheme.Equals("Dark", StringComparison.OrdinalIgnoreCase)
+                ? 1
+                : 0;
             TransportTypeBox.ItemsSource = new[]
             {
                 nameof(TransportType.UsbSerial),
@@ -22,7 +26,7 @@ namespace FingerprintLockManager
                 nameof(TransportType.TcpServer)
             };
             TransportTypeBox.SelectedItem = cfg.TransportType;
-            SerialPortBox.ItemsSource = SerialPort.GetPortNames().OrderBy(n => n).ToList();
+            SerialPortBox.ItemsSource = SerialPortDiscovery.GetPortNames().ToList();
             if (!string.IsNullOrWhiteSpace(cfg.SerialPortName) &&
                 !SerialPortBox.Items.Contains(cfg.SerialPortName))
             {
@@ -80,23 +84,27 @@ namespace FingerprintLockManager
                 return;
             }
 
-            var cfg = new AppConfig
+            AppConfig cfg = ConfigHelper.Current;
+            cfg.TransportType = TransportTypeBox.SelectedItem as string ?? "UsbSerial";
+            cfg.SerialPortName = SerialPortBox.Text?.Trim() ?? "";
+            cfg.SerialBaudRate = baud;
+            cfg.TcpClientHost = TcpHostBox.Text?.Trim() ?? "192.168.4.1";
+            cfg.TcpClientPort = tcpClientPort;
+            cfg.TcpServerPort = tcpServerPort;
+            cfg.OfflineTimeoutSeconds = offline;
+            cfg.HmacEnabled = HmacEnabledBox.IsChecked == true;
+            cfg.HmacKey = HmacKeyBox.Password ?? "";
+            cfg.AppearanceTheme = AppearanceThemeBox.SelectedIndex == 1 ? "Dark" : "Light";
+            if (cfg.TransportType == nameof(TransportType.UsbSerial))
             {
-                TransportType = TransportTypeBox.SelectedItem as string ?? "UsbSerial",
-                SerialPortName = SerialPortBox.Text?.Trim() ?? "",
-                SerialBaudRate = baud,
-                TcpClientHost = TcpHostBox.Text?.Trim() ?? "192.168.4.1",
-                TcpClientPort = tcpClientPort,
-                TcpServerPort = tcpServerPort,
-                OfflineTimeoutSeconds = offline,
-                HmacEnabled = HmacEnabledBox.IsChecked == true,
-                HmacKey = HmacKeyBox.Password ?? "",
-                ApDeviceIp = ConfigHelper.Current.ApDeviceIp,
-                ApDevicePort = ConfigHelper.Current.ApDevicePort,
-                TcpPort = ConfigHelper.Current.TcpPort
-            };
+                if (string.Equals(cfg.LinkMode, "Uart", StringComparison.OrdinalIgnoreCase))
+                    cfg.UartSerialPortName = cfg.SerialPortName;
+                else
+                    cfg.MeshSerialPortName = cfg.SerialPortName;
+            }
 
             ConfigHelper.Save(cfg);
+            ThemeManager.Apply(cfg.AppearanceTheme);
             try
             {
                 App.MeshBridge.Stop();

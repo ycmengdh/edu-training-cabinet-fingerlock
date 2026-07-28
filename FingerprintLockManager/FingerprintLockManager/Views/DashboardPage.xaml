@@ -43,7 +43,7 @@
                     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                     <StackPanel Orientation="Horizontal">
                         <Ellipse x:Name="LinkStatusDot" Width="8" Height="8" Fill="{StaticResource DangerBrush}" VerticalAlignment="Center"/>
-                        <TextBlock Text="根节点链路" Style="{StaticResource LabelText}" Margin="8,0,0,0"/>
+                        <TextBlock x:Name="LinkMetricLabel" Text="根节点链路" Style="{StaticResource LabelText}" Margin="8,0,0,0"/>
                     </StackPanel>
                     <TextBlock x:Name="LinkValueText" Grid.Row="1" Text="未连接" Style="{StaticResource MetricValueText}" Margin="0,8,0,4"/>
                     <TextBlock x:Name="LinkDetailText" Grid.Row="2" Text="等待通信链路" Foreground="{StaticResource SubTextBrush}" FontSize="10"/>
@@ -53,7 +53,7 @@
             <Border Grid.Column="2" Style="{StaticResource StatusMetric}">
                 <Grid>
                     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                    <TextBlock Text="柜子在线" Style="{StaticResource LabelText}"/>
+                    <TextBlock x:Name="DeviceMetricLabel" Text="柜子在线" Style="{StaticResource LabelText}"/>
                     <TextBlock x:Name="DeviceValueText" Grid.Row="1" Text="0 / 0" Style="{StaticResource MetricValueText}" Margin="0,8,0,4"/>
                     <TextBlock x:Name="DeviceDetailText" Grid.Row="2" Text="尚无设备数据" Foreground="{StaticResource SubTextBrush}" FontSize="10"/>
                 </Grid>
@@ -62,7 +62,7 @@
             <Border Grid.Column="4" Style="{StaticResource StatusMetric}">
                 <Grid>
                     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                    <TextBlock Text="权限一致" Style="{StaticResource LabelText}"/>
+                    <TextBlock x:Name="SyncMetricLabel" Text="权限一致" Style="{StaticResource LabelText}"/>
                     <TextBlock x:Name="SyncValueText" Grid.Row="1" Text="0 / 0" Style="{StaticResource MetricValueText}" Margin="0,8,0,4"/>
                     <TextBlock x:Name="SyncDetailText" Grid.Row="2" Text="等待版本信息" Foreground="{StaticResource SubTextBrush}" FontSize="10"/>
                 </Grid>
@@ -71,7 +71,7 @@
             <Border Grid.Column="6" Style="{StaticResource StatusMetric}">
                 <Grid>
                     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                    <TextBlock Text="根节点存储" Style="{StaticResource LabelText}"/>
+                    <TextBlock x:Name="StorageMetricLabel" Text="根节点存储" Style="{StaticResource LabelText}"/>
                     <TextBlock x:Name="StorageValueText" Grid.Row="1" Text="-" Style="{StaticResource MetricValueText}" Margin="0,8,0,4"/>
                     <TextBlock x:Name="StorageDetailText" Grid.Row="2" Text="等待 SD 信息" Foreground="{StaticResource SubTextBrush}" FontSize="10"/>
                 </Grid>
@@ -80,7 +80,7 @@
             <Border Grid.Column="8" Style="{StaticResource StatusMetric}">
                 <Grid>
                     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                    <TextBlock Text="学生绑定" Style="{StaticResource LabelText}"/>
+                    <TextBlock x:Name="StudentBindMetricLabel" Text="学生绑定" Style="{StaticResource LabelText}"/>
                     <TextBlock x:Name="StudentBindValueText" Grid.Row="1" Text="0 / 0" Style="{StaticResource MetricValueText}" Margin="0,8,0,4"/>
                     <TextBlock x:Name="StudentBindDetailText" Grid.Row="2" Text="已分配权限 / 总学生" Foreground="{StaticResource SubTextBrush}" FontSize="10"/>
                 </Grid>
@@ -97,7 +97,7 @@
             <Border Grid.Column="0" Style="{StaticResource Panel}">
                 <Grid>
                     <Grid.RowDefinitions><RowDefinition Height="46"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-                    <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="14,0">
+                    <Border Padding="14,0">
                         <Grid>
                             <TextBlock Text="当前告警" Style="{StaticResource SectionTitleText}" VerticalAlignment="Center"/>
                             <TextBlock x:Name="AlertCountText" Text="0" HorizontalAlignment="Right" VerticalAlignment="Center"
@@ -106,13 +106,17 @@
                     </Border>
                     <DataGrid x:Name="AlertDataGrid" Grid.Row="1" BorderThickness="0" IsReadOnly="True"
                               SelectionMode="Single" RowHeight="48">
+                        <DataGrid.Resources>
+                            <Style TargetType="TextBlock" BasedOn="{StaticResource DataGridTextBlockStyle}"/>
+                        </DataGrid.Resources>
                         <DataGrid.Columns>
                             <DataGridTemplateColumn Header="级别" Width="64">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
-                                        <TextBlock Text="{Binding SeverityText}" FontSize="11" FontWeight="SemiBold">
+                                        <TextBlock Text="{Binding SeverityText}" FontSize="11" FontWeight="SemiBold"
+                                                   HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center">
                                             <TextBlock.Style>
-                                                <Style TargetType="TextBlock">
+                                                <Style TargetType="TextBlock" BasedOn="{StaticResource DataGridTextBlockStyle}">
                                                     <Setter Property="Foreground" Value="{StaticResource SubTextBrush}"/>
                                                     <Style.Triggers>
                                                         <DataTrigger Binding="{Binding Severity}" Value="Warning">
@@ -128,9 +132,12 @@
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
                             </DataGridTemplateColumn>
-                            <DataGridTextColumn Header="来源" Binding="{Binding Source}" Width="120"/>
-                            <DataGridTextColumn Header="问题" Binding="{Binding Message}" Width="*"/>
-                            <DataGridTextColumn Header="建议" Binding="{Binding ActionHint}" Width="180"/>
+                            <DataGridTextColumn Header="来源" Binding="{Binding Source}" Width="120"
+                                                ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                            <DataGridTextColumn Header="问题" Binding="{Binding Message}" Width="*"
+                                                ElementStyle="{StaticResource DataGridLeftTextBlockStyle}"/>
+                            <DataGridTextColumn Header="建议" Binding="{Binding ActionHint}" Width="180"
+                                                ElementStyle="{StaticResource DataGridLeftTextBlockStyle}"/>
                         </DataGrid.Columns>
                     </DataGrid>
                 </Grid>
@@ -139,7 +146,7 @@
             <Border Grid.Column="2" Style="{StaticResource Panel}">
                 <Grid>
                     <Grid.RowDefinitions><RowDefinition Height="46"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-                    <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="14,0">
+                    <Border Padding="14,0">
                         <Grid>
                             <TextBlock Text="最近开锁" Style="{StaticResource SectionTitleText}" VerticalAlignment="Center"/>
                             <TextBlock x:Name="PendingLogText" Text="待传 0" HorizontalAlignment="Right" VerticalAlignment="Center"
@@ -147,11 +154,18 @@
                         </Grid>
                     </Border>
                     <DataGrid x:Name="RecentLogDataGrid" Grid.Row="1" BorderThickness="0" IsReadOnly="True" SelectionMode="Single">
+                        <DataGrid.Resources>
+                            <Style TargetType="TextBlock" BasedOn="{StaticResource DataGridTextBlockStyle}"/>
+                        </DataGrid.Resources>
                         <DataGrid.Columns>
-                            <DataGridTextColumn Header="时间" Binding="{Binding CreateTime, StringFormat=MM-dd HH:mm}" Width="88"/>
-                            <DataGridTextColumn Header="柜子" Binding="{Binding DeviceId}" Width="100"/>
-                            <DataGridTextColumn Header="用户" Binding="{Binding UserId}" Width="*"/>
-                            <DataGridTextColumn Header="结果" Binding="{Binding Result}" Width="62"/>
+                            <DataGridTextColumn Header="时间" Binding="{Binding CreateTime, StringFormat=MM-dd HH:mm}" Width="88"
+                                                ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                            <DataGridTextColumn Header="柜子" Binding="{Binding DeviceId}" Width="100"
+                                                ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                            <DataGridTextColumn Header="用户" Binding="{Binding UserId}" Width="*"
+                                                ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                            <DataGridTextColumn Header="结果" Binding="{Binding Result}" Width="62"
+                                                ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
                         </DataGrid.Columns>
                     </DataGrid>
                 </Grid>

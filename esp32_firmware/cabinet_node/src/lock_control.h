@@ -1,6 +1,6 @@
 /**
  * lock_control.h - 4 路锁控制 via 74HC595 移位寄存器
- * 595 Q0-Q3: 继电器(低电平触发), Q4-Q7: 锁状态LED(高电平亮)
+ * 595 Q0-Q3: 继电器(高电平开锁, LOW=关锁), Q4-Q7: 锁状态LED(高电平亮)
  */
 #ifndef LOCK_CONTROL_H
 #define LOCK_CONTROL_H
@@ -13,7 +13,7 @@ public:
     // 初始化 595 控制引脚，默认所有锁关闭
     static void init();
 
-    // 开锁（非阻塞）：继电器 LOW 持续 LOCK_OPEN_DURATION_MS 后自动关闭
+    // 开锁（非阻塞）：继电器 HIGH 持续 LOCK_OPEN_DURATION_MS 后自动关闭
     // lockId: 0~3，返回 true 表示已触发，false 表示参数无效
     static bool openLock(int lockId);
 

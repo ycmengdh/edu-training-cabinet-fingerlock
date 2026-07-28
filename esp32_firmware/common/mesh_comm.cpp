@@ -1,9 +1,8 @@
 /**
  * mesh_comm.cpp - ESP-MESH 自组网通信层实现
- * 替换原 tcp_comm，支持 Root/子节点两种角色 + 调试模式
+ * 替换原 tcp_comm，支持 Root/子节点两种角色
  * Root 节点：MESH_ROOT，桥接上行链路由 main.cpp 处理
- * 子节点：MESH_NODE，通过 esp_mesh_send 向 Root 发送消息
- * 调试模式：UART0 串口协议帧直连上位机（与根节点 USB 上行同协议）
+ * 子节点：MESH_NODE 主链路 + UART0 直连备用链路，两条链路始终并行
  */
 #include "mesh_comm.h"
 #include "debug.h"
@@ -11,12 +10,16 @@
 #include "protocol_frame.h"
 #include "mem_pool.h"
 #include "app_protocol.h"
+#include "serial_uplink.h"
+#include <ArduinoJson.h>
 #include "reliable_tx.h"
 // #include "mesh_bridge.h"  // Moved to main.cpp
 #include <WiFi.h>
 #include <esp_wifi.h>
 #include <esp_mesh.h>
 #include <esp_event.h>
+#include <esp_mac.h>
+#include <esp_heap_caps.h>
 
 // Pure-mesh (USB uplink) must never leave the STA interface hunting a phantom
 // router SSID - that produces endless NO_AP_FOUND spam and is not required for
@@ -31,44 +34,97 @@ static bool s_pureMeshNoRouter = false;
 // reason=202 (MESH_INTERNAL)。纯 Mesh 下 cfg.router.ssid_len=0 已让协议栈不扫
 // 外部热点，不需要应用层干预 STA 状态。
 
-// esp_mesh_send() is blocking unless MESH_DATA_NONBLOCK is supplied.  Keep
-// every application send bounded: a congested Mesh TX queue must never stop
-// the Arduino loop (heartbeats, lock ACKs and recovery all run there).
+// Submit to the Mesh queue without blocking the application loop. The Mesh
+// stack copies the packet before returning; P2P traffic is then retried by the
+// stack while best-effort traffic remains bounded by queue admission.
 static const int MESH_SEND_RETRY_COUNT = 3;
+static const int MESH_UPSTREAM_SEND_RETRY_COUNT = 8;
 static const TickType_t MESH_SEND_RETRY_DELAY = pdMS_TO_TICKS(20);
+static const int MESH_RX_PER_UPDATE = 8;
+static const int MESH_EVENT_LOGS_PER_UPDATE = 4;
 static const unsigned long REGISTER_RETRY_INTERVAL_MS = 5000UL;
 static const unsigned long ROOT_RECOVERY_INTERVAL_MS = 15000UL;
-// 强制重关联阈值引用配置常量（config_common.h: MESH_FORCE_REASSOC_MS=120s）。
+// 强制重关联阈值引用配置常量（config_common.h: MESH_FORCE_REASSOC_MS=30s）。
 static const unsigned long FORCE_REASSOC_AFTER_MS = MESH_FORCE_REASSOC_MS;
 static const unsigned long MESH_RESTART_AFTER_MS = 180000UL;
 
 static uint32_t meshSendFailureCount = 0;
 static uint32_t meshQueueFullCount = 0;
 static uint32_t meshRecoveryCount = 0;
+static unsigned long lastMeshSendFailureLog = 0;
 static unsigned long parentDisconnectedSince = 0;
 static unsigned long rootUnreachableSince = 0;
 static unsigned long lastRootRecoveryTime = 0;
 static unsigned long lastForcedReconnectTime = 0;
+static TaskHandle_t meshReceiveTaskHandle = nullptr;
+
+static const char *wifiDisconnectReasonName(uint8_t reason) {
+    switch (reason) {
+        case WIFI_REASON_TIMEOUT: return "TIMEOUT";
+        case WIFI_REASON_NO_AP_FOUND: return "NO_AP_FOUND";
+        case WIFI_REASON_AUTH_FAIL: return "AUTH_FAIL";
+        case WIFI_REASON_ASSOC_FAIL: return "ASSOC_FAIL";
+        case WIFI_REASON_BEACON_TIMEOUT: return "BEACON_TIMEOUT";
+        case WIFI_REASON_ASSOC_EXPIRE: return "ASSOC_EXPIRE";
+        case WIFI_REASON_ASSOC_LEAVE: return "ASSOC_LEAVE";
+        case WIFI_REASON_ROAMING: return "ROAMING";
+        default: return "OTHER";
+    }
+}
+
+// Spread periodic traffic deterministically across its full interval. With
+// 100 cabinets this prevents boot/reconnect from producing synchronized
+// heartbeat and REGISTER bursts while preserving the same low latency bound.
+static unsigned long macPhaseMs(const uint8_t *mac, unsigned long intervalMs) {
+    if (mac == nullptr || intervalMs == 0) return 0;
+    uint32_t hash = 2166136261UL;
+    for (int i = 0; i < 6; ++i) {
+        hash ^= mac[i];
+        hash *= 16777619UL;
+    }
+    return (unsigned long)(hash % intervalMs);
+}
+
+static unsigned long phasedLastSend(unsigned long now, const uint8_t *mac,
+                                    unsigned long intervalMs) {
+    unsigned long phase = macPhaseMs(mac, intervalMs);
+    return now - (intervalMs - phase);
+}
 
 static bool isRetryableMeshSendError(esp_err_t err) {
     return err == ESP_ERR_MESH_QUEUE_FULL ||
            err == ESP_ERR_MESH_NO_MEMORY ||
+           err == ESP_ERR_MESH_XMIT ||
            err == ESP_ERR_MESH_TIMEOUT;
 }
 
 static esp_err_t boundedMeshSend(const mesh_addr_t *to,
                                  const mesh_data_t *data, int flags) {
     esp_err_t err = ESP_FAIL;
-    for (int attempt = 0; attempt < MESH_SEND_RETRY_COUNT; ++attempt) {
+    const int retryCount = to == nullptr
+        ? MESH_UPSTREAM_SEND_RETRY_COUNT
+        : MESH_SEND_RETRY_COUNT;
+    for (int attempt = 0; attempt < retryCount; ++attempt) {
         err = esp_mesh_send(to, data, flags | MESH_DATA_NONBLOCK, NULL, 0);
         if (err == ESP_OK) return ESP_OK;
         if (err == ESP_ERR_MESH_QUEUE_FULL) meshQueueFullCount++;
-        if (!isRetryableMeshSendError(err) || attempt + 1 >= MESH_SEND_RETRY_COUNT) {
+        if (!isRetryableMeshSendError(err) || attempt + 1 >= retryCount) {
             break;
         }
         vTaskDelay(MESH_SEND_RETRY_DELAY);
     }
     meshSendFailureCount++;
+    unsigned long now = millis();
+    if (lastMeshSendFailureLog == 0 || now - lastMeshSendFailureLog >= 1000UL) {
+        lastMeshSendFailureLog = now;
+        mesh_tx_pending_t pending = {};
+        esp_err_t pendingErr = esp_mesh_get_tx_pending(&pending);
+        Debug::printf("[MESH] send failed err=%s flags=0x%X tos=%d tx=%d/%d/%d/%d pending=%s\n",
+                      esp_err_to_name(err), flags, (int)data->tos,
+                      pending.to_parent, pending.to_parent_p2p,
+                      pending.to_child, pending.to_child_p2p,
+                      esp_err_to_name(pendingErr));
+    }
     return err;
 }
 
@@ -92,6 +148,7 @@ int         MeshComm::reconnectAttempt  = 0;
 int         MeshComm::reconnectDelays[5] = {5000, 10000, 20000, 40000, 60000};
 MeshComm::MessageCallback     MeshComm::msgCb     = nullptr;
 MeshComm::MeshMessageCallback MeshComm::meshMsgCb = nullptr;
+MeshComm::PeerConnectionCallback MeshComm::peerConnectionCb = nullptr;
 void       *MeshComm::msgQueue = nullptr;
 void       *MeshComm::eventLogQueue = nullptr;
 
@@ -99,7 +156,151 @@ void       *MeshComm::eventLogQueue = nullptr;
 static bool        debugUartReady = false;
 static bool        debugHostSeen = false;
 static unsigned long lastDebugAnnounce = 0;
+static unsigned long lastDebugHostRx = 0;
 static const unsigned long DEBUG_ANNOUNCE_INTERVAL_MS = 3000;
+
+// A cabinet can receive commands from Mesh and UART0 at the same time. Keep a
+// short message-id route table so synchronous and delayed replies return over
+// the same physical link as the request that created them.
+enum CabinetRoute : uint8_t {
+    CAB_ROUTE_AUTO = 0,
+    CAB_ROUTE_MESH,
+    CAB_ROUTE_UART0
+};
+
+struct ReplyRouteEntry {
+    uint16_t msgId;
+    CabinetRoute route;
+    unsigned long seenAt;
+};
+
+static ReplyRouteEntry s_replyRoutes[16] = {};
+static CabinetRoute s_activeIngressRoute = CAB_ROUTE_AUTO;
+static uint16_t s_activeIngressMsgId = 0;
+static uint16_t s_activeIngressCmdId = 0;
+static bool s_routeCorrelatedSend = false;
+static const unsigned long REPLY_ROUTE_TTL_MS = 10UL * 60UL * 1000UL;
+
+static const int RESPONSE_CACHE_SLOTS = 8;
+static const unsigned long RESPONSE_CACHE_TTL_MS = 30000UL;
+struct ResponseCacheEntry {
+    uint16_t requestMsgId;
+    uint16_t requestCmdId;
+    uint16_t responseLen;
+    CabinetRoute route;
+    unsigned long storedAt;
+    uint8_t response[MESH_RX_BUFFER_SIZE];
+};
+static ResponseCacheEntry *s_responseCache = nullptr;
+static uint32_t s_duplicateReplayCount = 0;
+
+static void rememberReplyRoute(uint16_t msgId, CabinetRoute route) {
+    if (msgId == 0 || route == CAB_ROUTE_AUTO) return;
+    unsigned long now = millis();
+    int target = -1;
+    int oldest = 0;
+    for (int i = 0; i < (int)(sizeof(s_replyRoutes) / sizeof(s_replyRoutes[0])); i++) {
+        if (s_replyRoutes[i].msgId == msgId || s_replyRoutes[i].msgId == 0) {
+            target = i;
+            break;
+        }
+        if ((unsigned long)(now - s_replyRoutes[i].seenAt) >
+            (unsigned long)(now - s_replyRoutes[oldest].seenAt)) {
+            oldest = i;
+        }
+    }
+    if (target < 0) target = oldest;
+    s_replyRoutes[target].msgId = msgId;
+    s_replyRoutes[target].route = route;
+    s_replyRoutes[target].seenAt = now;
+}
+
+static CabinetRoute findReplyRoute(uint16_t msgId) {
+    if (msgId == 0) return CAB_ROUTE_AUTO;
+    unsigned long now = millis();
+    for (ReplyRouteEntry &entry : s_replyRoutes) {
+        if (entry.msgId == 0) continue;
+        if ((unsigned long)(now - entry.seenAt) > REPLY_ROUTE_TTL_MS) {
+            entry.msgId = 0;
+            continue;
+        }
+        if (entry.msgId == msgId) return entry.route;
+    }
+    return CAB_ROUTE_AUTO;
+}
+
+static CabinetRoute selectReplyRoute(uint16_t msgId) {
+    CabinetRoute remembered = findReplyRoute(msgId);
+    if (remembered != CAB_ROUTE_AUTO) return remembered;
+    if (s_activeIngressRoute != CAB_ROUTE_AUTO &&
+        (s_activeIngressMsgId == 0 || msgId == 0 || msgId == s_activeIngressMsgId)) {
+        return s_activeIngressRoute;
+    }
+    return CAB_ROUTE_AUTO;
+}
+
+static void cacheResponse(CabinetRoute route, const uint8_t *response,
+                          uint16_t responseLen) {
+    if (s_responseCache == nullptr || route == CAB_ROUTE_AUTO ||
+        s_activeIngressMsgId == 0 ||
+        s_activeIngressCmdId == 0 || response == nullptr || responseLen == 0 ||
+        responseLen >= MESH_RX_BUFFER_SIZE) {
+        return;
+    }
+
+    unsigned long now = millis();
+    int target = -1;
+    int oldest = 0;
+    for (int i = 0; i < RESPONSE_CACHE_SLOTS; ++i) {
+        ResponseCacheEntry &entry = s_responseCache[i];
+        if ((entry.requestMsgId == s_activeIngressMsgId &&
+             entry.requestCmdId == s_activeIngressCmdId && entry.route == route) ||
+            entry.requestMsgId == 0 || now - entry.storedAt > RESPONSE_CACHE_TTL_MS) {
+            target = i;
+            break;
+        }
+        if (now - entry.storedAt > now - s_responseCache[oldest].storedAt) {
+            oldest = i;
+        }
+    }
+    if (target < 0) target = oldest;
+    ResponseCacheEntry &entry = s_responseCache[target];
+    entry.requestMsgId = s_activeIngressMsgId;
+    entry.requestCmdId = s_activeIngressCmdId;
+    entry.responseLen = responseLen;
+    entry.route = route;
+    entry.storedAt = now;
+    memcpy(entry.response, response, responseLen);
+}
+
+static bool replayCachedResponse(uint16_t requestMsgId, uint16_t requestCmdId,
+                                 CabinetRoute route) {
+    if (s_responseCache == nullptr || requestMsgId == 0 || requestCmdId == 0 ||
+        route == CAB_ROUTE_AUTO) return false;
+    unsigned long now = millis();
+    for (int i = 0; i < RESPONSE_CACHE_SLOTS; ++i) {
+        ResponseCacheEntry &entry = s_responseCache[i];
+        if (entry.requestMsgId == 0) continue;
+        if (now - entry.storedAt > RESPONSE_CACHE_TTL_MS) {
+            entry.requestMsgId = 0;
+            continue;
+        }
+        if (entry.requestMsgId != requestMsgId ||
+            entry.requestCmdId != requestCmdId || entry.route != route) {
+            continue;
+        }
+        bool previousCorrelated = s_routeCorrelatedSend;
+        s_routeCorrelatedSend = true;
+        bool sent = MeshComm::sendAppRaw(entry.response, entry.responseLen);
+        s_routeCorrelatedSend = previousCorrelated;
+        if (sent) s_duplicateReplayCount++;
+        // A cache hit proves this request already executed. A transient replay
+        // send failure must not fall through and execute a non-idempotent
+        // command again; the host's next retry will replay the same response.
+        return true;
+    }
+    return false;
+}
 
 // ====== 初始化 ======
 void MeshComm::init() {
@@ -107,24 +308,37 @@ void MeshComm::init() {
     Storage::loadDeviceConfig(cfg);
     isRootNode = cfg.is_root;
 
+    if (!isRootNode && s_responseCache == nullptr) {
+        s_responseCache = (ResponseCacheEntry *)heap_caps_calloc(
+            RESPONSE_CACHE_SLOTS, sizeof(ResponseCacheEntry),
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (s_responseCache == nullptr) {
+            s_responseCache = (ResponseCacheEntry *)calloc(
+                RESPONSE_CACHE_SLOTS, sizeof(ResponseCacheEntry));
+        }
+    }
+
     ProtocolFrame::init();
 
     if (isRootNode) {
         // Root：仅 Mesh（上位机上行由 MeshBridge 走 USB/AP/STA）
         Debug::println(F("[MESH] === Root Mesh init ==="));
         initMesh();
-    } else if (cfg.work_mode == MODE_DEBUG) {
-        // 柜子 Debug：只开 UART0 协议，不组 Mesh
-        Debug::println(F("[MESH] === cabinet DEBUG: UART0 host only ==="));
-        initUartHost();
     } else {
-        // 柜子 Mesh：组网 + 常开 UART0（单柜直连上位机，协议同根节点）
+        // 柜子固定并行运行 Mesh + UART0，UART0 不再作为互斥工作模式。
         Debug::println(F("[MESH] === cabinet MESH + UART0 host ==="));
         initUartHost();
         initMesh();
     }
 
-    lastHeartbeatTime = millis();
+    unsigned long now = millis();
+    lastHeartbeatTime = isRootNode
+        ? now
+        : phasedLastSend(now, meshSelfMac, MESH_HEARTBEAT_INTERVAL);
+    if (!isRootNode && lastRegisterAttemptTime == 0) {
+        lastRegisterAttemptTime = phasedLastSend(
+            now, meshSelfMac, REGISTER_RETRY_INTERVAL_MS);
+    }
     unansweredHeartbeatSince = 0;
     rootResponseTimedOut = false;
     lastReconnectTime = 0;
@@ -187,9 +401,11 @@ bool MeshComm::initMesh() {
     cfg.router.ssid_len = 0;
     cfg.router.allow_router_switch = false;
     s_pureMeshNoRouter = true;
+    // Cabinet networking is pure ESP-MESH. Ignore stale router credentials on
+    // cabinets; only a Root explicitly configured for STA uplink may use them.
     bool needInfrastructureRouter =
-        (devCfg.wifi_ssid.length() > 0) &&
-        (!isRootNode || devCfg.uplink_mode == UPLINK_STA);
+        isRootNode && devCfg.uplink_mode == UPLINK_STA &&
+        devCfg.wifi_ssid.length() > 0;
     if (needInfrastructureRouter) {
         s_pureMeshNoRouter = false;
         const char *routerSsid = devCfg.wifi_ssid.c_str();
@@ -232,7 +448,7 @@ bool MeshComm::initMesh() {
         // ESP-IDF 4.4 拒绝空 router SSID。用占位 SSID 让 set_config 通过，
         // 但在 esp_mesh_start() 之前清空 STA profile（合规：start 前可调 WiFi API），
         // 避免 start 后协议栈用占位 SSID 扫描外部热点导致
-        // reason=201 MESH_NO_MEMORY + reason=106 关联超时。
+        // reason=201 (WIFI_REASON_NO_AP_FOUND) 与关联超时。
         static const char kVirtualSsid[] = "MESH_NET";
         memset(cfg.router.ssid, 0, sizeof(cfg.router.ssid));
         memcpy(cfg.router.ssid, kVirtualSsid, sizeof(kVirtualSsid) - 1);
@@ -248,6 +464,20 @@ bool MeshComm::initMesh() {
 
     esp_mesh_set_ap_authmode(WIFI_AUTH_WPA2_PSK);
     esp_mesh_set_max_layer(MESH_MAX_LAYER);
+    err = esp_mesh_set_capacity_num(MESH_NETWORK_CAPACITY);
+    if (err != ESP_OK) {
+        Debug::printf("[MESH] set capacity=%d failed: %s\n",
+                      MESH_NETWORK_CAPACITY, esp_err_to_name(err));
+        return false;
+    }
+    // Default XON queue is 32. With six children per parent it leaves only
+    // about two packets of flow-control window per child. A 64-packet window
+    // absorbs heartbeat/ACK and business bursts without the RAM cost of 128.
+    err = esp_mesh_set_xon_qsize(64);
+    if (err != ESP_OK) {
+        Debug::printf("[MESH] set xon queue=64 failed: %s\n", esp_err_to_name(err));
+        return false;
+    }
     // Every participant must use the same Fixed Root setting. This disables
     // voting while still allowing child nodes to discover/select a parent.
     err = esp_mesh_fix_root(true);
@@ -256,10 +486,17 @@ bool MeshComm::initMesh() {
                       esp_err_to_name(err));
         return false;
     }
-    // softAP 关联超时：必须大于 HEARTBEAT 间隔 (60s)，否则空闲柜子会被
-    // 踢掉导致 CHILD_DISCONNECTED/CONNECTED 抖动。设为 120s 留 60s 余量。
-    // ESP-MESH 默认值 300s 偏长（故障柜子要等 5 分钟才被清理），120s 平衡。
-    esp_mesh_set_ap_assoc_expire(120);
+    // AP association expiry is a stack-level lifetime, not an application
+    // heartbeat timeout. Ten seconds caused periodic reason=4 disconnects
+    // even while business traffic was active. Presence remains governed by
+    // the 3s heartbeat / 7s ACK timeout, so keep the radio association stable.
+    err = esp_mesh_set_ap_assoc_expire(120);
+    int actualAssocExpire = esp_mesh_get_ap_assoc_expire();
+    Debug::printf("[MESH] AP assoc expire requested=120s actual=%ds result=%s\n",
+                  actualAssocExpire, esp_err_to_name(err));
+    if (err != ESP_OK) {
+        Debug::println(F("[MESH] continuing with stack default AP association expiry"));
+    }
 
     // 禁用 Mesh 低功耗。默认 PS 开启时柜子在 beacon 间隔的大部分时间休眠，
     // beacon 丢失 -> BEACON_TIMEOUT 频繁断开。柜子市电供电，功耗不敏感，
@@ -277,8 +514,11 @@ bool MeshComm::initMesh() {
         wifi_config_t staCfg;
         memset(&staCfg, 0, sizeof(staCfg));
         esp_wifi_set_config(WIFI_IF_STA, &staCfg);
+        esp_err_t channelErr = esp_wifi_set_channel(
+            channel, WIFI_SECOND_CHAN_NONE);
         WiFi.setAutoReconnect(false);
-        Debug::println(F("[MESH] STA profile cleared before mesh start (pure mesh)"));
+        Debug::printf("[MESH] STA profile cleared; restore channel=%u result=%s\n",
+                      channel, esp_err_to_name(channelErr));
     }
 
     // set_type must be called BEFORE esp_mesh_start so the stack brings up
@@ -293,11 +533,7 @@ bool MeshComm::initMesh() {
         }
     }
 
-    // Safety net for any future call site that accidentally omits NONBLOCK.
-    // This API must be configured before esp_mesh_start().
-    // 官方建议环境差时 ≥5s，避免 esp_mesh_send 频繁超时导致 sendAppRaw failed。
-    // 实际发送都用 MESH_DATA_NONBLOCK，不会阻塞主循环。
-    err = esp_mesh_send_block_time(5000);
+    err = esp_mesh_send_block_time(100);
     if (err != ESP_OK) {
         Debug::printf("[MESH] set send block time failed: %s\n", esp_err_to_name(err));
     }
@@ -352,11 +588,22 @@ bool MeshComm::initMesh() {
     // mesh_rx 任务栈 12KB：虽然只做 esp_mesh_recv + xQueueSend，但 ESP-MESH
     // 协议栈底层在 recv 路径上可能使用一定栈。8KB 临界，12KB 留余量避免
     // 长时间运行后偶发栈溢出。
-    xTaskCreatePinnedToCore(meshReceiveTask, "mesh_rx", 12288, NULL, 5, NULL, 0);
+    BaseType_t taskResult = xTaskCreatePinnedToCore(
+        meshReceiveTask, "mesh_rx", 12288, NULL, 5, &meshReceiveTaskHandle, 0);
+    if (taskResult != pdPASS) {
+        meshReceiveTaskHandle = nullptr;
+        Debug::println(F("[MESH] failed to create receive task"));
+        esp_mesh_stop();
+        meshStarted = false;
+        return false;
+    }
 
     esp_wifi_get_mac(WIFI_IF_STA, meshSelfMac);
-    Debug::printf("[MESH] Mesh started ok, channel=%u, MAC=%s, root=%s\n",
-                  channel, macToString(meshSelfMac).c_str(),
+    uint8_t actualChannel = 0;
+    wifi_second_chan_t actualSecondary = WIFI_SECOND_CHAN_NONE;
+    esp_wifi_get_channel(&actualChannel, &actualSecondary);
+    Debug::printf("[MESH] Mesh started ok, configured_channel=%u actual_channel=%u, MAC=%s, root=%s\n",
+                  channel, actualChannel, macToString(meshSelfMac).c_str(),
                   isRootNode ? "yes" : "no");
     return true;
 }
@@ -381,7 +628,10 @@ void MeshComm::pushEventLog(int32_t eventId, const uint8_t *mac, uint8_t reason)
 void MeshComm::drainEventLog() {
     if (eventLogQueue == nullptr) return;
     EventLogEntry entry;
-    while (xQueueReceive((QueueHandle_t)eventLogQueue, &entry, 0) == pdTRUE) {
+    int processed = 0;
+    while (processed < MESH_EVENT_LOGS_PER_UPDATE &&
+           xQueueReceive((QueueHandle_t)eventLogQueue, &entry, 0) == pdTRUE) {
+        processed++;
         switch (entry.event_id) {
             case MESH_EVENT_STARTED:
                 Debug::println(F("[MESH] event: Mesh started"));
@@ -395,19 +645,26 @@ void MeshComm::drainEventLog() {
                               entry.mesh_layer, entry.child_count);
                 break;
             case MESH_EVENT_PARENT_DISCONNECTED:
-                Debug::printf("[MESH] event: PARENT_DISCONNECTED parent=%s reason=%d childCount=%d\n",
+                Debug::printf("[MESH] event: PARENT_DISCONNECTED parent=%s reason=%d(%s) childCount=%d\n",
                               macToString(entry.mac).c_str(),
-                              entry.reason, entry.child_count);
+                              entry.reason, wifiDisconnectReasonName(entry.reason),
+                              entry.child_count);
                 break;
             case MESH_EVENT_CHILD_CONNECTED:
                 Debug::printf("[MESH] event: CHILD_CONNECTED child=%s (total %d)\n",
                               macToString(entry.mac).c_str(),
                               entry.child_count);
+                if (peerConnectionCb != nullptr) {
+                    peerConnectionCb(entry.mac, true);
+                }
                 break;
             case MESH_EVENT_CHILD_DISCONNECTED:
                 Debug::printf("[MESH] event: CHILD_DISCONNECTED child=%s (remaining %d)\n",
                               macToString(entry.mac).c_str(),
                               entry.child_count);
+                if (peerConnectionCb != nullptr) {
+                    peerConnectionCb(entry.mac, false);
+                }
                 break;
             case MESH_EVENT_ROOT_ADDRESS:
                 Debug::printf("[MESH] event: Root address=%s\n",
@@ -454,6 +711,8 @@ void MeshComm::meshEventHandler(void *arg, esp_event_base_t event_base,
             meshConnected = true;
             reconnectAttempt = 0;
             parentDisconnectedSince = 0;
+            lastHeartbeatTime = phasedLastSend(
+                millis(), meshSelfMac, MESH_HEARTBEAT_INTERVAL);
             // 根节点重启场景：根节点 reboot 后路由表清空，柜子已 registeredWithRoot=true
             // 不会重发 REGISTER → 根节点路由表直到下次 HEARTBEAT 才能重建。
             // 解决：PARENT_CONNECTED 时检查距上次 REGISTER 是否 > 30 秒，
@@ -494,8 +753,16 @@ void MeshComm::meshEventHandler(void *arg, esp_event_base_t event_base,
             meshConnected = false;
             if (parentDisconnectedSince == 0) {
                 parentDisconnectedSince = millis();
+                lastReconnectTime = 0;
             }
-            triggerReconnect();
+            // The physical parent is gone, so the application-level "stale
+            // Root route" recovery no longer applies. Let ESP-MESH scan on
+            // its own and start a fresh heartbeat window after reconnect.
+            rootResponseTimedOut = false;
+            unansweredHeartbeatSince = 0;
+            rootUnreachableSince = 0;
+            lastRootRecoveryTime = 0;
+            reconnectAttempt = 0;
             // 详细日志：传入 parent MAC + reason code 便于排查 1/0 抖动根因
             // event_data 是 wifi_event_sta_disconnected_t，含 bssid[6] 和 reason
             uint8_t parentMac[6] = {0};
@@ -592,6 +859,60 @@ void MeshComm::meshReceiveTask(void *arg) {
     }
 }
 
+// Rebuild only the cabinet's Mesh stack when a parent association survives a
+// Root reboot but the application route does not. UART0 and all cabinet
+// business state remain online throughout this recovery.
+bool MeshComm::restartCabinetMeshStack() {
+    if (isRootNode) return false;
+
+    Debug::println(F("[MESH] rebuilding cabinet Mesh stack; UART0 stays online"));
+
+    if (meshReceiveTaskHandle != nullptr) {
+        vTaskDelete(meshReceiveTaskHandle);
+        meshReceiveTaskHandle = nullptr;
+    }
+
+    // Stop self-organization before deinit so no scan/parent callback races
+    // the new stack. These calls are deliberately outside the Mesh event task.
+    esp_err_t organizeErr = esp_mesh_set_self_organized(false, false);
+    esp_err_t stopErr = esp_mesh_stop();
+    esp_event_handler_unregister(MESH_EVENT, ESP_EVENT_ANY_ID, &MeshComm::meshEventHandler);
+    esp_err_t deinitErr = esp_mesh_deinit();
+
+    meshStarted = false;
+    meshConnected = false;
+    meshLayer = 0;
+    childCount = 0;
+    memset(meshParentMac, 0, sizeof(meshParentMac));
+    memset(rootMac, 0, sizeof(rootMac));
+    rootMacKnown = false;
+    registeredWithRoot = false;
+    if (msgQueue != nullptr) xQueueReset((QueueHandle_t)msgQueue);
+    if (eventLogQueue != nullptr) xQueueReset((QueueHandle_t)eventLogQueue);
+
+    Debug::printf("[MESH] stack teardown organize=%s stop=%s deinit=%s\n",
+                  esp_err_to_name(organizeErr), esp_err_to_name(stopErr),
+                  esp_err_to_name(deinitErr));
+    delay(100);
+
+    bool ok = MeshComm::initMesh();
+    unsigned long now = millis();
+    MeshComm::lastHeartbeatTime = phasedLastSend(
+        now, MeshComm::meshSelfMac, MESH_HEARTBEAT_INTERVAL);
+    MeshComm::unansweredHeartbeatSince = 0;
+    MeshComm::rootResponseTimedOut = false;
+    MeshComm::lastReconnectTime = 0;
+    MeshComm::reconnectAttempt = 0;
+    MeshComm::lastRegisterAttemptTime = 0;
+    parentDisconnectedSince = ok ? now : 0;
+    rootUnreachableSince = 0;
+    lastRootRecoveryTime = 0;
+    lastForcedReconnectTime = now;
+
+    Debug::printf("[MESH] cabinet Mesh stack rebuild %s\n", ok ? "started" : "failed");
+    return ok;
+}
+
 // ====== 主循环更新 ======
 void MeshComm::update() {
     unsigned long now = millis();
@@ -601,7 +922,10 @@ void MeshComm::update() {
     // Never construct Arduino String from raw bytes without length — it truncates.
     if (msgQueue != nullptr) {
         MeshMessage msg;
-        while (xQueueReceive((QueueHandle_t)msgQueue, &msg, 0) == pdTRUE) {
+        int processed = 0;
+        while (processed < MESH_RX_PER_UPDATE &&
+               xQueueReceive((QueueHandle_t)msgQueue, &msg, 0) == pdTRUE) {
+            processed++;
             uint16_t n = msg.length;
             if (n >= MESH_RX_BUFFER_SIZE) n = MESH_RX_BUFFER_SIZE - 1;
             // Copy into a length-preserving String (ESP32 Arduino String has
@@ -610,6 +934,7 @@ void MeshComm::update() {
             processReceivedMessage(msg.fromMac, raw);
         }
     }
+
     ReliableTx::update();
 
     // 注：原主循环 STA 守卫（每 10s 调 esp_wifi_scan_stop / set_config / disconnect）
@@ -623,43 +948,37 @@ void MeshComm::update() {
         updateUartHost();
     }
 
-    WorkMode mode = Storage::loadWorkMode();
-    if (mode == MODE_DEBUG || !meshStarted) {
+    if (!meshStarted) {
         return;
     }
 
-    // ====== Mesh 模式 ======
+    // ====== Mesh mode ======
     if (!isRootNode && !meshConnected) {
         if (parentDisconnectedSince == 0) {
             parentDisconnectedSince = now;
         }
-        int delayIdx = reconnectAttempt;
-        if (delayIdx >= 5) delayIdx = 4;
-        if (now - lastReconnectTime >= (unsigned long)reconnectDelays[delayIdx]) {
+
+        // esp_mesh_set_self_organized(true, true) owns scanning and parent
+        // selection. Repeatedly calling set_self_organized + esp_mesh_connect
+        // here creates AUTH_EXPIRE/AUTH_FAIL loops and leaks WiFi/Mesh buffers.
+        // Only report the passive wait; the stack reconnects by itself.
+        if (lastReconnectTime == 0 || now - lastReconnectTime >= 30000UL) {
             lastReconnectTime = now;
-            reconnectAttempt++;
-            // Self-organized Mesh normally reconnects by itself, but an
-            // explicit bounded kick recovers a stalled parent-selection
-            // state without requiring a cabinet power cycle.
-            esp_err_t organizeErr = esp_mesh_set_self_organized(true, true);
-            esp_err_t connectErr = esp_mesh_connect();
-            meshRecoveryCount++;
-            Debug::printf("[MESH] parent recovery try=%d interval=%d ms organize=%s connect=%s\n",
-                          reconnectAttempt, reconnectDelays[delayIdx],
-                          esp_err_to_name(organizeErr), esp_err_to_name(connectErr));
+            Debug::printf("[MESH] waiting for self-organized parent, offline_ms=%lu\n",
+                          now - parentDisconnectedSince);
         }
 
         if (now - parentDisconnectedSince >= MESH_RESTART_AFTER_MS) {
-            Debug::println(F("[MESH] parent unavailable for 180s; restarting cabinet"));
-            delay(50);
-            ESP.restart();
+            Debug::println(F("[MESH] parent unavailable for 180s; self-organized scan continues (UART0 stays online)"));
+            parentDisconnectedSince = now;
+            lastReconnectTime = 0;
         }
     }
 
     // A parent association alone is insufficient: the cabinet must receive
     // Root application traffic.  Flush a stuck upstream queue, re-register,
     // and finally force a fresh parent association if ACKs remain absent.
-    if (!isRootNode && rootResponseTimedOut) {
+    if (!isRootNode && meshConnected && rootResponseTimedOut) {
         if (rootUnreachableSince == 0) rootUnreachableSince = now;
 
         if (lastRootRecoveryTime == 0 ||
@@ -673,26 +992,23 @@ void MeshComm::update() {
                           meshQueueFullCount);
         }
 
-        // 兜底机制：仅当 Root 应用层长时间（MESH_FORCE_REASSOC_MS=120s）无响应、
-        // 且 Mesh 协议栈自愈失败时，才强制断开 parent 重关联。正常 flap 由协议栈
-        // 自行处理，不进这里。原 60s 偏激进，会打断协议栈自愈导致 flap 加剧。
+        // 兜底机制：仅当 Root 应用层持续 30s 无响应、
+        // 且 Mesh 协议栈自愈失败时，原地重建柜子的 Mesh 栈。Root 重启后旧的
+        // parent association 可能仍显示 connected，但上行路由已经失效；单纯
+        // disconnect/reconnect 无法可靠清掉该状态。UART0 不参与重建，始终在线。
         if (meshConnected &&
             now - rootUnreachableSince >= FORCE_REASSOC_AFTER_MS &&
             (lastForcedReconnectTime == 0 ||
              now - lastForcedReconnectTime >= FORCE_REASSOC_AFTER_MS)) {
             lastForcedReconnectTime = now;
             meshRecoveryCount++;
-            Debug::println(F("[MESH] Root still silent; forcing parent reassociation"));
-            esp_mesh_disconnect();
-            meshConnected = false;
-            if (parentDisconnectedSince == 0) parentDisconnectedSince = now;
-            triggerReconnect();
+            restartCabinetMeshStack();
+            return;
         }
 
         if (now - rootUnreachableSince >= MESH_RESTART_AFTER_MS) {
-            Debug::println(F("[MESH] Root application link unavailable for 180s; restarting cabinet"));
-            delay(50);
-            ESP.restart();
+            Debug::println(F("[MESH] Root application link unavailable for 180s; self-organized recovery continues"));
+            rootUnreachableSince = now;
         }
     }
 
@@ -726,10 +1042,13 @@ void MeshComm::update() {
                           "\"min_free_heap\":" + String(MemPool::minFreeInternalHeap()) + "," +
                           "\"largest_free_block\":" + String(MemPool::largestFreeBlock()) + "," +
                           "\"mesh_send_failures\":" + String(meshSendFailureCount) + "," +
-                          "\"mesh_queue_full\":" + String(meshQueueFullCount) + "," +
-                          "\"mesh_recoveries\":" + String(meshRecoveryCount) + "}";
+                           "\"mesh_queue_full\":" + String(meshQueueFullCount) + "," +
+                           "\"mesh_recoveries\":" + String(meshRecoveryCount) + "," +
+                           "\"perm_version\":" + String(cfg.perm_version) + "}";
             lastRegisterAttemptTime = now;
-            registeredWithRoot = sendMessage("REGISTER", data);
+            registeredWithRoot = sendControlAppToMesh(
+                CMD_REGISTER, appNextMsgId(),
+                (const uint8_t *)data.c_str(), (uint16_t)data.length());
             if (registeredWithRoot) {
                 Debug::println(F("[MESH] cabinet REGISTER sent to Root"));
             }
@@ -737,7 +1056,7 @@ void MeshComm::update() {
     }
 
     // HEARTBEAT：二进制应用信封（packHeartbeat），Root 回复 CMD_HEARTBEAT_ACK。
-    // 连续 30s 无任何 Root 下行消息时，应用层判为不可达并触发 REGISTER 重建。
+    // 连续 7s 无任何 Root 下行消息时，应用层判为不可达并触发 REGISTER 重建。
     if (!isRootNode && meshConnected && meshStarted &&
         now - lastHeartbeatTime >= MESH_HEARTBEAT_INTERVAL) {
         lastHeartbeatTime = now;
@@ -753,7 +1072,8 @@ void MeshComm::update() {
                                   (uint16_t)meshQueueFullCount,
                                   (uint16_t)meshRecoveryCount);
         if (hbLen > 0) {
-            sendApp(CMD_HEARTBEAT, appNextMsgId(), 0, hbPl, (uint16_t)hbLen, nullptr);
+            sendControlAppToMesh(CMD_HEARTBEAT, appNextMsgId(),
+                                 hbPl, (uint16_t)hbLen);
         }
         // 无论本次 send 是否成功都启动超时计时：持续发送失败本身就说明
         // Root 应用链路不可达，不能继续仅凭 parent association 报在线。
@@ -762,6 +1082,10 @@ void MeshComm::update() {
         } else if (now - unansweredHeartbeatSince >= MESH_ROUTE_TIMEOUT_MS) {
             if (!rootResponseTimedOut) {
                 Debug::println(F("[MESH] Root heartbeat ACK timeout; re-registering"));
+                // Spread a Root-reboot recovery burst across the full REGISTER
+                // interval. With 100 cabinets this avoids one synchronized wave.
+                lastRegisterAttemptTime = phasedLastSend(
+                    now, meshSelfMac, REGISTER_RETRY_INTERVAL_MS);
             }
             rootResponseTimedOut = true;
             if (rootUnreachableSince == 0) {
@@ -794,43 +1118,38 @@ bool MeshComm::sendMessage(const String &cmd, const String &dataJson,
 
         const String &data = dataJson.length() > 0 ? dataJson : String("{}");
         if (data.length() > APP_MAX_PAYLOAD) {
-            // Oversized data: fall back to legacy full JSON (rare; SD uses PART).
-            DeviceConfig cfg;
-            Storage::loadDeviceConfig(cfg);
-            return sendRaw(ProtocolFrame::buildMessage(cmd, cfg.device_id, data, msgId));
+            // Mesh MTU cannot carry oversized single payloads. Caller must use PART.
+            Debug::printf("[MESH] oversized app payload cmd=%s len=%u dropped (use PART)\n",
+                          cmd.c_str(), (unsigned)data.length());
+            return false;
         }
-        return sendApp(cmdId, mid, flags,
-                       (const uint8_t *)data.c_str(), (uint16_t)data.length(), nullptr);
+        bool previousCorrelated = s_routeCorrelatedSend;
+        s_routeCorrelatedSend = msgId.length() > 0 ||
+                                s_activeIngressRoute != CAB_ROUTE_AUTO;
+        bool ok = sendApp(cmdId, mid, flags,
+                          (const uint8_t *)data.c_str(), (uint16_t)data.length(), nullptr);
+        s_routeCorrelatedSend = previousCorrelated;
+        return ok;
     }
 
-    DeviceConfig cfg;
-    Storage::loadDeviceConfig(cfg);
-    String json = ProtocolFrame::buildMessage(cmd, cfg.device_id, dataJson, msgId);
-    return sendRaw(json);
+    // Unknown cmd string: do not emit legacy full JSON.
+    Debug::printf("[MESH] unknown cmd name '%s' dropped (register in cmd_ids)\n", cmd.c_str());
+    return false;
 }
 
 bool MeshComm::sendRaw(const String &json) {
-    // ====== 链路独立性原则 ======
-    // Mesh 与 UART0 是两条物理上独立并行的链路：
-    //   - UART0：柜子直连 PC 的调试/单柜协议口（MODE_DEBUG 模式独占）
-    //   - Mesh：组网通讯，柜子经根节点转发到上位机（Mesh 模式独占）
-    // 不做任何"Mesh 失败回退 UART0"的降级——那样只会让数据流向混乱、
-    // 业务消息假性丢失、调试日志误导排查方向。Mesh 失败就让业务层感知
-    // 失败，由调用方决定是否重试，绝不偷偷切链路。
+    if (isRootNode) return false; // Root uplink uses MeshBridge
 
-    // 柜子 Debug 模式：UART0 链路独占（不组 Mesh）
-    if (!isRootNode && Storage::loadWorkMode() == MODE_DEBUG) {
+    // Legacy JSON is retained only for compatibility. Synchronous UART0
+    // responses still follow the active request; autonomous traffic prefers
+    // Mesh and uses UART0 only when the Mesh application link is unavailable.
+    CabinetRoute route = s_activeIngressRoute;
+    if (route == CAB_ROUTE_UART0 ||
+        (route == CAB_ROUTE_AUTO && !isMeshConnected() && isUartHostConnected())) {
         return uartHostSendRaw(json);
     }
-
-    if (isRootNode) {
-        // Root 上行由 MeshBridge 负责
-        return false;
-    }
-
-    // ====== Mesh 链路（柜子 Mesh 模式） ======
-    if (!meshStarted) {
-        Debug::println(F("[MESH] send failed: Mesh not started (no fallback to UART0)"));
+    if (!isMeshConnected()) {
+        Debug::println(F("[MESH] legacy send failed: no active Mesh/UART0 route"));
         return false;
     }
 
@@ -847,78 +1166,113 @@ bool MeshComm::sendRaw(const String &json) {
         }
     }
 
-    mesh_data_t data;
     if (json.length() >= MESH_RX_BUFFER_SIZE) {
         Debug::printf("[MESH] payload too large for Mesh MTU: %u\n",
                       (unsigned)json.length());
         return false;
     }
-    static uint8_t sendBuf[MESH_RX_BUFFER_SIZE];
     size_t copyLen = json.length();
     if (copyLen >= MESH_RX_BUFFER_SIZE) copyLen = MESH_RX_BUFFER_SIZE - 1;
+    static uint8_t sendBuf[MESH_RX_BUFFER_SIZE];
     memcpy(sendBuf, json.c_str(), copyLen);
-    sendBuf[copyLen] = 0;
+    mesh_data_t data;
     data.data = sendBuf;
-    data.size = (int)copyLen;
+    data.size = (uint16_t)copyLen;
     data.proto = MESH_PROTO_JSON;
     data.tos = MESH_TOS_P2P;
-
-    // Official ESP-MESH upstream form: to=NULL, flag=0. NONBLOCK is added by
-    // boundedMeshSend().  Never use P2P with a remembered Root MAC here.
-    esp_err_t err = boundedMeshSend(NULL, &data, 0);
-    if (err != ESP_OK) {
-        Debug::printf("[MESH] esp_mesh_send failed: %s (no fallback to UART0)\n",
-                      esp_err_to_name(err));
-        return false;
-    }
-    return true;
+    return boundedMeshSend(nullptr, &data, 0) == ESP_OK;
 }
 
-// Binary app envelope → Mesh upstream / UART0 host (no outer A5 on mesh).
-bool MeshComm::sendAppRaw(const uint8_t *appMsg, uint16_t len) {
+bool MeshComm::sendAppRawToUart(const uint8_t *appMsg, uint16_t len) {
     if (appMsg == nullptr || len == 0) return false;
-
-    if (!isRootNode && Storage::loadWorkMode() == MODE_DEBUG) {
-        if (!debugUartReady) return false;
-        uint8_t *frameBuf = MemPool::frameTxBuf();
-        size_t poolSize = MemPool::frameTxBufSize();
-        if (frameBuf == nullptr) return false;
-        int cap = ProtocolFrame::getEncodedCapacityBytes(len);
-        if (cap < 0 || (size_t)cap > poolSize) {
-            Debug::println(F("[MESH] UART0 binary frame exceeds TX pool"));
-            return false;
-        }
-        int frameLen = ProtocolFrame::encodeBytes(appMsg, len, frameBuf, (int)poolSize);
-        if (frameLen < 0) return false;
-        size_t sent = Serial.write(frameBuf, frameLen);
-        Serial.flush();
-        return sent == (size_t)frameLen;
+    if (!debugUartReady) return false;
+    uint8_t *frameBuf = MemPool::frameTxBuf();
+    size_t poolSize = MemPool::frameTxBufSize();
+    if (frameBuf == nullptr) return false;
+    int cap = ProtocolFrame::getEncodedCapacityBytes(len);
+    if (cap < 0 || (size_t)cap > poolSize) {
+        Debug::println(F("[MESH] UART0 binary frame exceeds TX pool"));
+        return false;
     }
+    int frameLen = ProtocolFrame::encodeBytes(appMsg, len, frameBuf, (int)poolSize);
+    if (frameLen < 0) return false;
+    return SerialUplink::write(frameBuf, (size_t)frameLen);
+}
 
+bool MeshComm::sendControlAppToMesh(uint16_t cmdId, uint16_t msgId,
+                                    const uint8_t *payload, uint16_t payloadLen) {
+    if (isRootNode || !meshStarted || !meshConnected) return false;
+
+    DeviceConfig cfg;
+    Storage::loadDeviceConfig(cfg);
+    String selfMac = macToString(meshSelfMac);
+    uint8_t *scratch = MemPool::meshTxScratch();
+    size_t scratchSize = MemPool::meshTxScratchSize();
+    if (scratch == nullptr) return false;
+
+    int encoded = appEncode(
+        scratch, (int)scratchSize, cmdId, msgId, 0, 0,
+        cfg.device_id.c_str(), selfMac.c_str(), payload, payloadLen, 0);
+    if (encoded < 0) return false;
+
+    // REGISTER/HEARTBEAT repair the Root application route. They must use the
+    // associated Mesh transport even while rootResponseTimedOut is true.
+    return sendAppRawToMesh(scratch, (uint16_t)encoded);
+}
+
+bool MeshComm::sendAppRawToMesh(const uint8_t *appMsg, uint16_t len) {
+    if (appMsg == nullptr || len == 0) return false;
     if (isRootNode) return false; // Root uplink uses MeshBridge
-    if (!meshStarted) return false;
+    if (!meshStarted || !meshConnected) return false;
     if (len >= MESH_RX_BUFFER_SIZE) {
         Debug::printf("[MESH] app payload too large: %u\n", (unsigned)len);
         return false;
     }
 
+    const mesh_proto_t proto = MESH_PROTO_BIN;
     static uint8_t sendBuf[MESH_RX_BUFFER_SIZE];
     memcpy(sendBuf, appMsg, len);
     mesh_data_t data;
     data.data = sendBuf;
-    data.size = (int)len;
-#ifdef MESH_PROTO_BIN
-    data.proto = MESH_PROTO_BIN;
-#else
-    data.proto = MESH_PROTO_JSON;
-#endif
+    data.size = len;
+    data.proto = proto;
     data.tos = MESH_TOS_P2P;
-    esp_err_t err = boundedMeshSend(NULL, &data, 0);
-    if (err != ESP_OK) {
-        Debug::printf("[MESH] sendAppRaw failed: %s\n", esp_err_to_name(err));
-        return false;
+    return boundedMeshSend(nullptr, &data, 0) == ESP_OK;
+}
+
+// Binary app envelope -> original request route. Device-originated traffic
+// uses Mesh as primary and UART0 only when Mesh is unavailable and a host has
+// already proved it can speak the protocol.
+bool MeshComm::sendAppRaw(const uint8_t *appMsg, uint16_t len) {
+    if (appMsg == nullptr || len == 0 || isRootNode) return false;
+
+    uint16_t msgId = 0;
+    AppMessageView view;
+    if (appDecode(appMsg, (int)len, view)) msgId = view.msg_id;
+    bool isAckOrError = appDecode(appMsg, (int)len, view) &&
+                        (view.flags & (APP_FLAG_IS_ACK | APP_FLAG_IS_ERROR));
+    CabinetRoute route = (s_routeCorrelatedSend || isAckOrError ||
+                           s_activeIngressRoute != CAB_ROUTE_AUTO)
+        ? selectReplyRoute(msgId) : CAB_ROUTE_AUTO;
+
+    if (route == CAB_ROUTE_UART0) {
+        cacheResponse(route, appMsg, len);
+        return sendAppRawToUart(appMsg, len);
     }
-    return true;
+    if (route == CAB_ROUTE_MESH) {
+        cacheResponse(route, appMsg, len);
+        return sendAppRawToMesh(appMsg, len);
+    }
+
+    if (isMeshConnected()) {
+        cacheResponse(CAB_ROUTE_MESH, appMsg, len);
+        return sendAppRawToMesh(appMsg, len);
+    }
+    if (isUartHostConnected()) {
+        cacheResponse(CAB_ROUTE_UART0, appMsg, len);
+        return sendAppRawToUart(appMsg, len);
+    }
+    return false;
 }
 
 bool MeshComm::sendToNodeApp(const uint8_t *mac, const uint8_t *appMsg, uint16_t len) {
@@ -937,12 +1291,14 @@ bool MeshComm::sendToNodeApp(const uint8_t *mac, const uint8_t *appMsg, uint16_t
     mesh_data_t data;
     data.data = sendBuf;
     data.size = (int)len;
-#ifdef MESH_PROTO_BIN
     data.proto = MESH_PROTO_BIN;
-#else
-    data.proto = MESH_PROTO_JSON;
-#endif
-    data.tos = MESH_TOS_P2P;
+    // Root downlink stays best-effort at the Mesh stack. P2P retransmission on
+    // this IDF build retains heartbeat ACKs until the internal pool is exhausted
+    // (ESP_ERR_MESH_NO_MEMORY). Application msg_id replay handles business retry.
+    data.tos = MESH_TOS_DEF;
+    // ESP-IDF requires FROMDS for Root -> internal-node traffic. P2P is the
+    // route-search flag for peer sends from non-Root nodes and can strand the
+    // downlink in the wrong Mesh queue when used by a fixed Root.
     esp_err_t err = boundedMeshSend(&dest, &data, MESH_DATA_FROMDS);
     if (err != ESP_OK) {
         Debug::printf("[MESH] sendToNodeApp failed: %s\n", esp_err_to_name(err));
@@ -962,8 +1318,9 @@ bool MeshComm::sendApp(uint16_t cmdId, uint16_t msgId, uint8_t flags,
     uint8_t *scratch = MemPool::meshTxScratch();
     size_t scratchSize = MemPool::meshTxScratchSize();
     if (scratch == nullptr) return false;
+    const char *sourceId = cmdId == CMD_STATUS_RESPONSE ? nullptr : selfMac.c_str();
     int n = appEncode(scratch, (int)scratchSize, cmdId, msgId, 0, flags,
-                      did, selfMac.c_str(), payload, payloadLen, 0);
+                      did, sourceId, payload, payloadLen, 0);
     if (n < 0) return false;
     return sendAppRaw(scratch, (uint16_t)n);
 }
@@ -986,10 +1343,8 @@ bool MeshComm::sendToNode(const uint8_t *mac, const String &json) {
     data.data = (uint8_t*)json.c_str();
     data.size = json.length();
     data.proto = MESH_PROTO_JSON;
-    data.tos = MESH_TOS_P2P;
+    data.tos = MESH_TOS_DEF;
 
-    // Root-to-internal-node traffic must be marked FROMDS.  The bounded
-    // non-blocking retry prevents a missing cabinet from freezing Root.
     esp_err_t err = boundedMeshSend(&dest, &data, MESH_DATA_FROMDS);
     if (err != ESP_OK) {
         Debug::printf("[MESH] sendToNode failed: %s\n", esp_err_to_name(err));
@@ -1007,14 +1362,16 @@ void MeshComm::setMeshMessageCallback(MeshMessageCallback cb) {
     meshMsgCb = cb;
 }
 
+void MeshComm::setPeerConnectionCallback(PeerConnectionCallback cb) {
+    peerConnectionCb = cb;
+}
+
 // ====== 状态查询 ======
 bool MeshComm::isConnected() {
-    if (!isRootNode && debugUartReady && debugHostSeen) {
-        return true;
-    }
-    if (!isRootNode && Storage::loadWorkMode() == MODE_DEBUG) {
-        return debugUartReady;
-    }
+    return isMeshConnected() || isUartHostConnected();
+}
+
+bool MeshComm::isMeshConnected() {
     return meshConnected && (isRootNode || !rootResponseTimedOut);
 }
 
@@ -1022,8 +1379,13 @@ bool MeshComm::isUartHostReady() {
     return debugUartReady;
 }
 
+bool MeshComm::isUartHostConnected() {
+    return !isRootNode && debugUartReady && debugHostSeen &&
+           millis() - lastDebugHostRx < UART_HOST_TIMEOUT_MS;
+}
+
 WorkMode MeshComm::getMode() {
-    return Storage::loadWorkMode();
+    return isRootNode ? Storage::loadWorkMode() : MODE_MESH;
 }
 
 bool MeshComm::isRoot() {
@@ -1048,9 +1410,8 @@ int MeshComm::getChildCount() {
 
 void MeshComm::triggerReconnect() {
     if (!isRootNode) {
-        // May be called from the sys_evt task: state only, no logging or Mesh
-        // API calls here.  Recovery is performed from update() on loopTask.
-        lastReconnectTime = 0;
+        // State only: ESP-MESH owns parent selection. Do not reset the
+        // 30-second passive-wait log timer on every failed scan event.
         reconnectAttempt = 0;
     }
 }
@@ -1071,10 +1432,43 @@ uint32_t MeshComm::getRecoveryCount() {
     return meshRecoveryCount;
 }
 
+uint32_t MeshComm::getDuplicateReplayCount() {
+    return s_duplicateReplayCount;
+}
+
+int MeshComm::getLinkRssi() {
+    if (!meshStarted) return -127;
+    if (!isRootNode) {
+        int rssi = -127;
+        return esp_wifi_sta_get_rssi(&rssi) == ESP_OK ? rssi : -127;
+    }
+
+    wifi_sta_list_t stations = {};
+    if (esp_wifi_ap_get_sta_list(&stations) != ESP_OK || stations.num == 0) {
+        return -127;
+    }
+    int weakestRssi = stations.sta[0].rssi;
+    for (int index = 1; index < stations.num; ++index) {
+        if (stations.sta[index].rssi < weakestRssi) {
+            weakestRssi = stations.sta[index].rssi;
+        }
+    }
+    return weakestRssi;
+}
+
+int MeshComm::getApAssocExpireSeconds() {
+    return meshStarted ? esp_mesh_get_ap_assoc_expire() : 0;
+}
+
 // ====== 柜子 UART0 主机协议口（与根节点 USB 上行同协议） ======
 // 物理口：ESP32-S3 UART0 默认 U0TXD=GPIO43 / U0RXD=GPIO44
 // 波特率：UPLINK_USB_BAUD（921600），帧：0xA5 0x5A + CRC16
 // Mesh 模式下也常开，便于不经 Mesh 单柜联调上位机
+
+static void markUartHostSeen() {
+    debugHostSeen = true;
+    lastDebugHostRx = millis();
+}
 
 static void uartHostHandlePlainTextProbe(uint8_t b) {
     static char line[16];
@@ -1083,11 +1477,11 @@ static void uartHostHandlePlainTextProbe(uint8_t b) {
     if (b == '\n') {
         line[pos < sizeof(line) ? pos : (sizeof(line) - 1)] = 0;
         if (strcasecmp(line, "PING") == 0 || strcasecmp(line, "AT") == 0) {
-            Serial.print("PONG\r\n");
-            Serial.flush();
+            markUartHostSeen();
+            SerialUplink::writeText("PONG\r\n");
         } else if (strcasecmp(line, "HELP") == 0) {
-            Serial.print("OK CABINET_UART0_FRAME=HEX baud=921600 same_as_root\r\n");
-            Serial.flush();
+            markUartHostSeen();
+            SerialUplink::writeText("OK CABINET_UART0_FRAME=HEX baud=921600 same_as_root\r\n");
         }
         pos = 0;
         return;
@@ -1108,23 +1502,33 @@ void MeshComm::uartHostAnnounceRegister() {
                   "\",\"is_root\":false,\"firmware_version\":\"" FIRMWARE_VERSION "\","
                   "\"uplink\":\"uart0\",\"role\":\"cabinet\","
                   "\"mesh_mac\":\"" + selfMac + "\","
+                  "\"perm_version\":" + String(cfg.perm_version) + ","
                   "\"sd_ready\":false}";
-    // 优先二进制信封
-    if (sendApp(CMD_REGISTER, appNextMsgId(), 0,
-                (const uint8_t *)data.c_str(), (uint16_t)data.length(), nullptr)) {
-        lastDebugAnnounce = millis();
-        return;
+
+    uint8_t *scratch = MemPool::meshTxScratch();
+    size_t scratchSize = MemPool::meshTxScratchSize();
+    uint16_t msgId = appNextMsgId();
+    int n = scratch == nullptr ? -1 :
+        appEncode(scratch, (int)scratchSize, CMD_REGISTER, msgId, 0, 0,
+                  cfg.device_id.c_str(), selfMac.c_str(),
+                  (const uint8_t *)data.c_str(), (uint16_t)data.length(), 0);
+    if (n <= 0) {
+        Debug::println(F("[MESH] UART0 REGISTER binary encode failed"));
+    } else if (!sendAppRawToUart(scratch, (uint16_t)n)) {
+        Debug::println(F("[MESH] UART0 REGISTER frame send failed"));
     }
-    String json = ProtocolFrame::buildMessage("REGISTER", cfg.device_id, data);
-    uartHostSendRaw(json);
     lastDebugAnnounce = millis();
 }
 
 bool MeshComm::initUartHost() {
+    // UART0 starts before esp_mesh_init(), so read the deterministic STA MAC
+    // directly instead of announcing 00:00:00:00:00:00 on the first frame.
+    esp_read_mac(meshSelfMac, ESP_MAC_WIFI_STA);
     ProtocolFrame::resetDecoder();
     debugUartReady = true;
     debugHostSeen = false;
     lastDebugAnnounce = 0;
+    lastDebugHostRx = 0;
 
     // 与根节点 USB 上行一致：日志封成 LOG 帧，不打断协议解析
     Debug::setFraming(true);
@@ -1147,6 +1551,10 @@ void MeshComm::updateUartHost() {
     uartHostProcessIncoming();
 
     unsigned long now = millis();
+    if (debugHostSeen && now - lastDebugHostRx >= UART_HOST_TIMEOUT_MS) {
+        debugHostSeen = false;
+        lastDebugAnnounce = 0;
+    }
     // 上位机未回协议前周期性 REGISTER（同根节点 announce）
     if (!debugHostSeen &&
         (lastDebugAnnounce == 0 ||
@@ -1154,19 +1562,46 @@ void MeshComm::updateUartHost() {
         uartHostAnnounceRegister();
     }
 
-    // Debug-only 模式心跳；Mesh 模式心跳走 Mesh 路径
-    if (Storage::loadWorkMode() == MODE_DEBUG &&
-        now - lastHeartbeatTime >= MESH_HEARTBEAT_INTERVAL) {
-        lastHeartbeatTime = now;
-        MemPool::noteHeapSample();
-        String hbData = "{\"free_heap\":" + String(MemPool::freeInternalHeap()) +
-                        ",\"free_psram\":" + String(MemPool::freePsram()) +
-                        ",\"min_free_heap\":" + String(MemPool::minFreeInternalHeap()) +
-                        ",\"largest_free_block\":" + String(MemPool::largestFreeBlock()) +
-                        ",\"mesh_layer\":0,\"mesh_send_failures\":0,"
-                        "\"mesh_queue_full\":0,\"mesh_recoveries\":0}";
-        sendMessage("HEARTBEAT", hbData);
+}
+
+
+// Convert legacy full JSON message into binary app envelope for UART0 host.
+static int uartLegacyJsonToApp(const String &json, uint8_t *out, int outSize) {
+    if (out == nullptr || outSize < APP_ENVELOPE_MIN || json.length() < 8) return -1;
+    if (json[0] != '{') return -1;
+    DynamicJsonDocument doc(json.length() + 512);
+    if (deserializeJson(doc, json)) return -1;
+    const char *cmd = doc["cmd"] | "";
+    if (cmd[0] == '\0') return -1;
+    uint16_t cmdId = appCmdIdFromName(cmd);
+    if (cmdId == 0) return -1;
+    uint16_t mid = 0;
+    if (!doc["msg_id"].isNull()) {
+        if (doc["msg_id"].is<const char*>() || doc["msg_id"].is<String>())
+            mid = (uint16_t)atoi(doc["msg_id"] | "0");
+        else
+            mid = (uint16_t)(doc["msg_id"] | 0);
     }
+    if (mid == 0) mid = appNextMsgId();
+    const char *deviceId = doc["device_id"] | "";
+    const char *sourceId = doc["source_device_id"] | "";
+    if (sourceId[0] == '\0') sourceId = doc["data"]["mesh_mac"] | "";
+    String dataPayload = "{}";
+    if (!doc["data"].isNull()) {
+        dataPayload = "";
+        serializeJson(doc["data"], dataPayload);
+        if (dataPayload.length() == 0) dataPayload = "{}";
+    }
+    if ((int)dataPayload.length() > (FRAGMENT_REASSEMBLY_BUF - 64)) return -1;
+    uint8_t flags = 0;
+    if (cmdId == CMD_ACK || cmdId == CMD_HEARTBEAT_ACK || cmdId == CMD_SYNC_ACK)
+        flags |= APP_FLAG_IS_ACK;
+    if (cmdId == CMD_ERROR) flags |= APP_FLAG_IS_ERROR;
+    return appEncode(out, outSize, cmdId, mid, 0, flags,
+                     deviceId[0] ? deviceId : nullptr,
+                     sourceId[0] ? sourceId : nullptr,
+                     (const uint8_t *)dataPayload.c_str(),
+                     (uint16_t)dataPayload.length(), 0);
 }
 
 bool MeshComm::uartHostSendRaw(const String &raw) {
@@ -1174,36 +1609,74 @@ bool MeshComm::uartHostSendRaw(const String &raw) {
         return false;
     }
 
-    int frameCapacity = ProtocolFrame::getEncodedCapacity(raw);
+    // Unified UART0 host path: always frame a binary app envelope.
+    // If caller still passes legacy full JSON, convert first.
+    const uint8_t *payload = (const uint8_t *)raw.c_str();
+    int payloadLen = (int)raw.length();
+    uint8_t stackApp[1600];
+    uint8_t *heapApp = nullptr;
+    bool looksJson = payloadLen > 0 && payload[0] == (uint8_t)'{';
+    bool looksBin = payloadLen >= APP_ENVELOPE_MIN &&
+                    payload[0] == APP_MAGIC_0 && payload[1] == APP_MAGIC_1;
+
+    if (looksJson && !looksBin) {
+        int n = uartLegacyJsonToApp(raw, stackApp, (int)sizeof(stackApp));
+        if (n <= 0) {
+            heapApp = (uint8_t *)malloc(FRAGMENT_REASSEMBLY_BUF);
+            if (heapApp != nullptr)
+                n = uartLegacyJsonToApp(raw, heapApp, FRAGMENT_REASSEMBLY_BUF);
+        }
+        if (n <= 0) {
+            if (heapApp) free(heapApp);
+            Serial.println(F("[MESH] UART0 refused legacy JSON (convert failed)"));
+            return false;
+        }
+        if (heapApp != nullptr && n > (int)sizeof(stackApp)) {
+            payload = heapApp;
+            payloadLen = n;
+        } else if (heapApp != nullptr && n > 0) {
+            // prefer stack when small; free heap
+            memcpy(stackApp, heapApp, n);
+            free(heapApp);
+            heapApp = nullptr;
+            payload = stackApp;
+            payloadLen = n;
+        } else {
+            payload = stackApp;
+            payloadLen = n;
+        }
+    }
+
+    int frameCapacity = ProtocolFrame::getEncodedCapacityBytes(payloadLen);
     if (frameCapacity < 0) {
+        if (heapApp) free(heapApp);
         Serial.println(F("[MESH] UART0 message exceeds frame reassembly limit"));
         return false;
     }
-    // Phase 0: static/PSRAM TX pool for common path; rare multi-fragment
-    // oversize falls back to one-shot malloc (pool is FRAME_TX_POOL_SIZE).
     uint8_t *frameBuf = MemPool::frameTxBuf();
     size_t poolSize = MemPool::frameTxBufSize();
     bool heapOwned = false;
     if (frameBuf == nullptr || (size_t)frameCapacity > poolSize) {
         frameBuf = (uint8_t *)malloc((size_t)frameCapacity);
         if (frameBuf == nullptr) {
+            if (heapApp) free(heapApp);
             Serial.println(F("[MESH] UART0 frame buffer allocation failed"));
             return false;
         }
         heapOwned = true;
         poolSize = (size_t)frameCapacity;
     }
-    int frameLen = ProtocolFrame::encode(raw, frameBuf, (int)poolSize);
+    int frameLen = ProtocolFrame::encodeBytes(payload, payloadLen, frameBuf, (int)poolSize);
     if (frameLen < 0) {
         Serial.println(F("[MESH] UART0 send: frame encode failed"));
         if (heapOwned) free(frameBuf);
+        if (heapApp) free(heapApp);
         return false;
     }
-
-    size_t sent = Serial.write(frameBuf, frameLen);
-    Serial.flush();
+    bool ok = SerialUplink::write(frameBuf, (size_t)frameLen);
     if (heapOwned) free(frameBuf);
-    return (sent == (size_t)frameLen);
+    if (heapApp) free(heapApp);
+    return ok;
 }
 
 void MeshComm::uartHostProcessIncoming() {
@@ -1214,10 +1687,28 @@ void MeshComm::uartHostProcessIncoming() {
         uartHostHandlePlainTextProbe(byte);
         int outLen = 0;
         if (ProtocolFrame::decodeBytes(byte, payloadBuf, (int)sizeof(payloadBuf), outLen)) {
-            debugHostSeen = true;
+            markUartHostSeen();
             if (msgCb && outLen > 0) {
                 String raw((const char *)payloadBuf, (unsigned int)outLen);
+                AppMessageView view;
+                uint16_t msgId = 0;
+                uint16_t cmdId = 0;
+                if (appDecode(payloadBuf, outLen, view)) {
+                    msgId = view.msg_id;
+                    cmdId = view.cmd_id;
+                }
+                rememberReplyRoute(msgId, CAB_ROUTE_UART0);
+                if (replayCachedResponse(msgId, cmdId, CAB_ROUTE_UART0)) continue;
+                CabinetRoute previousRoute = s_activeIngressRoute;
+                uint16_t previousMsgId = s_activeIngressMsgId;
+                uint16_t previousCmdId = s_activeIngressCmdId;
+                s_activeIngressRoute = CAB_ROUTE_UART0;
+                s_activeIngressMsgId = msgId;
+                s_activeIngressCmdId = cmdId;
                 msgCb(raw);
+                s_activeIngressRoute = previousRoute;
+                s_activeIngressMsgId = previousMsgId;
+                s_activeIngressCmdId = previousCmdId;
             }
         }
     }
@@ -1233,28 +1724,44 @@ void MeshComm::processReceivedMessage(const uint8_t *fromMac, const String &json
     int rawLen = (int)json.length();
     bool isBinary = rawLen >= APP_ENVELOPE_MIN && appDecode(raw, rawLen, binView);
     if (isBinary) {
-        quiet = (binView.cmd_id == CMD_HEARTBEAT || binView.cmd_id == CMD_HEARTBEAT_ACK);
+        // High-frequency / response path stays quiet: USB LOG framing must never
+        // run ahead of business uplink (STATUS_RESPONSE used to arrive after the
+        // host timeout because Debug::printf blocked Serial TX first).
+        quiet = (binView.cmd_id == CMD_HEARTBEAT ||
+                 binView.cmd_id == CMD_HEARTBEAT_ACK ||
+                 binView.cmd_id == CMD_ACK ||
+                 binView.cmd_id == CMD_DEBUG_LOG ||
+                 binView.cmd_id == CMD_STATUS_REPORT ||
+                 binView.cmd_id == CMD_STATUS_RESPONSE ||
+                 binView.cmd_id == CMD_REGISTER);
     } else {
-        // Legacy JSON only — safe to scan as text
+        // Legacy JSON only - safe to scan as text
         quiet = json.indexOf("\"cmd\":\"HEARTBEAT\"") >= 0 ||
-                json.indexOf("\"cmd\":\"HEARTBEAT_ACK\"") >= 0;
-    }
-    if (!quiet) {
-        if (isBinary) {
-            Debug::printf("[MESH] received app from %s: cmd=0x%04X (%s) len=%d\n",
-                          macToString(fromMac).c_str(), binView.cmd_id,
-                          appCmdName(binView.cmd_id) ? appCmdName(binView.cmd_id) : "?",
-                          rawLen);
-        } else {
-            Debug::printf("[MESH] received message from %s: %s\n",
-                          macToString(fromMac).c_str(), json.c_str());
-        }
+                json.indexOf("\"cmd\":\"HEARTBEAT_ACK\"") >= 0 ||
+                json.indexOf("\"cmd\":\"ACK\"") >= 0 ||
+                json.indexOf("\"cmd\":\"LOG\"") >= 0 ||
+                json.indexOf("\"cmd\":\"STATUS_REPORT\"") >= 0 ||
+                json.indexOf("\"cmd\":\"STATUS_RESPONSE\"") >= 0 ||
+                json.indexOf("\"cmd\":\"REGISTER\"") >= 0;
     }
 
     if (isRootNode) {
-        // Root 收到子节点消息：转发到上行链路由 main.cpp 处理
+        // Root: deliver to bridge FIRST (uplink + side-effects), log after.
+        // Logging before meshMsgCb added multi-hundred-ms USB backpressure and
+        // made STATUS_RESPONSE miss host 5s timeouts under load.
         if (meshMsgCb) {
             meshMsgCb(fromMac, json);
+        }
+        if (!quiet) {
+            if (isBinary) {
+                Debug::printf("[MESH] received app from %s: cmd=0x%04X (%s) len=%d\n",
+                              macToString(fromMac).c_str(), binView.cmd_id,
+                              appCmdName(binView.cmd_id) ? appCmdName(binView.cmd_id) : "?",
+                              rawLen);
+            } else {
+                Debug::printf("[MESH] received message from %s len=%u\n",
+                              macToString(fromMac).c_str(), (unsigned)rawLen);
+            }
         }
     } else {
         // 任意一条来自 Root 的 Mesh 消息都能证明双向应用层链路可达。
@@ -1263,9 +1770,39 @@ void MeshComm::processReceivedMessage(const uint8_t *fromMac, const String &json
         rootUnreachableSince = 0;
         lastRootRecoveryTime = 0;
         lastForcedReconnectTime = 0;
-        // 子节点收到 Root 下发的命令：交给消息处理器（二进制或 JSON 字符串）
+        if (isBinary && replayCachedResponse(binView.msg_id, binView.cmd_id,
+                                             CAB_ROUTE_MESH)) {
+            return;
+        }
+        // 子节点：先处理业务应答（可能走 Mesh 回传），再打日志，避免 USB/UART0
+        // 日志抢在 STATUS_RESPONSE 发送之前占用 TX 与主循环。
         if (msgCb) {
+            uint16_t msgId = isBinary ? binView.msg_id : 0;
+            // Legacy JSON often has no numeric msg_id; still pin reply to Mesh
+            // for the duration of this callback via s_activeIngressRoute.
+            if (msgId != 0) {
+                rememberReplyRoute(msgId, CAB_ROUTE_MESH);
+            }
+            CabinetRoute previousRoute = s_activeIngressRoute;
+            uint16_t previousMsgId = s_activeIngressMsgId;
+            uint16_t previousCmdId = s_activeIngressCmdId;
+            s_activeIngressRoute = CAB_ROUTE_MESH;
+            s_activeIngressMsgId = msgId;
+            s_activeIngressCmdId = isBinary ? binView.cmd_id : 0;
             msgCb(json);
+            s_activeIngressRoute = previousRoute;
+            s_activeIngressMsgId = previousMsgId;
+            s_activeIngressCmdId = previousCmdId;
+        }
+        if (!quiet) {
+            if (isBinary) {
+                Debug::printf("[MESH] rx app cmd=0x%04X (%s) len=%d\n",
+                              binView.cmd_id,
+                              appCmdName(binView.cmd_id) ? appCmdName(binView.cmd_id) : "?",
+                              rawLen);
+            } else {
+                Debug::printf("[MESH] rx legacy len=%u\n", (unsigned)rawLen);
+            }
         }
     }
 }

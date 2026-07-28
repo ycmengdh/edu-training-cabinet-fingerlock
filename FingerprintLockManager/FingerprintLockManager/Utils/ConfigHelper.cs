@@ -23,8 +23,17 @@ namespace FingerprintLockManager
         /// <summary>Mesh 链路传输类型：UsbSerial / TcpClient / TcpServer</summary>
         public string TransportType { get; set; } = "UsbSerial";
 
+        /// <summary>通讯路径：Mesh（经根节点）/ Uart（柜机直连）。</summary>
+        public string LinkMode { get; set; } = "Mesh";
+
         /// <summary>USB 串口名（UsbSerial 用，留空则自动选择首个串口）</summary>
         public string SerialPortName { get; set; } = "";
+
+        /// <summary>最近一次使用的根节点串口。</summary>
+        public string MeshSerialPortName { get; set; } = "";
+
+        /// <summary>最近一次使用的柜机 UART 串口。</summary>
+        public string UartSerialPortName { get; set; } = "";
 
         /// <summary>USB 串口波特率（默认 921600）</summary>
         public int SerialBaudRate { get; set; } = 921600;
@@ -43,6 +52,9 @@ namespace FingerprintLockManager
 
         /// <summary>HMAC 共享密钥（与设备 NVS 中配置一致）</summary>
         public string HmacKey { get; set; } = "";
+
+        /// <summary>界面主题：Light / Dark。</summary>
+        public string AppearanceTheme { get; set; } = "Light";
 
         /// <summary>
         /// 将 AppConfig 转为 MeshBridge 启动所需的 TransportConfig

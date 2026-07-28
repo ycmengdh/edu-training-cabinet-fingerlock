@@ -69,7 +69,7 @@ int appEncode(uint8_t* out, int outSize,
               const uint8_t* payload, uint16_t payloadLen,
               uint32_t timestampUnix) {
     if (out == nullptr || outSize < APP_ENVELOPE_MIN) return -1;
-    if (payloadLen > APP_MAX_PAYLOAD) return -1;
+    if (payloadLen > APP_MAX_PAYLOAD_FRAME) return -1;
     if (payloadLen > 0 && payload == nullptr) return -1;
 
     // Encoder does not attach HMAC body yet; clear the flag so wire stays consistent.
@@ -130,7 +130,7 @@ bool appDecode(const uint8_t* data, int len, AppMessageView& view) {
 
     if (view.device_id_len > APP_DEVICE_ID_MAX) return false;
     if (view.source_id_len > APP_SOURCE_ID_MAX) return false;
-    if (view.payload_len > APP_MAX_PAYLOAD) return false;
+    if (view.payload_len > APP_MAX_PAYLOAD_FRAME) return false;
 
     bool hasHmac = (view.flags & APP_FLAG_HAS_HMAC) != 0;
     int hmacSize = hasHmac ? APP_HMAC_BLOCK : 0;
@@ -169,6 +169,30 @@ int packHeartbeat(uint8_t* out, int outSize, uint32_t freeHeap, uint32_t freePsr
     wrU16(out + 14, queueFull);
     wrU16(out + 16, recoveries);
     return 18;
+}
+
+int packCabinetStatus(uint8_t* out, int outSize,
+                      uint32_t uptime, uint8_t lockMask, uint8_t meshLayer,
+                      uint8_t flags, uint16_t fingerprintCount,
+                      uint16_t permissionCount, uint32_t permissionVersion,
+                      uint16_t sendFailures, uint16_t queueFull,
+                      int8_t rssi, uint8_t assocExpire,
+                      uint16_t fpPollMaxMs) {
+    if (out == nullptr || outSize < 24) return -1;
+    out[0] = 1;
+    out[1] = lockMask;
+    out[2] = meshLayer;
+    out[3] = flags;
+    wrU32(out + 4, uptime);
+    wrU16(out + 8, fingerprintCount);
+    wrU16(out + 10, permissionCount);
+    wrU32(out + 12, permissionVersion);
+    wrU16(out + 16, sendFailures);
+    wrU16(out + 18, queueFull);
+    out[20] = (uint8_t)rssi;
+    out[21] = assocExpire;
+    wrU16(out + 22, fpPollMaxMs);
+    return 24;
 }
 
 bool unpackHeartbeat(const uint8_t* p, uint16_t len,
@@ -270,6 +294,8 @@ static const CmdNameEntry kCmdTable[] = {
     {CMD_HEARTBEAT_ACK, "HEARTBEAT_ACK"},
     {CMD_ACK, "ACK"},
     {CMD_ERROR, "ERROR"},
+    {CMD_DEBUG_LOG, "LOG"},
+    {CMD_CANCEL_ENROLL, "CANCEL_ENROLL"},
     {CMD_CONTROL_LOCK, "CONTROL_LOCK"},
     {CMD_ADD_FINGERPRINT, "ADD_FINGERPRINT"},
     {CMD_ADD_FINGERPRINT_RESULT, "ADD_FINGERPRINT_RESULT"},
@@ -283,6 +309,9 @@ static const CmdNameEntry kCmdTable[] = {
     {CMD_BACKUP_FP_LIST_REQUEST, "BACKUP_FP_LIST_REQUEST"},
     {CMD_DELETE_BACKUP_FINGERPRINT, "DELETE_BACKUP_FINGERPRINT"},
     {CMD_VERIFY_WINDOW_EVENT, "VERIFY_WINDOW_EVENT"},
+    {CMD_START_FINGERPRINT_TEST, "START_FINGERPRINT_TEST"},
+    {CMD_STOP_FINGERPRINT_TEST, "STOP_FINGERPRINT_TEST"},
+    {CMD_FINGERPRINT_TEST_EVENT, "FINGERPRINT_TEST_EVENT"},
     {CMD_BEGIN_PERMISSION_SYNC, "BEGIN_PERMISSION_SYNC"},
     {CMD_SYNC_PERMISSION, "SYNC_PERMISSION"},
     {CMD_COMMIT_PERMISSION_SYNC, "COMMIT_PERMISSION_SYNC"},
@@ -290,6 +319,7 @@ static const CmdNameEntry kCmdTable[] = {
     {CMD_SYNC_ACK, "SYNC_ACK"},
     {CMD_SYNC_PERMISSIONS, "SYNC_PERMISSIONS"},
     {CMD_READ_PERMISSIONS, "READ_PERMISSIONS"},
+    {CMD_PERMISSIONS_RESPONSE, "PERMISSIONS_RESPONSE"},
     {CMD_READ_CONFIG, "READ_CONFIG"},
     {CMD_WRITE_CONFIG, "WRITE_CONFIG"},
     {CMD_CONFIG_RESPONSE, "CONFIG_RESPONSE"},
@@ -315,6 +345,8 @@ static const CmdNameEntry kCmdTable[] = {
     {CMD_FP_TEMPLATE_DOWNLOAD_RESPONSE, "FP_TEMPLATE_DOWNLOAD_RESPONSE"},
     {CMD_DELETE_FP_TEMPLATE, "DELETE_FP_TEMPLATE"},
     {CMD_FP_TEMPLATE_DELETE_RESPONSE, "FP_TEMPLATE_DELETE_RESPONSE"},
+    {CMD_CHECK_FINGERPRINT, "CHECK_FINGERPRINT"},
+    {CMD_FINGERPRINT_CHECK_RESPONSE, "FINGERPRINT_CHECK_RESPONSE"},
     {CMD_LOG_REPORT, "LOG_REPORT"},
     {CMD_LOG_REPORT_ACK, "LOG_REPORT_ACK"},
     {CMD_PERM_LOST, "PERM_LOST"},

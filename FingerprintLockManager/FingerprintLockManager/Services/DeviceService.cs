@@ -6,6 +6,8 @@ namespace FingerprintLockManager
     /// </summary>
     public class DeviceService
     {
+        private const string DefaultCabinetName = "实训柜";
+        private const string FirmwareDefaultCabinetName = "Cabinet Node";
         private readonly RootDataService _root = new RootDataService();
 
         /// <summary>
@@ -55,16 +57,15 @@ namespace FingerprintLockManager
                 {
                     DeviceId = string.IsNullOrWhiteSpace(client.DeviceId)
                         ? (client.MeshMac ?? "") : client.DeviceId,
-                    DeviceName = string.IsNullOrWhiteSpace(client.DeviceName)
-                        ? (string.IsNullOrWhiteSpace(client.DeviceId) ? client.MeshMac : client.DeviceId)
-                        : client.DeviceName,
+                    DeviceName = NormalizeCabinetName(client.DeviceName),
                     IpAddress = "",
                     IsOnline = client.IsOnline,
                     RegisterTime = client.ConnectTime == default ? lastSeen : client.ConnectTime,
                     LastOnlineTime = lastSeen,
                     LastSeenUnix = new DateTimeOffset(lastSeen).ToUnixTimeSeconds(),
                     MeshMac = client.MeshMac ?? "",
-                    IsRoot = false
+                    IsRoot = false,
+                    Status = client.Status ?? new DeviceRuntimeStatus()
                 };
                 // DeviceId 为空时用 MAC 兜底，避免被丢弃导致列表空白
                 if (string.IsNullOrWhiteSpace(device.DeviceId))
@@ -77,10 +78,10 @@ namespace FingerprintLockManager
                 devices.Add(device);
             }
 
-            // 再与本地缓存 devices 表合并，保证重启上位机后仍能看到历史柜子
+            // 再与本机业务库 devices 表合并，保证重启上位机后仍能看到历史柜子
             try
             {
-                var cached = LocalCacheService.ReadTable("devices");
+                var cached = BusinessDatabase.ReadArray("devices");
                 if (cached != null)
                 {
                     foreach (var token in cached)
@@ -88,25 +89,30 @@ namespace FingerprintLockManager
                         var d = token.ToObject<Device>();
                         if (d == null || string.IsNullOrWhiteSpace(d.DeviceId)) continue;
                         if (IsTrueRoot(d)) continue;
-                        if (devices.Any(x =>
+                        var live = devices.FirstOrDefault(x =>
                                 (!string.IsNullOrEmpty(d.MeshMac) &&
                                  string.Equals(x.MeshMac, d.MeshMac, StringComparison.OrdinalIgnoreCase)) ||
-                                string.Equals(x.DeviceId, d.DeviceId, StringComparison.OrdinalIgnoreCase)))
+                                string.Equals(x.DeviceId, d.DeviceId, StringComparison.OrdinalIgnoreCase));
+                        if (live != null)
+                        {
+                            live.DeviceNumber = d.DeviceNumber;
+                            if (HasStoredCabinetName(d.DeviceName)) live.DeviceName = d.DeviceName.Trim();
                             continue;
+                        }
                         d.IsOnline = false;
                         d.IsRoot = false;
                         devices.Add(d);
                     }
                 }
             }
-            catch { /* 缓存可选 */ }
+            catch { /* 本地库可选 */ }
 
             PersistSeenDevices(devices);
             return devices.OrderByDescending(d => d.IsOnline).ThenBy(d => d.DeviceId).ToList();
         }
 
-        /// <summary>把见过的柜子写入本地缓存，重启后仍显示。</summary>
-        private static void PersistSeenDevices(List<Device> devices)
+        /// <summary>把见过的柜子写入本机业务库，重启后仍显示。</summary>
+        private void PersistSeenDevices(List<Device> devices)
         {
             try
             {
@@ -116,7 +122,8 @@ namespace FingerprintLockManager
                     if (IsTrueRoot(d)) continue;
                     arr.Add(Newtonsoft.Json.Linq.JObject.FromObject(d));
                 }
-                LocalCacheService.WriteTable("devices", arr);
+                uint v = BusinessDatabase.GetTableVersion("devices");
+                BusinessDatabase.ReplaceTable("devices", arr, v + 1);
             }
             catch { }
         }
@@ -195,6 +202,104 @@ namespace FingerprintLockManager
             return GetAllDevices().FirstOrDefault(d => d.DeviceId == deviceId);
         }
 
+        public Device? GetByNumber(string deviceNumber)
+        {
+            if (string.IsNullOrWhiteSpace(deviceNumber)) return null;
+            return GetAllDevices().FirstOrDefault(device =>
+                string.Equals(device.DeviceNumber, deviceNumber.Trim(),
+                    StringComparison.OrdinalIgnoreCase));
+        }
+
+        public bool UpdateDeviceInfo(
+            Device target,
+            string deviceName,
+            string deviceNumber,
+            out string error)
+        {
+            error = "";
+            if (target == null)
+            {
+                error = "设备不存在";
+                return false;
+            }
+
+            string name = deviceName?.Trim() ?? "";
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                error = "柜子名称不能为空";
+                return false;
+            }
+            if (name.Length > 32 || name.Any(char.IsControl))
+            {
+                error = "柜子名称长度不能超过 32 个字符，且不能包含控制字符";
+                return false;
+            }
+
+            string number = deviceNumber?.Trim() ?? "";
+            if (number.Length > 32 || number.Any(char.IsControl))
+            {
+                error = "设备编号长度不能超过 32 个字符，且不能包含控制字符";
+                return false;
+            }
+
+            var devices = _root.Read<Device>("devices");
+            if (!string.IsNullOrWhiteSpace(number) && devices.Any(device =>
+                    !IsSamePhysicalDevice(device, target) &&
+                    string.Equals(device.DeviceNumber, number,
+                        StringComparison.OrdinalIgnoreCase)))
+            {
+                error = $"设备编号 {number} 已被其它柜机使用";
+                return false;
+            }
+
+            var current = devices.FirstOrDefault(device => IsSamePhysicalDevice(device, target));
+            if (current == null)
+            {
+                current = new Device
+                {
+                    DeviceId = target.DeviceId,
+                    DeviceName = target.DeviceName,
+                    DeviceNumber = target.DeviceNumber,
+                    IpAddress = target.IpAddress,
+                    MeshMac = target.MeshMac,
+                    RegisterTime = target.RegisterTime == default ? DateTime.Now : target.RegisterTime,
+                    IsOnline = target.IsOnline,
+                    LastOnlineTime = target.LastOnlineTime,
+                    LastSeenUnix = target.LastSeenUnix,
+                    OfflineTimeUnix = target.OfflineTimeUnix,
+                    IsRoot = target.IsRoot,
+                    FirmwareVersion = target.FirmwareVersion,
+                    Status = target.Status
+                };
+                devices.Add(current);
+            }
+            current.DeviceName = name;
+            current.DeviceNumber = number;
+            if (!_root.Save("devices", devices))
+            {
+                error = "柜子信息保存失败";
+                return false;
+            }
+            target.DeviceName = name;
+            target.DeviceNumber = number;
+            return true;
+        }
+
+        public bool UpdateDeviceNumber(Device target, string deviceNumber, out string error) =>
+            UpdateDeviceInfo(target, target?.DeviceName ?? "", deviceNumber, out error);
+
+        private static bool IsSamePhysicalDevice(Device left, Device right)
+        {
+            if (!string.IsNullOrWhiteSpace(left.MeshMac) &&
+                !string.IsNullOrWhiteSpace(right.MeshMac))
+            {
+                return string.Equals(left.MeshMac, right.MeshMac,
+                    StringComparison.OrdinalIgnoreCase);
+            }
+            return string.Equals(left.DeviceId, right.DeviceId,
+                StringComparison.OrdinalIgnoreCase);
+        }
+
         /// <summary>
         /// 合并 MeshBridge 在线设备列表：
         /// 1) Mesh 在线但 SD/本地缓存不存在 → 补充新条目
@@ -223,8 +328,7 @@ namespace FingerprintLockManager
                     devices.Add(new Device
                     {
                         DeviceId = client.DeviceId,
-                        DeviceName = string.IsNullOrWhiteSpace(client.DeviceName)
-                            ? client.DeviceId : client.DeviceName,
+                        DeviceName = NormalizeCabinetName(client.DeviceName),
                         IsOnline = true,
                         RegisterTime = client.ConnectTime == default ? DateTime.Now : client.ConnectTime,
                         LastOnlineTime = client.LastSeen == default ? DateTime.Now : client.LastSeen,
@@ -232,7 +336,10 @@ namespace FingerprintLockManager
                             ? DateTimeOffset.Now.ToUnixTimeSeconds()
                             : new DateTimeOffset(client.LastSeen).ToUnixTimeSeconds(),
                         MeshMac = client.MeshMac ?? "",
-                        IsRoot = IsTrueRoot(client)
+                        IsRoot = IsTrueRoot(client),
+                        Status = client.LastStatusAt.HasValue
+                            ? client.Status ?? new DeviceRuntimeStatus()
+                            : new DeviceRuntimeStatus()
                     });
                 }
                 else
@@ -241,14 +348,15 @@ namespace FingerprintLockManager
                     DateTime lastSeen = client.LastSeen == default ? DateTime.Now : client.LastSeen;
                     existing.LastOnlineTime = lastSeen;
                     existing.LastSeenUnix = new DateTimeOffset(lastSeen).ToUnixTimeSeconds();
-                    if (!string.IsNullOrWhiteSpace(client.DeviceName))
-                        existing.DeviceName = client.DeviceName;
+                    if (!HasStoredCabinetName(existing.DeviceName))
+                        existing.DeviceName = NormalizeCabinetName(client.DeviceName);
                     if (!string.IsNullOrWhiteSpace(client.DeviceId))
                         existing.DeviceId = client.DeviceId;
                     if (!string.IsNullOrWhiteSpace(client.MeshMac))
                         existing.MeshMac = client.MeshMac;
                     // 仅真正的根节点才保留 IsRoot；CABINET_* 强制非根
                     existing.IsRoot = IsTrueRoot(client);
+                    ApplyLiveRuntimeStatus(existing, client);
                 }
             }
 
@@ -264,5 +372,26 @@ namespace FingerprintLockManager
             }
             return devices;
         }
+
+        private static void ApplyLiveRuntimeStatus(Device target, DeviceClient source)
+        {
+            if (source.LastStatusAt.HasValue && source.Status != null)
+                target.Status = source.Status;
+        }
+
+        private static string NormalizeCabinetName(string? name)
+        {
+            string value = name?.Trim() ?? "";
+            return string.IsNullOrWhiteSpace(value) ||
+                   string.Equals(value, FirmwareDefaultCabinetName,
+                       StringComparison.OrdinalIgnoreCase)
+                ? DefaultCabinetName
+                : value;
+        }
+
+        private static bool HasStoredCabinetName(string? name) =>
+            !string.IsNullOrWhiteSpace(name) &&
+            !string.Equals(name.Trim(), FirmwareDefaultCabinetName,
+                StringComparison.OrdinalIgnoreCase);
     }
 }

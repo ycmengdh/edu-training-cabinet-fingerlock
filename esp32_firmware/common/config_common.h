@@ -14,7 +14,7 @@
 #define DEVICE_ID_DEFAULT        "CABINET_001"
 #define FINGER_MAX_USERS         200
 #define STATUS_REPORT_INTERVAL   60000
-#define FIRMWARE_VERSION         "2.7.0-windowfp"
+#define FIRMWARE_VERSION         "2.7.2-stable"
 
 // ===================== 柜机本地交互窗口常量 =====================
 // 指纹验证成功后的操作窗口：用户需在此期间按下对应锁按键开锁。
@@ -28,27 +28,28 @@
 // ===================== ESP-MESH 网络配置 =====================
 #define MESH_CHANNEL            6
 #define MESH_PASSWORD           "Mesh@2026"
-#define MESH_MAX_NODE           40
+#define MESH_MAX_NODE           100
+// MESH_MAX_NODE counts cabinet routes; ESP-MESH capacity also includes Root.
+#define MESH_NETWORK_CAPACITY   (MESH_MAX_NODE + 1)
 #define MESH_MAX_LAYER          6
 // ESP-MESH hard limit is CONFIG_MESH_AP_MAX_CONNECTIONS_DEFAULT = 6.
 // Nodes beyond this count attach via intermediate hops, not directly to Root.
 #define MESH_AP_MAX_CONNECTION  6
 #define MESH_ID                 {0x4D, 0x45, 0x53, 0x48, 0x30, 0x31}
 
-// HEARTBEAT 间隔：柜子主动上报周期。短于 ROUTE_TIMEOUT_MS 的 1/3 才能保证
-// 路由表不会因 HEARTBEAT 抖动而过期。10s 间隔实测带宽占用 <20B/s 可忽略。
-#define MESH_HEARTBEAT_INTERVAL 10000
-// 路由过期：3 倍 HEARTBEAT 间隔，留容错余量。
-#define MESH_ROUTE_TIMEOUT_MS   (MESH_HEARTBEAT_INTERVAL * 3UL)
-#define MESH_ROUTE_SWEEP_MS     5000
-// Root 应用层无响应时强制重关联的阈值。原 60s 偏激进，会打断 Mesh 协议栈自愈。
-// 放宽到 120s，让协议栈有足够时间自行恢复 parent 关联。
-#define MESH_FORCE_REASSOC_MS   120000UL
-#define MESH_RECONNECT_BASE_MS  5000
-#define MESH_RECONNECT_MAX_MS   60000
+// 3s 心跳按 MAC 分散在完整周期内；100 个柜子平均约 33 包/s，避免同步突发。
+// 应用层允许连续丢失三个心跳周期；物理断链仍由 Mesh 事件立即判离线。
+#define MESH_HEARTBEAT_INTERVAL 3000
+#define MESH_ROUTE_TIMEOUT_MS   12000UL
+#define MESH_ROUTE_SWEEP_MS     1000
+// Parent 仍显示已关联但 Root 应用层长期不回应时，30s 后重建柜机 Mesh 栈。
+// UART0 是独立链路，重建 Mesh 期间不会停止。
+#define MESH_FORCE_REASSOC_MS   30000UL
+#define MESH_RECONNECT_BASE_MS  1000
+#define MESH_RECONNECT_MAX_MS   10000
 #define MESH_RX_BUFFER_SIZE     1500
 // Mesh RX queue depth used by mesh_comm (xQueueCreate)
-#define MESH_RX_QUEUE_DEPTH     24
+#define MESH_RX_QUEUE_DEPTH     32
 
 // ===================== 上行链路（Root节点专用） =====================
 #define UPLINK_USB_BAUD         921600
@@ -58,6 +59,9 @@
 #define UPLINK_SERVER_IP_DEFAULT "192.168.1.100"
 #define UPLINK_TCP_RX_BUF_SIZE  2048
 #define UPLINK_TCP_RECONNECT_MS 5000
+// Cabinet UART0 host liveness. The PC sends a READ_STATUS probe every second;
+// four missed probes mark only the UART host offline and resume REGISTER announces.
+#define UART_HOST_TIMEOUT_MS    4000UL
 
 // ===================== Flash 分区偏移 =====================
 // 离线日志使用自定义分区 logstore（见 common/partitions_16MB_log.csv）
@@ -101,7 +105,8 @@
 #define APP_DEVICE_ID_MAX       24
 #define APP_SOURCE_ID_MAX       24
 #define APP_ENVELOPE_MIN        18
-#define APP_MAX_PAYLOAD         1400
+#define APP_MAX_PAYLOAD         1400   // mesh single-packet safe
+#define APP_MAX_PAYLOAD_FRAME    4000   // USB/TCP uplink (A5 frame can fragment)
 #define APP_FLAG_NEEDS_ACK      0x01
 #define APP_FLAG_IS_ACK         0x02
 #define APP_FLAG_IS_ERROR       0x04
@@ -138,6 +143,9 @@
 #define FP_TEMPLATE_SIZE          512
 #define FP_MAX_TEMPLATES_PER_USER 2
 #define FP_TEMPLATE_BUF_SIZE      (FP_TEMPLATE_SIZE + 64)
+// 临时录入槽位：录入时先存到 ID=0，检测通过后迁移到 allocLocalFpId() 分配的真实 ID。
+// ID=0 永远无开锁权限（loadVerifiedPermission 直接拒绝），仅用于录入+检测。
+#define FP_TEMP_SLOT              0
 
 // ===================== SD 卡路径常量（根节点使用） =====================
 // SD_MMC.begin("/sdcard", ...) 的参数是 VFS 挂载点（prefix），底层访问时

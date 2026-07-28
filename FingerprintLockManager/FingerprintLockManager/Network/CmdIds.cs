@@ -11,6 +11,8 @@ namespace FingerprintLockManager
         public const ushort HeartbeatAck = 0x0003;
         public const ushort Ack = 0x0004;
         public const ushort Error = 0x0005;
+        public const ushort DebugLog = 0x0006;
+        public const ushort CancelEnroll = 0x0007;
 
         public const ushort ControlLock = 0x0010;
         public const ushort AddFingerprint = 0x0011;
@@ -26,6 +28,9 @@ namespace FingerprintLockManager
         public const ushort BackupFpListRequest = 0x001A;
         public const ushort DeleteBackupFingerprint = 0x001B;
         public const ushort VerifyWindowEvent = 0x001C;
+        public const ushort StartFingerprintTest = 0x001D;
+        public const ushort StopFingerprintTest = 0x001E;
+        public const ushort FingerprintTestEvent = 0x001F;
 
         public const ushort BeginPermissionSync = 0x0020;
         public const ushort SyncPermission = 0x0021;
@@ -34,6 +39,7 @@ namespace FingerprintLockManager
         public const ushort SyncAck = 0x0024;
         public const ushort SyncPermissions = 0x0025;
         public const ushort ReadPermissions = 0x0026;
+        public const ushort PermissionsResponse = 0x0027;
 
         public const ushort ReadConfig = 0x0030;
         public const ushort WriteConfig = 0x0031;
@@ -62,6 +68,8 @@ namespace FingerprintLockManager
         public const ushort FpTemplateDownloadResponse = 0x0053;
         public const ushort DeleteFpTemplate = 0x0054;
         public const ushort FpTemplateDeleteResponse = 0x0055;
+        public const ushort CheckFingerprint = 0x0056;
+        public const ushort FingerprintCheckResponse = 0x0057;
 
         public const ushort LogReport = 0x0060;
         public const ushort LogReportAck = 0x0061;
@@ -84,6 +92,8 @@ namespace FingerprintLockManager
             { HeartbeatAck, NameHeartbeatAck },
             { Ack, Protocol.CmdAck },
             { Error, Protocol.CmdError },
+            { DebugLog, Protocol.CmdDebugLog },
+            { CancelEnroll, Protocol.CmdCancelEnroll },
             { ControlLock, Protocol.CmdControlLock },
             { AddFingerprint, Protocol.CmdAddFingerprint },
             { AddFingerprintResult, Protocol.CmdAddFingerprintResult },
@@ -97,6 +107,9 @@ namespace FingerprintLockManager
             { BackupFpListRequest, Protocol.CmdBackupFpListRequest },
             { DeleteBackupFingerprint, Protocol.CmdDeleteBackupFingerprint },
             { VerifyWindowEvent, Protocol.CmdVerifyWindowEvent },
+            { StartFingerprintTest, Protocol.CmdStartFingerprintTest },
+            { StopFingerprintTest, Protocol.CmdStopFingerprintTest },
+            { FingerprintTestEvent, Protocol.CmdFingerprintTestEvent },
             { BeginPermissionSync, Protocol.CmdBeginPermissionSync },
             { SyncPermission, Protocol.CmdSyncPermission },
             { CommitPermissionSync, Protocol.CmdCommitPermissionSync },
@@ -104,6 +117,7 @@ namespace FingerprintLockManager
             { SyncAck, Protocol.CmdSyncAck },
             { SyncPermissions, Protocol.CmdSyncPermissions },
             { ReadPermissions, NameReadPermissions },
+            { PermissionsResponse, Protocol.CmdPermissionsResponse },
             { ReadConfig, Protocol.CmdReadConfig },
             { WriteConfig, Protocol.CmdWriteConfig },
             { ConfigResponse, Protocol.CmdConfigResponse },
@@ -129,6 +143,8 @@ namespace FingerprintLockManager
             { FpTemplateDownloadResponse, Protocol.CmdFpTemplateDownloadResponse },
             { DeleteFpTemplate, Protocol.CmdDeleteFpTemplate },
             { FpTemplateDeleteResponse, Protocol.CmdFpTemplateDeleteResponse },
+            { CheckFingerprint, Protocol.CmdCheckFingerprint },
+            { FingerprintCheckResponse, Protocol.CmdFingerprintCheckResponse },
             { LogReport, Protocol.CmdLogReport },
             { LogReportAck, NameLogReportAck },
             { PermLost, NamePermLost },

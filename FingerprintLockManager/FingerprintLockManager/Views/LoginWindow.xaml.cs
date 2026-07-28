@@ -7,9 +7,10 @@ namespace FingerprintLockManager
     /// 登录窗口
     /// 用户ID + 密码登录，验证成功后打开主窗口
     /// </summary>
-    public partial class LoginWindow : Window
+    public partial class LoginWindow : BorderlessWindow
     {
         private bool _loggingIn;
+        private bool _navigatingToMain;
 
         public LoginWindow()
         {
@@ -63,24 +64,6 @@ namespace FingerprintLockManager
             await DoLoginAsync();
         }
 
-        /// <summary>登录前配置根节点连接方式，并按新参数立即重连。</summary>
-        private void ConnectionSettingsButton_Click(object sender, RoutedEventArgs e)
-        {
-            var window = new SettingsWindow
-            {
-                Owner = this
-            };
-            window.ShowDialog();
-            UpdateLinkStatus();
-        }
-
-        private void CommunicationTestButton_Click(object sender, RoutedEventArgs e)
-        {
-            var window = new CommunicationLogWindow { Owner = this };
-            window.ShowDialog();
-            UpdateLinkStatus();
-        }
-
         /// <summary>密码框回车登录</summary>
         protected override async void OnKeyDown(KeyEventArgs e)
         {
@@ -107,46 +90,35 @@ namespace FingerprintLockManager
                 return;
             }
 
-            // 内置管理员口令：在无用户数据/数据源不可用时允许旁路连接检查；
-            // 一旦 users 表已有账户，AuthService 会严格按表验证，不再旁路。
+            // 账号以本机 business.db 为准（启动页已从 SD 同步或选用本地数据）。
+            // 无本机用户且无链路时：仅允许内置管理员；有本机用户时可不依赖 SD 在线。
             bool builtInCredentials =
                 App.AuthService.IsBuiltInAdministratorCredentials(userId, password);
-            bool allowOfflineBuiltIn = builtInCredentials && !App.SdStorageService.IsAvailable;
+            bool hasLocalBusiness = false;
+            try { hasLocalBusiness = BusinessDatabase.HasAnyBusinessData(); } catch { }
+            bool allowOfflineLocal = hasLocalBusiness ||
+                (builtInCredentials && !App.SdStorageService.IsAvailable);
 
-            if (!allowOfflineBuiltIn && !App.MeshBridge.IsConnected)
+            if (!allowOfflineLocal && !App.MeshBridge.IsConnected)
             {
-                SetFeedback($"{App.MeshBridge.TransportDescription} 尚未连接，请检查连接设置或打开通讯日志", "DangerBrush");
+                SetFeedback($"{App.MeshBridge.TransportDescription} 尚未连接，请返回启动页同步或检查连接设置", "DangerBrush");
                 return;
             }
 
-            if (!allowOfflineBuiltIn && !App.SdStorageService.IsRootConnected)
+            if (!allowOfflineLocal && !App.SdStorageService.IsRootConnected && !hasLocalBusiness)
             {
                 SetFeedback("物理链路已连接，但尚未收到根节点协议响应；请打开“通讯日志”查看收发数据", "WarningBrush");
                 return;
             }
 
-            if (!allowOfflineBuiltIn && App.SdStorageService.IsStorageReady == false)
-            {
-                SetFeedback("根节点 SD 卡未就绪，当前仅支持默认管理员登录", "WarningBrush");
-                return;
-            }
-
-            if (!allowOfflineBuiltIn && !App.SdStorageService.IsAvailable)
-            {
-                SetFeedback("根节点数据服务尚未连接，当前仅支持默认管理员登录", "WarningBrush");
-                return;
-            }
-
             _loggingIn = true;
             LoginButton.IsEnabled = false;
-            ConnectionSettingsButton.IsEnabled = false;
-            CommunicationTestButton.IsEnabled = false;
             LoginButton.Content = "正在验证，请稍候…";
-            SetFeedback(allowOfflineBuiltIn
-                ? "正在验证本机默认管理员账号…"
+            SetFeedback(allowOfflineLocal && !App.SdStorageService.IsAvailable
+                ? "正在验证本机业务库账号…"
                 : builtInCredentials
                     ? "正在检查用户表；若无用户将自动创建默认管理员…"
-                    : "正在从根节点读取账号数据并验证密码…", "PrimaryBrush");
+                    : "正在从本机业务库验证密码…", "PrimaryBrush");
             User? user = null;
             string? errorFeedback = null;
             try
@@ -166,8 +138,6 @@ namespace FingerprintLockManager
                 _loggingIn = false;
                 LoginButton.IsEnabled = true;
                 LoginButton.Content = "登录";
-                ConnectionSettingsButton.IsEnabled = true;
-                CommunicationTestButton.IsEnabled = true;
             }
 
             if (user == null)
@@ -193,9 +163,22 @@ namespace FingerprintLockManager
             catch { /* ignore */ }
 
             var main = new MainWindow();
+            _navigatingToMain = true;
             main.Show();
 
             Close();
+        }
+
+        protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
+        {
+            if (!_navigatingToMain && !App.ExitApproved)
+            {
+                e.Cancel = true;
+                base.OnClosing(e);
+                Dispatcher.BeginInvoke(new Action(() => App.RequestShutdown(this)));
+                return;
+            }
+            base.OnClosing(e);
         }
 
         private void OnConnectionChanged(bool connected) =>

@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Text;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
@@ -21,6 +22,11 @@ namespace FingerprintLockManager
     {
         /// <summary>默认请求超时（毫秒）</summary>
         private const int DefaultTimeoutMs = 8000;
+
+        // Root firmware accepts at most 4000 payload bytes. Keep direct writes
+        // comfortably below that boundary and stream larger tables in 2KB chunks.
+        private const int DirectSavePayloadLimit = 3000;
+        private const int UploadChunkSize = 2048;
 
         /// <summary>大表分片重组缓冲：msg_id -> (已收集分片, 总分片数)</summary>
         private readonly ConcurrentDictionary<string, FragmentBuffer> _fragments = new();
@@ -188,6 +194,7 @@ namespace FingerprintLockManager
         public async Task<bool> SaveTableAsync(string table, string json, uint baseVersion = 0,
             int timeoutMs = DefaultTimeoutMs)
         {
+            LastError = "";
             var msg = Message.Create(Protocol.CmdSdSave, RootDeviceId, new
             {
                 table,
@@ -195,13 +202,84 @@ namespace FingerprintLockManager
                 base_version = baseVersion,
                 enforce_version = true
             });
+
+            int payloadLength = AppMessageMapper.ToApp(msg).Payload.Length;
+            if (payloadLength > DirectSavePayloadLimit)
+                return await SaveTableChunkedAsync(table, json, baseVersion, timeoutMs);
+
             var resp = await SendRequestAsync(msg, timeoutMs);
-            if (resp?.Cmd == Protocol.CmdSdSaveResponse)
+            return ParseSaveResponse(resp, table, baseVersion, finalPart: true);
+        }
+
+        private async Task<bool> SaveTableChunkedAsync(
+            string table, string json, uint baseVersion, int timeoutMs)
+        {
+            byte[] bytes = Encoding.UTF8.GetBytes(json);
+            int partTotal = Math.Max(1, (bytes.Length + UploadChunkSize - 1) / UploadChunkSize);
+            string uploadId = Guid.NewGuid().ToString("N");
+
+            for (int partIndex = 0; partIndex < partTotal; partIndex++)
             {
-                var data = resp.Data as JObject;
-                string? result = data?["result"]?.ToString();
-                return result == "success";
+                int offset = partIndex * UploadChunkSize;
+                int count = Math.Min(UploadChunkSize, bytes.Length - offset);
+                string chunkBase64 = Convert.ToBase64String(bytes, offset, count);
+                var partMessage = Message.Create(Protocol.CmdSdSave, RootDeviceId, new
+                {
+                    table,
+                    upload_id = uploadId,
+                    part_index = partIndex,
+                    part_total = partTotal,
+                    total_bytes = bytes.Length,
+                    chunk_base64 = chunkBase64,
+                    base_version = baseVersion,
+                    enforce_version = true
+                });
+
+                var response = await SendRequestAsync(partMessage, timeoutMs, attemptsOverride: 2);
+                bool finalPart = partIndex == partTotal - 1;
+                if (!ParseSaveResponse(response, table, baseVersion, finalPart))
+                {
+                    if (!string.IsNullOrWhiteSpace(LastError))
+                        LastError += $"（分块 {partIndex + 1}/{partTotal}）";
+                    return false;
+                }
             }
+
+            return true;
+        }
+
+        private bool ParseSaveResponse(
+            Message? response, string table, uint baseVersion, bool finalPart)
+        {
+            if (response?.Cmd == Protocol.CmdSdSaveResponse)
+            {
+                var data = response.Data as JObject;
+                string? result = data?["result"]?.ToString();
+                if (result == "success" || (!finalPart && result == "part_ok"))
+                    return true;
+
+                string? error = data?["error"]?.ToString();
+                if (string.Equals(error, "version_conflict", StringComparison.OrdinalIgnoreCase))
+                {
+                    uint current = data?["current_version"]?.Value<uint>() ?? 0;
+                    LastError = $"表 {table} 版本冲突：本地基于 {baseVersion}，SD 当前 {current}";
+                }
+                else if (string.Equals(error, "out_of_order", StringComparison.OrdinalIgnoreCase))
+                {
+                    int expected = data?["expected_part"]?.Value<int>() ?? 0;
+                    LastError = $"表 {table} 分块顺序异常，根节点等待第 {expected + 1} 块";
+                }
+                else
+                {
+                    string detail = data?["message"]?.ToString() ?? error ?? "根节点未确认写入";
+                    LastError = $"表 {table} 保存失败：{detail}";
+                }
+                return false;
+            }
+
+            CaptureResponseError(response);
+            if (string.IsNullOrWhiteSpace(LastError))
+                LastError = $"表 {table} 保存超时，未收到根节点响应";
             return false;
         }
 
@@ -311,6 +389,41 @@ namespace FingerprintLockManager
             return false;
         }
 
+        /// <summary>只删除用户的一枚指纹模板，不影响该用户其他手指。</summary>
+        public async Task<bool> DeleteFingerTemplateAsync(
+            string userId, int fingerIndex, int timeoutMs = DefaultTimeoutMs)
+        {
+            if (string.IsNullOrWhiteSpace(userId) || fingerIndex is < 1 or > 10) return false;
+            if (!SupportsIndexedTemplateDelete()) return false;
+            var msg = Message.Create(Protocol.CmdDeleteFpTemplate, RootDeviceId, new
+            {
+                user_id = userId,
+                finger_index = fingerIndex
+            });
+            var resp = await SendRequestAsync(msg, timeoutMs);
+            if (resp?.Cmd != Protocol.CmdFpTemplateDeleteResponse) return false;
+            var data = resp.Data as JObject;
+            return data?["result"]?.ToString() == "success";
+        }
+
+        private static bool SupportsIndexedTemplateDelete()
+        {
+            try
+            {
+                Device? root = App.DeviceService.GetAllDevices()
+                    .FirstOrDefault(DeviceService.IsTrueRoot);
+                string value = root?.FirmwareVersion ?? "";
+                int suffix = value.IndexOf('-');
+                if (suffix >= 0) value = value[..suffix];
+                return Version.TryParse(value, out Version? version) &&
+                    version >= new Version(2, 7, 2);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         // ====== 降级模式包装（SD 不可用时自动切换到本地缓存） ======
 
         /// <summary>
@@ -415,7 +528,8 @@ namespace FingerprintLockManager
         // ====== 内部实现 ======
 
         /// <summary>发送请求并等待响应</summary>
-        private async Task<Message?> SendRequestAsync(Message msg, int timeoutMs)
+        private async Task<Message?> SendRequestAsync(
+            Message msg, int timeoutMs, int? attemptsOverride = null)
         {
             if (!IsAvailable)
             {
@@ -425,7 +539,7 @@ namespace FingerprintLockManager
             var tcs = new TaskCompletionSource<Message?>(TaskCreationOptions.RunContinuationsAsynchronously);
             _pending[msg.MsgId] = new PendingRequest { Tcs = tcs, Cmd = msg.Cmd };
 
-            int attempts = IsReadOnlyRequest(msg.Cmd) ? 2 : 1;
+            int attempts = attemptsOverride ?? (IsReadOnlyRequest(msg.Cmd) ? 2 : 1);
             for (int attempt = 0; attempt < attempts; attempt++)
             {
                 if (!IsAvailable || !App.MeshBridge.SendToDevice(RootDeviceId, msg)) break;
@@ -568,6 +682,35 @@ namespace FingerprintLockManager
         public uint LogsVersion { get; set; }
         public ulong SdTotalBytes { get; set; }
         public ulong SdUsedBytes { get; set; }
+
+        public void AdvanceAfterSuccessfulSave(string table)
+        {
+            GlobalVersion++;
+            switch (table)
+            {
+                case "users":
+                    UsersVersion++;
+                    PermissionsVersion++;
+                    break;
+                case "classes":
+                    ClassesVersion++;
+                    break;
+                case "permissions":
+                case "role_permissions":
+                    PermissionsVersion++;
+                    break;
+                case "devices":
+                    DevicesVersion++;
+                    break;
+                case "fingerprints":
+                case "fp":
+                    FpVersion++;
+                    break;
+                case "logs":
+                    LogsVersion++;
+                    break;
+            }
+        }
 
         public override string ToString()
         {

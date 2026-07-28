@@ -28,6 +28,11 @@ namespace FingerprintLockManager
         /// <summary>是否为 Mesh 根节点</summary>
         public bool IsRoot { get; set; }
 
+        /// <summary>最近一次柜机状态响应；直连与 Mesh 共用。</summary>
+        public DeviceRuntimeStatus Status { get; set; } = new();
+
+        public DateTime? LastStatusAt { get; set; }
+
         /// <summary>
         /// MeshBridge 注入的发送回调：将消息经 ITransport 发往 Root（由 Root 转发到目标设备）
         /// </summary>

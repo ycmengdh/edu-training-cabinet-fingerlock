@@ -25,6 +25,18 @@ namespace FingerprintLockManager
         [JsonProperty("finger_index")]
         public int FingerIndex { get; set; } = 1;
 
+        /// <summary>手指名称，例如“左手食指”。</summary>
+        [JsonProperty("finger_name")]
+        public string FingerName { get; set; } = "";
+
+        /// <summary>录入质量，0 表示设备未提供质量值。</summary>
+        [JsonProperty("quality")]
+        public int Quality { get; set; }
+
+        /// <summary>停用后不会作为柜机可选指纹。</summary>
+        [JsonProperty("enabled")]
+        public bool Enabled { get; set; } = true;
+
         /// <summary>录入时间</summary>
         [JsonProperty("enroll_time")]
         public DateTime EnrollTime { get; set; }
@@ -58,5 +70,9 @@ namespace FingerprintLockManager
             "distributed" => "已下发",
             _ => string.IsNullOrEmpty(BackupStatus) ? "本地" : BackupStatus
         };
+
+        [JsonIgnore]
+        public string FingerDisplayName => string.IsNullOrWhiteSpace(FingerName)
+            ? $"指纹 {FingerIndex}" : FingerName;
     }
 }

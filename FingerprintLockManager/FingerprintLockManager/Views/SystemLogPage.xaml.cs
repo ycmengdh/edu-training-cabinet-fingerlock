@@ -36,13 +36,19 @@ namespace FingerprintLockManager
 
         private void OnTraceAdded(CommunicationTraceEntry entry)
         {
-            // 通讯页签打开时，新消息到来后轻量刷新当前页（不打断用户）
-            if (!_loaded || LogTabs.SelectedIndex != 1 || _busy) return;
-            Dispatcher.BeginInvoke(new Action(async () =>
+            // 后台线程禁止读 UI 控件；一律先切回 Dispatcher 再判断。
+            try
             {
-                if (_loaded && LogTabs.SelectedIndex == 1 && !_busy)
+                Dispatcher.BeginInvoke(new Action(async () =>
+                {
+                    if (!_loaded || LogTabs.SelectedIndex != 1 || _busy) return;
                     await LoadCommLogsAsync(quiet: true);
-            }));
+                }), System.Windows.Threading.DispatcherPriority.Background);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[SystemLog] OnTraceAdded: {ex.Message}");
+            }
         }
 
         private async void LogTabs_SelectionChanged(object sender, SelectionChangedEventArgs e)

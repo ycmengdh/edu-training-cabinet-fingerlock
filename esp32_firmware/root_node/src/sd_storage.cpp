@@ -11,7 +11,44 @@
 #include <ArduinoJson.h>
 
 bool SdStorage::mounted = false;
+uint64_t SdStorage::cachedTotalBytes = 0;
+uint64_t SdStorage::cachedUsedBytes = 0;
+bool SdStorage::versionCacheValid = false;
+uint32_t SdStorage::cachedGlobalVersion = 0;
+uint32_t SdStorage::cachedUsersVersion = 0;
+uint32_t SdStorage::cachedClassesVersion = 0;
+uint32_t SdStorage::cachedPermissionsVersion = 0;
+uint32_t SdStorage::cachedDevicesVersion = 0;
+uint32_t SdStorage::cachedFingerprintVersion = 0;
+uint32_t SdStorage::cachedLogsVersion = 0;
 String SdStorage::lastError = "";
+
+namespace {
+String activeUploadTable;
+String activeUploadId;
+String activeUploadPath;
+uint32_t activeUploadPartTotal = 0;
+uint32_t activeUploadNextPart = 0;
+uint32_t activeUploadTotalBytes = 0;
+uint32_t activeUploadWrittenBytes = 0;
+bool activeUploadCommitted = false;
+
+void resetActiveUpload(const String &tableName, const String &uploadId,
+                       const String &path, uint32_t partTotal,
+                       uint32_t totalBytes) {
+    if (activeUploadPath.length() > 0 && SD_MMC.exists(activeUploadPath)) {
+        SD_MMC.remove(activeUploadPath);
+    }
+    activeUploadTable = tableName;
+    activeUploadId = uploadId;
+    activeUploadPath = path;
+    activeUploadPartTotal = partTotal;
+    activeUploadNextPart = 0;
+    activeUploadTotalBytes = totalBytes;
+    activeUploadWrittenBytes = 0;
+    activeUploadCommitted = false;
+}
+}
 
 bool SdStorage::init() {
     if (mounted) return true;
@@ -74,10 +111,12 @@ bool SdStorage::init() {
         return false;
     }
 
+    cachedTotalBytes = SD_MMC.cardSize();
+    cachedUsedBytes = SD_MMC.usedBytes();
     Debug::printf("[SD] Mount success type=%s capacity=%lluMB used=%lluMB\n",
                   cardType == CARD_MMC ? "MMC" : (cardType == CARD_SD ? "SD" : "SDHC"),
-                  SD_MMC.cardSize() / (1024 * 1024),
-                  SD_MMC.usedBytes() / (1024 * 1024));
+                  cachedTotalBytes / (1024 * 1024),
+                  cachedUsedBytes / (1024 * 1024));
 
     // Mark the volume ready before reading/writing the initial tables.
     mounted = true;
@@ -141,6 +180,7 @@ bool SdStorage::init() {
         {"classes", "[]"},
         {"permissions", "[]"},
         {"role_permissions", "[{\"role\":\"admin\",\"lock_0\":true,\"lock_1\":true,\"lock_2\":true,\"lock_3\":true},{\"role\":\"teacher\",\"lock_0\":false,\"lock_1\":true,\"lock_2\":true,\"lock_3\":true},{\"role\":\"student\",\"lock_0\":false,\"lock_1\":false,\"lock_2\":false,\"lock_3\":false}]"},
+        {"fingerprints", "[]"},
         {"devices", "[]"},
         {"logs", "[]"}
     };
@@ -192,7 +232,6 @@ bool SdStorage::ensureDir(const String &path) {
 
 bool SdStorage::atomicWrite(const String &path, const uint8_t *data, size_t len) {
     String tmpPath = path + ".tmp";
-    String bakPath = path + ".bak";
 
     // 1. Write temp file
     File f = SD_MMC.open(tmpPath, FILE_WRITE);
@@ -209,6 +248,12 @@ bool SdStorage::atomicWrite(const String &path, const uint8_t *data, size_t len)
         SD_MMC.remove(tmpPath);
         return false;
     }
+
+    return promoteTempFile(path, tmpPath);
+}
+
+bool SdStorage::promoteTempFile(const String &path, const String &tmpPath) {
+    String bakPath = path + ".bak";
 
     // 2. Keep previous good file as .bak
     if (SD_MMC.exists(path)) {
@@ -268,12 +313,131 @@ bool SdStorage::writeTable(const String &tableName, const String &json) {
 
     bool ok = atomicWrite(path, (const uint8_t *)json.c_str(), json.length());
     if (ok) {
-        if (tableName != "version") {
+        if (tableName == "version") {
+            versionCacheValid = false;
+        } else {
             incrementVersion(tableName);
         }
         Debug::printf("[SD] Write %s success (%u bytes)\n", tableName.c_str(), (unsigned)json.length());
     }
     return ok;
+}
+
+bool SdStorage::isTableUploadChunkKnown(
+    const String &tableName, const String &uploadId,
+    uint32_t partIndex, uint32_t partTotal) {
+    if (activeUploadTable != tableName || activeUploadId != uploadId ||
+        activeUploadPartTotal != partTotal) {
+        return false;
+    }
+    if (activeUploadCommitted) return partIndex < partTotal;
+    return partIndex < activeUploadNextPart;
+}
+
+TableUploadChunkResult SdStorage::writeTableChunk(
+    const String &tableName, const String &uploadId,
+    uint32_t partIndex, uint32_t partTotal, uint32_t totalBytes,
+    const uint8_t *data, size_t len, uint32_t &expectedPart) {
+    expectedPart = activeUploadNextPart;
+    if (!mounted || tableName.length() == 0 || uploadId.length() == 0 ||
+        uploadId.length() > 40 || partTotal == 0 || partTotal > 4096 ||
+        partIndex >= partTotal || totalBytes == 0 || totalBytes > 4U * 1024U * 1024U ||
+        data == nullptr || len == 0) {
+        return TableUploadChunkResult::Invalid;
+    }
+
+    bool sameUpload = activeUploadTable == tableName &&
+                      activeUploadId == uploadId &&
+                      activeUploadPartTotal == partTotal &&
+                      activeUploadTotalBytes == totalBytes;
+    if (!sameUpload) {
+        if (partIndex != 0) {
+            expectedPart = 0;
+            return TableUploadChunkResult::OutOfOrder;
+        }
+        ensureDir(SD_DATA_DIR);
+        resetActiveUpload(tableName, uploadId, tablePath(tableName) + ".upload",
+                          partTotal, totalBytes);
+        sameUpload = true;
+    }
+
+    expectedPart = activeUploadNextPart;
+    if (activeUploadCommitted) {
+        return TableUploadChunkResult::Complete;
+    }
+    if (partIndex < activeUploadNextPart) {
+        return TableUploadChunkResult::Duplicate;
+    }
+    if (partIndex > activeUploadNextPart) {
+        return TableUploadChunkResult::OutOfOrder;
+    }
+    if (activeUploadWrittenBytes + len > activeUploadTotalBytes) {
+        return TableUploadChunkResult::Invalid;
+    }
+
+    File file = SD_MMC.open(activeUploadPath,
+                            partIndex == 0 ? FILE_WRITE : FILE_APPEND);
+    if (!file) {
+        Debug::printf("[SD] Open upload staging failed: %s\n", activeUploadPath.c_str());
+        return TableUploadChunkResult::Failed;
+    }
+    size_t written = file.write(data, len);
+    file.flush();
+    file.close();
+    if (written != len) {
+        Debug::printf("[SD] Upload chunk incomplete: %u/%u\n",
+                      (unsigned)written, (unsigned)len);
+        return TableUploadChunkResult::Failed;
+    }
+
+    activeUploadWrittenBytes += (uint32_t)written;
+    activeUploadNextPart++;
+    expectedPart = activeUploadNextPart;
+    if (activeUploadNextPart < activeUploadPartTotal) {
+        Debug::printf("[SD] Upload %s part %u/%u accepted (%u/%u bytes)\n",
+                      tableName.c_str(), (unsigned)(partIndex + 1),
+                      (unsigned)partTotal, (unsigned)activeUploadWrittenBytes,
+                      (unsigned)activeUploadTotalBytes);
+        return TableUploadChunkResult::Accepted;
+    }
+
+    if (activeUploadWrittenBytes != activeUploadTotalBytes) {
+        Debug::printf("[SD] Upload size mismatch: %u/%u\n",
+                      (unsigned)activeUploadWrittenBytes,
+                      (unsigned)activeUploadTotalBytes);
+        return TableUploadChunkResult::Invalid;
+    }
+
+    File verify = SD_MMC.open(activeUploadPath, FILE_READ);
+    if (!verify || verify.size() != activeUploadTotalBytes) {
+        if (verify) verify.close();
+        return TableUploadChunkResult::Failed;
+    }
+    int first = verify.read();
+    if (!verify.seek(activeUploadTotalBytes - 1)) {
+        verify.close();
+        return TableUploadChunkResult::Failed;
+    }
+    int last = verify.read();
+    verify.close();
+    if (first != '[' || last != ']') {
+        Debug::printf("[SD] Upload JSON boundary invalid: first=%d last=%d\n", first, last);
+        return TableUploadChunkResult::Invalid;
+    }
+
+    String targetPath = tablePath(tableName);
+    if (!promoteTempFile(targetPath, activeUploadPath)) {
+        return TableUploadChunkResult::Failed;
+    }
+    if (!incrementVersion(tableName)) {
+        Debug::printf("[SD] WARNING: %s data committed but version update failed\n",
+                      tableName.c_str());
+    }
+    activeUploadCommitted = true;
+    Debug::printf("[SD] Upload %s committed (%u parts, %u bytes)\n",
+                  tableName.c_str(), (unsigned)partTotal,
+                  (unsigned)activeUploadTotalBytes);
+    return TableUploadChunkResult::Complete;
 }
 
 bool SdStorage::appendLogs(const String &logsJson) {
@@ -415,12 +579,31 @@ bool SdStorage::deleteTemplate(const String &userId) {
     return deleted > 0;
 }
 
+bool SdStorage::deleteTemplate(const String &userId, int index) {
+    if (!mounted || index < 1 || index > FP_MAX_TEMPLATES_PER_USER) return false;
+    String fileName = getTemplateFileName(userId, index);
+    String path = String(SD_FP_DIR) + "/" + fileName;
+    if (!SD_MMC.exists(path)) return true;
+    return SD_MMC.remove(path);
+}
+
 // ====== Version metadata ======
 
 bool SdStorage::readVersion(uint32_t &globalVer, uint32_t &usersVer,
                             uint32_t &classesVer, uint32_t &permsVer,
                             uint32_t &devicesVer, uint32_t &fpVer,
                             uint32_t &logsVer) {
+    if (versionCacheValid) {
+        globalVer = cachedGlobalVersion;
+        usersVer = cachedUsersVersion;
+        classesVer = cachedClassesVersion;
+        permsVer = cachedPermissionsVersion;
+        devicesVer = cachedDevicesVersion;
+        fpVer = cachedFingerprintVersion;
+        logsVer = cachedLogsVersion;
+        return true;
+    }
+
     String json;
     if (!readTable("version", json)) {
         globalVer = usersVer = classesVer = permsVer = devicesVer = fpVer = logsVer = 0;
@@ -441,6 +624,14 @@ bool SdStorage::readVersion(uint32_t &globalVer, uint32_t &usersVer,
     devicesVer = doc["devices_version"] | 0;
     fpVer      = doc["fp_version"] | 0;
     logsVer    = doc["logs_version"] | 0;
+    cachedGlobalVersion = globalVer;
+    cachedUsersVersion = usersVer;
+    cachedClassesVersion = classesVer;
+    cachedPermissionsVersion = permsVer;
+    cachedDevicesVersion = devicesVer;
+    cachedFingerprintVersion = fpVer;
+    cachedLogsVersion = logsVer;
+    versionCacheValid = true;
     return true;
 }
 
@@ -448,7 +639,11 @@ bool SdStorage::incrementVersion(const String &tableName) {
     uint32_t g, u, c, p, d, fp, logs;
     readVersion(g, u, c, p, d, fp, logs);
 
-    if (tableName == "users") u++;
+    if (tableName == "users") {
+        u++;
+        // User enable/role/fingerprint fields are part of cabinet authorization.
+        p++;
+    }
     else if (tableName == "classes") c++;
     else if (tableName == "permissions") p++;
     else if (tableName == "role_permissions") p++;
@@ -477,7 +672,18 @@ bool SdStorage::incrementVersion(const String &tableName) {
     serializeJson(doc, json);
 
     String path = tablePath("version");
-    return atomicWrite(path, (const uint8_t *)json.c_str(), json.length());
+    bool ok = atomicWrite(path, (const uint8_t *)json.c_str(), json.length());
+    if (ok) {
+        cachedGlobalVersion = g;
+        cachedUsersVersion = u;
+        cachedClassesVersion = c;
+        cachedPermissionsVersion = p;
+        cachedDevicesVersion = d;
+        cachedFingerprintVersion = fp;
+        cachedLogsVersion = logs;
+        versionCacheValid = true;
+    }
+    return ok;
 }
 
 uint32_t SdStorage::getGlobalVersion() {
@@ -486,14 +692,20 @@ uint32_t SdStorage::getGlobalVersion() {
     return g;
 }
 
+uint32_t SdStorage::getPermissionsVersion() {
+    uint32_t g, u, c, p, d, fp, logs;
+    readVersion(g, u, c, p, d, fp, logs);
+    return p;
+}
+
 // ====== SD card capacity info ======
 
 uint64_t SdStorage::getTotalBytes() {
-    return mounted ? SD_MMC.cardSize() : 0;
+    return mounted ? cachedTotalBytes : 0;
 }
 
 uint64_t SdStorage::getUsedBytes() {
-    return mounted ? SD_MMC.usedBytes() : 0;
+    return mounted ? cachedUsedBytes : 0;
 }
 
 #endif // ENABLE_SD_CARD

@@ -1,7 +1,8 @@
 namespace FingerprintLockManager
 {
     /// <summary>
-    /// 登录认证服务。账号和密码哈希从根节点 users.json 读取。
+    /// 登录认证服务。账号和密码哈希从本机 business.db（users 表）读取，
+    /// 启动时已从 SD 同步或以本地数据为准。
     /// 规则：
     /// 1) 用户表为空（或完全读不到数据源）时，允许 admin/admin123，并尽量自动创建该账户；
     /// 2) 一旦已有任意账户，一律按账户表严格校验，不再使用内置口令旁路。
@@ -36,8 +37,10 @@ namespace FingerprintLockManager
             // 已有账户：严格按表验证。
             var user = users.FirstOrDefault(u =>
                 string.Equals(u.UserId, userId, StringComparison.Ordinal));
-            if (user == null || !user.Enabled || !PasswordHelper.VerifyPassword(
-                    password, user.PasswordSalt, user.PasswordHash)) return null;
+            // 学生是柜子业务用户，不允许登录上位机，也不需要维护密码。
+            if (user == null || !user.Enabled ||
+                string.Equals(user.Role, "student", StringComparison.OrdinalIgnoreCase) ||
+                !PasswordHelper.VerifyPassword(password, user.PasswordSalt, user.PasswordHash)) return null;
 
             // Upgrade legacy hashes without making a successful login depend
             // on the migration write succeeding.

@@ -9,7 +9,9 @@
  *   ├── users.json            用户表
  *   ├── classes.json          班级表
  *   ├── permissions.json      权限表
+ *   ├── role_permissions.json 角色默认权限
  *   ├── devices.json          设备注册表
+ *   ├── logs.json             开锁日志（可选）
  *   └── fingerprints/
  *       ├── index.json        指纹映射表
  *       └── FP_XXXXX[_2].bin  指纹模板二进制文件（每枚 512B）
@@ -23,6 +25,15 @@
 
 #include <Arduino.h>
 #include "config.h"
+
+enum class TableUploadChunkResult : uint8_t {
+    Failed,
+    Accepted,
+    Duplicate,
+    Complete,
+    OutOfOrder,
+    Invalid
+};
 
 class SdStorage {
 public:
@@ -44,6 +55,17 @@ public:
     // 原子写入整张表 JSON（先写 .tmp 再 rename）
     static bool writeTable(const String &tableName, const String &json);
 
+    // 流式写入大表。分块先追加到 .upload，最后一块校验后原子替换正式表。
+    static TableUploadChunkResult writeTableChunk(
+        const String &tableName, const String &uploadId,
+        uint32_t partIndex, uint32_t partTotal, uint32_t totalBytes,
+        const uint8_t *data, size_t len, uint32_t &expectedPart);
+
+    // 响应丢失后，主机可能重发已经落盘的块；用于跳过重复版本检查。
+    static bool isTableUploadChunkKnown(
+        const String &tableName, const String &uploadId,
+        uint32_t partIndex, uint32_t partTotal);
+
     // ====== 指纹模板读写 ======
     // 保存指纹模板到 SD 卡（按 user_id + index 命名）
     // userId: 用户ID（数字或字符串，用于文件名）
@@ -61,6 +83,9 @@ public:
     // 删除指定用户所有指纹模板
     static bool deleteTemplate(const String &userId);
 
+    // 删除指定用户的一枚指纹模板
+    static bool deleteTemplate(const String &userId, int index);
+
     // 获取指纹模板文件名（内部命名规则）
     static String getTemplateFileName(const String &userId, int index);
 
@@ -76,6 +101,7 @@ public:
 
     // 获取当前全局版本号（快速查询用）
     static uint32_t getGlobalVersion();
+    static uint32_t getPermissionsVersion();
 
     // Append a batch of log objects to logs.json and retain the newest entries.
     static bool appendLogs(const String &logsJson);
@@ -87,6 +113,16 @@ public:
 
 private:
     static bool mounted;
+    static uint64_t cachedTotalBytes;
+    static uint64_t cachedUsedBytes;
+    static bool versionCacheValid;
+    static uint32_t cachedGlobalVersion;
+    static uint32_t cachedUsersVersion;
+    static uint32_t cachedClassesVersion;
+    static uint32_t cachedPermissionsVersion;
+    static uint32_t cachedDevicesVersion;
+    static uint32_t cachedFingerprintVersion;
+    static uint32_t cachedLogsVersion;
     // V2.7: 详细错误信息（供 host/显示/调试定位 SD 故障）
     static String lastError;
 
@@ -95,6 +131,7 @@ private:
 
     // 原子写入：写 .tmp → rename
     static bool atomicWrite(const String &path, const uint8_t *data, size_t len);
+    static bool promoteTempFile(const String &path, const String &tmpPath);
 
     // 表名转文件路径
     static String tablePath(const String &tableName);

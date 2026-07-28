@@ -16,6 +16,10 @@ namespace FingerprintLockManager
         [JsonProperty("device_name")]
         public string DeviceName { get; set; } = "";
 
+        /// <summary>现场管理使用的可编辑唯一编号，不参与通讯路由。</summary>
+        [JsonProperty("device_number")]
+        public string DeviceNumber { get; set; } = "";
+
         /// <summary>设备 IP 地址（连接时记录）</summary>
         [JsonProperty("ip_address")]
         public string IpAddress { get; set; } = "";
@@ -60,6 +64,11 @@ namespace FingerprintLockManager
 
         [JsonIgnore]
         public string OnlineStatusText => IsOnline ? "在线" : "离线";
+
+        [JsonIgnore]
+        public string DisplayIdentity => string.IsNullOrWhiteSpace(DeviceNumber)
+            ? DeviceName
+            : $"{DeviceNumber} · {DeviceName}";
 
         /// <summary>根节点全局权限版本，用于列表比对（运行时填充，不落盘）。</summary>
         [JsonIgnore]

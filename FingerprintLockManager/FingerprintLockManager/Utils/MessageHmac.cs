@@ -15,7 +15,10 @@ namespace FingerprintLockManager
         {
             Protocol.CmdControlLock,
             Protocol.CmdAddFingerprint,
+            Protocol.CmdCancelEnroll,
             Protocol.CmdRestoreFingerprint,
+            Protocol.CmdStartFingerprintTest,
+            Protocol.CmdStopFingerprintTest,
             Protocol.CmdDeleteFingerprint,
             Protocol.CmdSdSave,
             Protocol.CmdWriteConfig,

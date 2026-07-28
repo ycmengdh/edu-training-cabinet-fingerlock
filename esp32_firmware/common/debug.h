@@ -25,6 +25,10 @@ public:
     // 当前是否处于封帧模式
     static bool isFraming();
 
+    // Root USB host静默时可暂停调试输出，避免无消费者的 CDC 写入影响 Mesh。
+    static void setOutputEnabled(bool enable);
+    static bool isOutputEnabled();
+
     // ====== 输出接口（与 Serial 用法一致） ======
     // 无参数：输出空行
     static void println();
@@ -41,6 +45,7 @@ public:
 
 private:
     static bool   framing;     // true=协议帧封装, false=裸文本
+    static bool   outputEnabled;
     static String lineBuffer;  // print() 不带换行时的累积缓冲
     static String deviceId;    // 缓存的设备 ID（setDeviceId 设置）
 

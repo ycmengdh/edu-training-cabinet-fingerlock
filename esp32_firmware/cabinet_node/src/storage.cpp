@@ -492,7 +492,9 @@ bool Storage::loadDeviceConfig(DeviceConfig &cfg) {
 
     cfg.device_id        = prefs.getString("device_id", DEVICE_ID_DEFAULT);
     cfg.device_name      = prefs.getString("device_name", "Cabinet Node");
-    cfg.work_mode        = (WorkMode)prefs.getUChar("work_mode", (uint8_t)MODE_MESH);
+    // Cabinet firmware has one runtime mode: Mesh primary + UART0 fallback.
+    // Normalize legacy MODE_DEBUG records without requiring a factory reset.
+    cfg.work_mode        = MODE_MESH;
     // 柜子固件默认永远不是 Root
     cfg.is_root          = prefs.getBool("is_root", false);
     if (cfg.is_root) {
@@ -501,8 +503,8 @@ bool Storage::loadDeviceConfig(DeviceConfig &cfg) {
     cfg.uplink_mode      = (UplinkMode)prefs.getUChar("uplink_mode", (uint8_t)UPLINK_USB);
     cfg.mesh_channel     = prefs.getUChar("mesh_channel", MESH_CHANNEL);
     cfg.mesh_password    = prefs.getString("mesh_password", MESH_PASSWORD);
-    // ESP-MESH requires real 2.4 GHz router credentials on every node.
-    // Empty defaults fail fast instead of silently scanning a placeholder AP.
+    // Retained for config compatibility; cabinet MeshComm ignores router
+    // credentials because cabinets run pure fixed-channel ESP-MESH.
     cfg.wifi_ssid        = prefs.getString("wifi_ssid", "");
     cfg.wifi_password    = prefs.getString("wifi_password", "");
     cfg.server_ip        = prefs.getString("server_ip", UPLINK_SERVER_IP_DEFAULT);
@@ -513,9 +515,11 @@ bool Storage::loadDeviceConfig(DeviceConfig &cfg) {
     cfg.hmac_key         = prefs.getString("hmac_key", "");
 
     bool hasRecord = prefs.isKey("device_id");
+    static bool configLogged = false;
     if (!hasRecord) {
         Debug::println(F("[STORAGE] No config record found, using defaults"));
-    } else {
+    } else if (!configLogged) {
+        configLogged = true;
         Debug::printf("[STORAGE] Config: id=%s, root=%s, mode=%s, uplink=%d\n",
                       cfg.device_id.c_str(),
                       cfg.is_root ? "yes" : "no",
@@ -529,8 +533,8 @@ bool Storage::saveDeviceConfig(const DeviceConfig &cfg) {
     if (!initialized) begin();
     prefs.putString("device_id", cfg.device_id);
     prefs.putString("device_name", cfg.device_name);
-    prefs.putUChar("work_mode", (uint8_t)cfg.work_mode);
-    prefs.putBool("is_root", cfg.is_root);
+    prefs.putUChar("work_mode", (uint8_t)MODE_MESH);
+    prefs.putBool("is_root", false);
     prefs.putUChar("uplink_mode", (uint8_t)cfg.uplink_mode);
     prefs.putUChar("mesh_channel", cfg.mesh_channel);
     prefs.putString("mesh_password", cfg.mesh_password);
@@ -549,14 +553,14 @@ bool Storage::saveDeviceConfig(const DeviceConfig &cfg) {
 // ====== 工作模式 ======
 WorkMode Storage::loadWorkMode() {
     if (!initialized) begin();
-    return (WorkMode)prefs.getUChar("work_mode", (uint8_t)MODE_MESH);
+    return MODE_MESH;
 }
 
 bool Storage::saveWorkMode(WorkMode mode) {
     if (!initialized) begin();
-    prefs.putUChar("work_mode", (uint8_t)mode);
-    Debug::printf("[STORAGE] Work mode saved: %s\n",
-                  mode == MODE_MESH ? "Mesh" : "Debug");
+    (void)mode;
+    prefs.putUChar("work_mode", (uint8_t)MODE_MESH);
+    Debug::println(F("[STORAGE] Cabinet mode fixed: Mesh+UART0"));
     return true;
 }
 
@@ -778,7 +782,8 @@ bool Storage::persistCache() {
 
 // ====== 设备专属副指纹（V2.7） ======
 // 分配一个未占用的 AS608 物理槽位（0..FINGER_MAX_USERS-1）
-// 策略：扫描权限表中已用的 local_fp_id，找最小未占用值。
+// 主指纹由上位机从低 ID 向上分配；设备专属副指纹从高 ID 向下分配，
+// 降低两类独立分配器在设备使用周期内发生槽位碰撞的概率。
 int Storage::allocLocalFpId() {
     if (!initialized) begin();
     bool used[FINGER_MAX_USERS] = {false};
@@ -788,7 +793,7 @@ int Storage::allocLocalFpId() {
             used[id] = true;
         }
     }
-    for (int id = 0; id < FINGER_MAX_USERS; id++) {
+    for (int id = FINGER_MAX_USERS - 1; id >= 1; id--) {
         if (!used[id]) return id;
     }
     return -1;  // 槽位已满

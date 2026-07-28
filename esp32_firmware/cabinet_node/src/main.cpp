@@ -44,6 +44,22 @@ const char *NTP_SERVER_2 = "pool.ntp.org";
 const long  GMT_OFFSET_SEC = 8 * 3600;   // 东八区
 const int   DAYLIGHT_OFFSET_SEC = 0;
 
+static const char *resetReasonName(esp_reset_reason_t reason) {
+    switch (reason) {
+        case ESP_RST_POWERON: return "POWERON";
+        case ESP_RST_EXT: return "EXTERNAL";
+        case ESP_RST_SW: return "SOFTWARE";
+        case ESP_RST_PANIC: return "PANIC";
+        case ESP_RST_INT_WDT: return "INT_WDT";
+        case ESP_RST_TASK_WDT: return "TASK_WDT";
+        case ESP_RST_WDT: return "WDT";
+        case ESP_RST_DEEPSLEEP: return "DEEPSLEEP";
+        case ESP_RST_BROWNOUT: return "BROWNOUT";
+        case ESP_RST_SDIO: return "SDIO";
+        default: return "UNKNOWN";
+    }
+}
+
 // ====== 消息接收回调（本机消息） ======
 // 子节点：收到 Root 下发的命令
 // 调试模式：收到 PC 直连命令
@@ -72,19 +88,10 @@ void onMeshMessage(const uint8_t *fromMac, const String &json) {
 }
 
 // ====== LED 指示函数 ======
-// 快闪=调试模式，中速闪=Mesh连接中，慢闪=Mesh已连接
+// 中速闪=Mesh连接中，慢闪=Mesh已连接；UART0 状态不改变 Mesh 指示。
 void updateLED() {
     unsigned long now = millis();
-    WorkMode mode = Storage::loadWorkMode();
-
-    if (mode == MODE_DEBUG) {
-        // 调试模式快闪
-        if (now - lastLedToggle >= LED_BLINK_FAST_MS) {
-            lastLedToggle = now;
-            ledState = !ledState;
-            digitalWrite(LED_PIN, ledState ? HIGH : LOW);
-        }
-    } else if (MeshComm::isConnected()) {
+    if (MeshComm::isMeshConnected()) {
         // Mesh 已连接慢闪
         if (now - lastLedToggle >= LED_BLINK_SLOW_MS) {
             lastLedToggle = now;
@@ -137,8 +144,10 @@ void setup() {
     // 柜子物理口为 UART0（GPIO43 TX / GPIO44 RX），非 USB CDC。
     Serial.begin(DEBUG_UART_BAUD, SERIAL_8N1, DEBUG_UART_RX_PIN, DEBUG_UART_TX_PIN);
     delay(300);
+    esp_reset_reason_t resetReason = esp_reset_reason();
     Serial.print("\r\n[CABINET_BOOT] UART0-SERIAL ALIVE (GPIO43/44)\r\n");
-    Serial.printf("[CABINET_BOOT] RESET_REASON=%d\r\n", (int)esp_reset_reason());
+    Serial.printf("[CABINET_BOOT] RESET_REASON=%d(%s)\r\n",
+                  (int)resetReason, resetReasonName(resetReason));
     Serial.flush();
 
     Debug::println();
@@ -190,13 +199,17 @@ void setup() {
     Debug::printf("[MAIN] Device ID: %s, Name: %s\n",
                   deviceConfig.device_id.c_str(),
                   deviceConfig.device_name.c_str());
-    Debug::printf("[MAIN] Role: Cabinet, Work mode: %s, host: UART0@%d\n",
-                  deviceConfig.work_mode == MODE_MESH ? "Mesh+UART0" : "Debug(UART0 only)",
+    Debug::printf("[MAIN] Role: Cabinet, Work mode: Mesh+UART0, host: UART0@%d\n",
                   DEBUG_UART_BAUD);
 
     LockControl::init();
     KeyHandler::init();
-    Fingerprint::init();
+    // 指纹模块初始化：失败重试最多 3 轮，避免冷启动一次抖动导致指纹功能永久不可用
+    for (int i = 0; i < 3; i++) {
+        if (Fingerprint::init()) break;
+        Debug::printf("[MAIN] Fingerprint init failed (round %d/3), retry in 1s\n", i + 1);
+        delay(1000);
+    }
     FpLed::init();
     Logger::init();
     MessageHandler::init();
@@ -212,40 +225,12 @@ void setup() {
     lastStatusReport = millis();
     lastLedToggle    = millis();
 
-    Serial.printf("\r\n[CABINET_BOOT] PROTOCOL READY; baud=%d; frame=A5 5A; mode=%s\r\n",
-                  DEBUG_UART_BAUD,
-                  deviceConfig.work_mode == MODE_MESH ? "MESH" : "DEBUG");
+    Serial.printf("\r\n[CABINET_BOOT] PROTOCOL READY; baud=%d; frame=A5 5A; mode=MESH+UART0\r\n",
+                  DEBUG_UART_BAUD);
     Serial.flush();
 
     Debug::println(F("[MAIN] Init done, entering main loop"));
     Debug::println(F("----------------------------------------"));
-}
-
-// ====== 长按切换调试模式处理 ======
-// 长按 10 秒：Mesh 模式 <-> Debug(UART0 直连上位机)，切换后重启
-void handleModeSwitch() {
-    if (!KeyHandler::isLongPressDetected()) {
-        return;
-    }
-    WorkMode current = Storage::loadWorkMode();
-    WorkMode target  = (current == MODE_MESH) ? MODE_DEBUG : MODE_MESH;
-
-    Debug::printf("[MAIN] Long press detected, switch work mode: %s -> %s, restart in 3 sec...\n",
-                  current == MODE_MESH ? "Mesh" : "Debug(UART0)",
-                  target  == MODE_MESH ? "Mesh" : "Debug(UART0)");
-
-    // 保存新模式到 Flash
-    Storage::saveWorkMode(target);
-
-    // LED 快闪提示即将重启
-    for (int i = 0; i < 10; i++) {
-        digitalWrite(LED_PIN, HIGH);
-        delay(150);
-        digitalWrite(LED_PIN, LOW);
-        delay(150);
-    }
-    delay(500);
-    ESP.restart();
 }
 
 // ====== 定期状态上报 ======
@@ -262,7 +247,9 @@ void reportStatus() {
         data += String(lockStatus[i] ? 1 : 0);
     }
     data += "],";
-    data += "\"fingerprint_count\":" + String(Fingerprint::getFingerprintCount()) + ",";
+    DeviceConfig latestConfig;
+    Storage::loadDeviceConfig(latestConfig);
+    data += "\"fingerprint_count\":" + String(latestConfig.fingerprint_count) + ",";
     data += "\"perm_count\":" + String(Storage::getPermissionCount()) + ",";
     data += "\"perm_version\":" + String(Storage::getPermissionVersion()) + ",";
     data += "\"log_pending\":" + String(Logger::getPendingCount()) + ",";
@@ -283,10 +270,7 @@ void loop() {
     // 1. 按键状态更新（含消抖和长按检测）
     KeyHandler::update();
 
-    // 2. 检测长按切换 Mesh/Debug 模式
-    handleModeSwitch();
-
-    // 3. 检测短按按键，触发指纹验证流程
+    // 2. 检测短按按键，触发指纹验证流程
     int pressedKey = KeyHandler::getKeyPressed();
     if (pressedKey >= 0) {
         if (pressedKey == KEY_CANCEL_INDEX) {

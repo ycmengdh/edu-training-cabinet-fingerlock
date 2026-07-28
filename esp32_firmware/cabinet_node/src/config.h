@@ -16,17 +16,32 @@
 #define FINGER_UART_BAUD        57600
 
 // 指纹模块电源控制与状态反馈
-// PWR: 输出控制上电；STATUS: 输入读供电状态
-#define FINGER_PWR_PIN          42
-#define FINGER_PWR_STATUS_PIN   21
-// 默认高电平上电；若硬件为低有效，改为 LOW
-#define FINGER_PWR_ON_LEVEL     HIGH
+// PWR: 输出控制上电；STATUS: 输入读供电状态（极性可与控制脚不同）
+#define FINGER_PWR_PIN          21
+#define FINGER_PWR_STATUS_PIN   42
+// 控制脚：低电平有效上电（GPIO21=LOW 上电，HIGH 断电）
+// 若某板为高有效，将 FINGER_PWR_ON_LEVEL 改为 HIGH 即可
+#define FINGER_PWR_ON_LEVEL     LOW
 #define FINGER_PWR_OFF_LEVEL    ((FINGER_PWR_ON_LEVEL == HIGH) ? LOW : HIGH)
+// 状态反馈脚：与控制脚独立，高电平表示已上电
+#define FINGER_PWR_STATUS_ON_LEVEL  HIGH
 // 上电后等待模块稳定再握手
 #define FINGER_PWR_STABLE_MS    300
 
+// ---- DM900 手册要求的上电/握手时序参数 ----
+// 上电前必须先把 UART TX/RX 拉低（手册·前言 A），保持时间
+#define FINGER_PWR_PRELOW_MS        10
+// 上电初始化完成后模块主动发出的就绪握手字节（手册 4.8）
+#define FINGER_HANDSHAKE_BYTE       0x55
+// 读 0x55 的超时窗口；读不到则降级到固定延时继续，不中止
+#define FINGER_HANDSHAKE_TIMEOUT_MS 500
+// init() 内 checkPassword() 失败重试次数与间隔
+#define FINGER_INIT_RETRY           3
+#define FINGER_RETRY_DELAY_MS       200
+
 // ===================== 74HC595 移位寄存器 =====================
-// Q0-Q3: 继电器(低电平开锁), Q4-Q7: 锁状态 LED(高电平亮)
+// Q0-Q3: 继电器(高电平开锁, LOW=关锁), Q4-Q7: 锁状态 LED(高电平亮, LOW=灭)
+// 待机默认 595 输出 0x00（锁全关、LED 全灭）
 #define SHIFT_DS_PIN            4
 #define SHIFT_STCP_PIN          15
 #define SHIFT_SHCP_PIN          16

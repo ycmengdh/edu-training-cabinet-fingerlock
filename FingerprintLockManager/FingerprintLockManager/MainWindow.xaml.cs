@@ -1,21 +1,28 @@
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Threading;
+using System.ComponentModel;
 
 namespace FingerprintLockManager
 {
     /// <summary>
     /// 主窗口
     /// 左侧导航栏切换右侧页面，底部状态栏显示 Mesh 链路状态、在线设备数、传输类型与当前时间。
-    /// 菜单按角色控制可见性：admin 全可见，teacher 隐藏角色权限和用户管理，student 仅见日志。
+    /// 菜单按角色控制可见性：admin 负责全局管理，teacher 进入班级工作台，student 不允许登录。
     /// </summary>
-    public partial class MainWindow : Window
+    public partial class MainWindow : BorderlessWindow
     {
         /// <summary>当前选中的导航按钮</summary>
         private Button? _currentNavButton;
 
         /// <summary>状态栏刷新定时器</summary>
         private DispatcherTimer? _statusTimer;
+
+        private bool _loggingOut;
+
+        private bool IsDirectUart => string.Equals(ConfigHelper.Current.LinkMode, "Uart",
+            StringComparison.OrdinalIgnoreCase);
 
         public MainWindow()
         {
@@ -34,6 +41,14 @@ namespace FingerprintLockManager
 
             // 应用角色可见性
             ApplyRoleVisibility();
+            // 仅管理员可手动同步业务库到 SD
+            string role = App.CurrentUser?.Role ?? "";
+            SyncToSdButton.Visibility = role == "admin" && !IsDirectUart
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+            DirectModeBanner.Visibility = IsDirectUart ? Visibility.Visible : Visibility.Collapsed;
+            if (IsDirectUart)
+                SyncStatusText.Text = "本机变更待恢复组网后同步";
 
             // 订阅 Mesh 桥接器事件（设备连接/断开与链路状态变化时刷新状态）
             App.MeshBridge.DeviceConnected += OnDeviceConnectionChanged;
@@ -50,11 +65,32 @@ namespace FingerprintLockManager
 
             // 刷新底部状态栏
             UpdateStatusBar();
+            UpdateThemeToggle();
+            ThemeManager.ThemeChanged += OnThemeChanged;
 
             // 启动定时器（每秒刷新时间与在线设备数）
             _statusTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
-            _statusTimer.Tick += (s, args) => UpdateStatusBar();
+            _statusTimer.Tick += StatusTimer_Tick;
             _statusTimer.Start();
+        }
+
+        private void StatusTimer_Tick(object? sender, EventArgs e) => UpdateStatusBar();
+
+        private void ThemeToggleButton_Click(object sender, RoutedEventArgs e) => ThemeManager.Toggle();
+
+        private void OnThemeChanged(AppTheme theme)
+        {
+            if (Dispatcher.CheckAccess())
+                UpdateThemeToggle();
+            else
+                Dispatcher.BeginInvoke(new Action(UpdateThemeToggle));
+        }
+
+        private void UpdateThemeToggle()
+        {
+            bool dark = ThemeManager.Current == AppTheme.Dark;
+            ThemeToggleButton.Content = dark ? "\uE706" : "\uE708";
+            ThemeToggleButton.ToolTip = dark ? "切换为浅色模式" : "切换为深色模式";
         }
 
         // ===== 导航按钮点击事件 =====
@@ -69,6 +105,12 @@ namespace FingerprintLockManager
         {
             SelectNavButton(sender);
             NavigateToPage(new UserManagePage());
+        }
+
+        private void NavTeacherManage_Click(object sender, RoutedEventArgs e)
+        {
+            SelectNavButton(sender);
+            NavigateToPage(new TeacherManagePage());
         }
 
         private void NavPermission_Click(object sender, RoutedEventArgs e)
@@ -93,7 +135,7 @@ namespace FingerprintLockManager
         private void NavDevice_Click(object sender, RoutedEventArgs e)
         {
             SelectNavButton(sender);
-            NavigateToPage(new DevicePage());
+            NavigateToPage(new CabinetManagePage());
         }
 
         /// <summary>指纹模板库页（采集-存储-分配解耦的指纹模板管理）</summary>
@@ -101,19 +143,6 @@ namespace FingerprintLockManager
         {
             SelectNavButton(sender);
             NavigateToPage(new FingerprintTemplatePage());
-        }
-
-        private void NavLog_Click(object sender, RoutedEventArgs e)
-        {
-            SelectNavButton(sender);
-            NavigateToPage(new LogPage());
-        }
-
-        private void NavSettings_Click(object sender, RoutedEventArgs e)
-        {
-            SelectNavButton(sender);
-            var window = new SettingsWindow { Owner = this };
-            window.ShowDialog();
         }
 
         private void NavSystemLog_Click(object sender, RoutedEventArgs e)
@@ -125,6 +154,16 @@ namespace FingerprintLockManager
         private void ChangePasswordButton_Click(object sender, RoutedEventArgs e)
         {
             var window = new ChangePasswordWindow { Owner = this };
+            window.ShowDialog();
+        }
+
+        private void AboutButton_Click(object sender, RoutedEventArgs e) => ShowAbout();
+
+        private void BrandLogo_MouseLeftButtonUp(object sender, MouseButtonEventArgs e) => ShowAbout();
+
+        private void ShowAbout()
+        {
+            var window = new AboutWindow { Owner = this };
             window.ShowDialog();
         }
 
@@ -141,16 +180,74 @@ namespace FingerprintLockManager
             }
             catch { /* ignore */ }
 
+            _loggingOut = true;
             App.CurrentUser = null;
             new LoginWindow().Show();
             Close();
         }
 
+        private bool _syncingToSd;
+
+        /// <summary>状态栏：立即将本机业务库 + 指纹模板同步到 SD。</summary>
+        private async void SyncToSdButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_syncingToSd) return;
+            if (!App.SdStorageService.IsAvailable)
+            {
+                SyncStatusText.Text = "SD 不可用，无法同步";
+                MessageBox.Show("根节点 SD 当前不可用，请检查通讯链路后再试。",
+                    "同步到 SD", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            _syncingToSd = true;
+            SyncToSdButton.IsEnabled = false;
+            SyncStatusText.Text = "正在同步…";
+            try
+            {
+                var progress = new Progress<string>(msg =>
+                {
+                    SyncStatusText.Text = msg;
+                });
+                var result = await Task.Run(async () =>
+                    await App.SdBusinessSyncService.PushBusinessToSdAsync(progress, timeoutMs: 8000));
+
+                SyncStatusText.Text = result.Success
+                    ? (string.IsNullOrWhiteSpace(result.Message) ? "同步完成" : result.Message)
+                    : (string.IsNullOrWhiteSpace(result.Message) ? "同步失败" : result.Message);
+
+                try
+                {
+                    App.OperationLogService.Write("系统", "立即同步到 SD",
+                        result: result.Success ? "success" : "fail",
+                        detail: result.Message);
+                }
+                catch { }
+
+                if (!result.Success)
+                {
+                    MessageBox.Show(result.Message ?? "同步失败", "同步到 SD",
+                        MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
+            }
+            catch (Exception ex)
+            {
+                SyncStatusText.Text = "同步异常";
+                MessageBox.Show($"同步失败：{ex.Message}", "同步到 SD",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+            finally
+            {
+                _syncingToSd = false;
+                SyncToSdButton.IsEnabled = true;
+            }
+        }
+
         /// <summary>
         /// 根据当前用户角色控制导航菜单可见性
-        /// admin：全部可见
-        /// teacher：隐藏角色权限和用户管理
-        /// student：仅见日志
+        /// admin：全部管理菜单
+        /// teacher：班级管理和系统日志
+        /// student：不允许登录；若已有会话仅保留系统日志
         /// </summary>
         private void ApplyRoleVisibility()
         {
@@ -159,13 +256,12 @@ namespace FingerprintLockManager
             // 默认全部可见
             NavDashboard.Visibility = Visibility.Visible;
             NavUserManage.Visibility = Visibility.Visible;
+            NavTeacherManage.Visibility = Visibility.Visible;
             NavPermission.Visibility = Visibility.Visible;
             NavRolePermission.Visibility = Visibility.Visible;
             NavClassManage.Visibility = Visibility.Visible;
             NavDevice.Visibility = Visibility.Visible;
             NavFingerprintTemplate.Visibility = Visibility.Visible;
-            NavLog.Visibility = Visibility.Visible;
-            NavSettings.Visibility = Visibility.Visible;
             NavSystemLog.Visibility = Visibility.Visible;
 
             switch (role)
@@ -174,23 +270,26 @@ namespace FingerprintLockManager
                     // 全部可见
                     break;
                 case "teacher":
-                    // V2.7：教师可管理本班学生，故显示用户管理、个人权限、设备、指纹模板、日志
-                    // 仅隐藏角色权限（全局）、班级管理（全局）、系统设置
+                    // 老师只从班级工作台维护本班学生，避免进入全局用户和设备管理。
+                    NavDashboard.Visibility = Visibility.Collapsed;
+                    NavUserManage.Visibility = Visibility.Collapsed;
+                    NavTeacherManage.Visibility = Visibility.Collapsed;
+                    NavPermission.Visibility = Visibility.Collapsed;
                     NavRolePermission.Visibility = Visibility.Collapsed;
-                    NavClassManage.Visibility = Visibility.Collapsed;
-                    NavSettings.Visibility = Visibility.Collapsed;
+                    NavDevice.Visibility = Visibility.Collapsed;
+                    NavFingerprintTemplate.Visibility = Visibility.Collapsed;
                     break;
                 case "student":
                 default:
-                    // 学生仅见日志（开锁日志 + 系统日志中的开锁/操作）
+                    // 学生仅见系统日志（包含开锁日志）
                     NavDashboard.Visibility = Visibility.Collapsed;
                     NavUserManage.Visibility = Visibility.Collapsed;
+                    NavTeacherManage.Visibility = Visibility.Collapsed;
                     NavPermission.Visibility = Visibility.Collapsed;
                     NavRolePermission.Visibility = Visibility.Collapsed;
                     NavClassManage.Visibility = Visibility.Collapsed;
                     NavDevice.Visibility = Visibility.Collapsed;
                     NavFingerprintTemplate.Visibility = Visibility.Collapsed;
-                    NavSettings.Visibility = Visibility.Collapsed;
                     break;
             }
         }
@@ -201,14 +300,14 @@ namespace FingerprintLockManager
             // 按顺序返回首个可见项
             if (NavDashboard.Visibility == Visibility.Visible) return NavDashboard;
             if (NavUserManage.Visibility == Visibility.Visible) return NavUserManage;
+            if (NavTeacherManage.Visibility == Visibility.Visible) return NavTeacherManage;
             if (NavPermission.Visibility == Visibility.Visible) return NavPermission;
             if (NavRolePermission.Visibility == Visibility.Visible) return NavRolePermission;
             if (NavClassManage.Visibility == Visibility.Visible) return NavClassManage;
             if (NavDevice.Visibility == Visibility.Visible) return NavDevice;
             if (NavFingerprintTemplate.Visibility == Visibility.Visible) return NavFingerprintTemplate;
-            if (NavLog.Visibility == Visibility.Visible) return NavLog;
             if (NavSystemLog.Visibility == Visibility.Visible) return NavSystemLog;
-            return NavSettings;
+            return NavSystemLog;
         }
 
         /// <summary>根据按钮导航到对应页面</summary>
@@ -216,12 +315,12 @@ namespace FingerprintLockManager
         {
             if (btn == NavDashboard) NavigateToPage(new DashboardPage());
             else if (btn == NavUserManage) NavigateToPage(new UserManagePage());
+            else if (btn == NavTeacherManage) NavigateToPage(new TeacherManagePage());
             else if (btn == NavPermission) NavigateToPage(new PermissionPage());
             else if (btn == NavRolePermission) NavigateToPage(new RolePermissionPage());
             else if (btn == NavClassManage) NavigateToPage(new ClassManagePage());
-            else if (btn == NavDevice) NavigateToPage(new DevicePage());
+            else if (btn == NavDevice) NavigateToPage(new CabinetManagePage());
             else if (btn == NavFingerprintTemplate) NavigateToPage(new FingerprintTemplatePage());
-            else if (btn == NavLog) NavigateToPage(new LogPage());
             else if (btn == NavSystemLog) NavigateToPage(new SystemLogPage());
         }
 
@@ -279,23 +378,26 @@ namespace FingerprintLockManager
 
                 if (connected)
                 {
-                    MeshStatusText.Text = "链路已连接";
+                    MeshStatusText.Text = IsDirectUart ? "柜机直连已连接" : "组网U盘已连接";
                     MeshStatusDot.Fill = FindResource("SuccessBrush") as System.Windows.Media.Brush;
                 }
                 else
                 {
-                    MeshStatusText.Text = "链路未连接";
+                    MeshStatusText.Text = IsDirectUart ? "柜机直连已断开" : "组网U盘未连接";
                     MeshStatusDot.Fill = FindResource("DangerBrush") as System.Windows.Media.Brush;
                 }
 
                 // 传输类型显示
-                TransportTypeText.Text = App.MeshBridge.CurrentType switch
-                {
-                    TransportType.UsbSerial => "USB 串口",
-                    TransportType.TcpClient => "TCP 客户端",
-                    TransportType.TcpServer => "TCP 服务端",
-                    _ => "未启动"
-                };
+                TransportTypeText.Text = IsDirectUart
+                    ? $"{ConfigHelper.Current.UartSerialPortName} · 单柜"
+                    : App.MeshBridge.CurrentType switch
+                    {
+                        TransportType.UsbSerial => $"{ConfigHelper.Current.MeshSerialPortName} · 组网",
+                        TransportType.TcpClient => "TCP 客户端",
+                        TransportType.TcpServer => "TCP 服务端",
+                        _ => "未启动"
+                    };
+                OnlineDeviceLabel.Text = IsDirectUart ? "当前柜机" : "在线柜子";
 
                 // SD 数据状态：就绪 / 降级模式 / 未连接
                 UpdateRootDataStatus();
@@ -319,6 +421,12 @@ namespace FingerprintLockManager
         private void UpdateRootDataStatus()
         {
             var sd = App.SdStorageService;
+            if (IsDirectUart)
+            {
+                RootDataStatusText.Text = "本机应急数据";
+                RootDataStatusDot.Fill = FindResource("WarningBrush") as System.Windows.Media.Brush;
+                return;
+            }
             if (sd.IsAvailable)
             {
                 RootDataStatusText.Text = "根节点数据可用";
@@ -343,14 +451,36 @@ namespace FingerprintLockManager
             }
         }
 
+        protected override void OnClosing(CancelEventArgs e)
+        {
+            if (!_loggingOut && !App.ExitApproved)
+            {
+                e.Cancel = true;
+                base.OnClosing(e);
+                Dispatcher.BeginInvoke(new Action(() => App.RequestShutdown(this)));
+                return;
+            }
+            base.OnClosing(e);
+        }
+
         protected override void OnClosed(EventArgs e)
         {
-            // 解除事件订阅，避免内存泄漏
             App.MeshBridge.DeviceConnected -= OnDeviceConnectionChanged;
             App.MeshBridge.DeviceDisconnected -= OnDeviceConnectionChanged;
             App.MeshBridge.ConnectionChanged -= OnMeshConnectionChanged;
-            _statusTimer?.Stop();
+            ThemeManager.ThemeChanged -= OnThemeChanged;
+
+            if (_statusTimer != null)
+            {
+                _statusTimer.Stop();
+                _statusTimer.Tick -= StatusTimer_Tick;
+                _statusTimer = null;
+            }
+
             base.OnClosed(e);
+
+            if (!_loggingOut && Application.Current?.Dispatcher.HasShutdownStarted == false)
+                Application.Current.Shutdown();
         }
     }
 }

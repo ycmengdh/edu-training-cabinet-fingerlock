@@ -4,7 +4,7 @@ namespace FingerprintLockManager
 {
     /// <summary>
     /// 用户模型（对应 users 表）
-    /// 所有角色（admin/teacher/student）均可登录，均需密码
+    /// 管理员和老师可登录；学生仅作为业务用户，不登录上位机且不需要密码。
     /// </summary>
     public class User
     {
@@ -16,6 +16,10 @@ namespace FingerprintLockManager
         [JsonProperty("name")]
         public string Name { get; set; } = "";
 
+        /// <summary>学生性别（male / female / other，可为空）</summary>
+        [JsonProperty("gender")]
+        public string Gender { get; set; } = "";
+
         /// <summary>角色：admin / teacher / student</summary>
         [JsonProperty("role")]
         public string Role { get; set; } = "";
@@ -24,15 +28,29 @@ namespace FingerprintLockManager
         [JsonProperty("class_id")]
         public string? ClassId { get; set; }
 
-        /// <summary>指纹模块中的 ID（唯一，可为空表示尚未录入指纹）</summary>
+        /// <summary>
+        /// 学生被分配到的柜机通讯 ID。null 表示兼容旧数据（默认全部柜机），
+        /// 空数组表示尚未分配；老师和管理员不受此字段限制。
+        /// </summary>
+        [JsonProperty("assigned_device_ids")]
+        public List<string>? AssignedDeviceIds { get; set; }
+
+        /// <summary>
+        /// 柜机绑定明细。null 表示尚未迁移的旧数据；空数组表示未分配柜机。
+        /// AssignedDeviceIds 保留用于兼容旧版本，新的业务逻辑以此字段为准。
+        /// </summary>
+        [JsonProperty("cabinet_assignments")]
+        public List<CabinetAssignment>? CabinetAssignments { get; set; }
+
+        /// <summary>兼容旧版本的默认指纹 ID；每柜实际使用 CabinetAssignments 中的选择。</summary>
         [JsonProperty("fingerprint_id")]
         public int? FingerprintId { get; set; }
 
-        /// <summary>密码盐值（随机16字节十六进制字符串，所有角色均需）</summary>
+        /// <summary>密码盐值（管理员和老师使用；学生为空）</summary>
         [JsonProperty("password_salt")]
         public string PasswordSalt { get; set; } = "";
 
-        /// <summary>登录密码哈希（带算法版本，所有角色均需）</summary>
+        /// <summary>登录密码哈希（管理员和老师使用；学生为空）</summary>
         [JsonProperty("password_hash")]
         public string PasswordHash { get; set; } = "";
 

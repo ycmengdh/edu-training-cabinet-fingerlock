@@ -128,6 +128,9 @@ namespace FingerprintLockManager
         /// <summary>命令处理失败响应</summary>
         Error,
 
+        /// <summary>取消正在进行的指纹录入</summary>
+        CancelEnroll,
+
         // ===== SD 卡集中存储命令（上位机 <-> 根节点） =====
 
         /// <summary>查询 SD 卡表（上位机 -> 根节点）</summary>
@@ -187,6 +190,27 @@ namespace FingerprintLockManager
         DeleteBackupFingerprintResult,
 
         /// <summary>验证窗口事件（柜子 -> 上位机：进入/退出/超时/取消/开锁）</summary>
-        VerifyWindowEvent
+        VerifyWindowEvent,
+
+        /// <summary>将指定模板写入柜机临时槽并开始测试</summary>
+        StartFingerprintTest,
+
+        /// <summary>结束测试并清理柜机临时槽</summary>
+        StopFingerprintTest,
+
+        /// <summary>柜机指纹测试事件</summary>
+        FingerprintTestEvent,
+
+        /// <summary>读取指定用户在柜机上的本地权限</summary>
+        ReadPermissions,
+
+        /// <summary>柜机本地权限查询响应</summary>
+        PermissionsResponse,
+
+        /// <summary>校验柜机指定槽位的模板 CRC</summary>
+        CheckFingerprint,
+
+        /// <summary>柜机指纹模板校验响应</summary>
+        FingerprintCheckResponse
     }
 }

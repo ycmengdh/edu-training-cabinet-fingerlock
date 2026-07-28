@@ -6,7 +6,7 @@ using System.Windows.Threading;
 
 namespace FingerprintLockManager
 {
-    public partial class CommunicationTestWindow : Window
+    public partial class CommunicationTestWindow : BorderlessWindow
     {
         private const int MaxVisibleEntries = 400;
         private readonly DispatcherTimer _statusTimer;
@@ -41,14 +41,30 @@ namespace FingerprintLockManager
             App.SdStorageService.StatusChanged -= OnStorageStatusChanged;
         }
 
-        private void OnTraceAdded(CommunicationTraceEntry entry) =>
-            Dispatcher.BeginInvoke(new Action(() =>
+        private void OnTraceAdded(CommunicationTraceEntry entry)
+        {
+            try
             {
-                TraceEntries.Add(entry);
-                while (TraceEntries.Count > MaxVisibleEntries) TraceEntries.RemoveAt(0);
-                ScrollToEnd();
-                UpdateStatus();
-            }));
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    try
+                    {
+                        TraceEntries.Add(entry);
+                        while (TraceEntries.Count > MaxVisibleEntries) TraceEntries.RemoveAt(0);
+                        ScrollToEnd();
+                        UpdateStatus();
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[CommTest] Append: {ex.Message}");
+                    }
+                }), DispatcherPriority.Background);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[CommTest] OnTraceAdded: {ex.Message}");
+            }
+        }
 
         private void OnStorageStatusChanged() =>
             Dispatcher.BeginInvoke(new Action(UpdateStatus));

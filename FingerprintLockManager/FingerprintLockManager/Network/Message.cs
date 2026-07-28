@@ -3,17 +3,11 @@ using Newtonsoft.Json;
 namespace FingerprintLockManager
 {
     /// <summary>
-    /// 通信消息模型
-    /// 上位机与 ESP32 之间通过二进制协议帧传输 JSON 消息。
-    /// JSON 格式：
-    /// {
-    ///   "msg_id": "a1b2c3",
-    ///   "cmd": "SYNC_PERMISSION",
-    ///   "device_id": "CABINET_001",
-    ///   "source_device_id": "CABINET_001",
-    ///   "data": { ... },
-    ///   "timestamp": "2024-01-01 00:00:00"
-    /// }
+    /// 通信消息模型（上位机内存表示）。
+    /// 线上主路径：A5/5A 帧 + B1/0F 二进制信封；cmd 以 cmd_id 传输，
+    /// data 对复杂命令序列化为 UTF-8 JSON 放入信封 payload。
+    /// 本类的 JSON 字段布局保留用于：
+    /// 1) 调试日志与兼容解析；2) AppMessageMapper 与固件 payload 对齐。
     /// </summary>
     public class Message
     {

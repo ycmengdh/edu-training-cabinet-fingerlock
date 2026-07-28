@@ -1,0 +1,83 @@
+<local:BorderlessWindow x:Class="FingerprintLockManager.TeacherFingerprintSyncWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:FingerprintLockManager"
+        Title="老师指纹同步" Width="1040" Height="700" MinWidth="900" MinHeight="580"
+        WindowStartupLocation="CenterOwner" Background="{StaticResource BackgroundBrush}">
+    <Grid Margin="24,20,24,22">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <Grid>
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <StackPanel>
+                <TextBlock Text="老师指纹同步" Style="{StaticResource TitleText}"/>
+                <TextBlock x:Name="PageStatusText" Text="正在读取老师与柜机" Style="{StaticResource PageStatusText}" Margin="0,4,0,0"/>
+            </StackPanel>
+            <Button Grid.Column="1" x:Name="RefreshButton" Style="{StaticResource IconButton}" Content="&#xE72C;"
+                    ToolTip="重新检测" VerticalAlignment="Bottom" Click="RefreshButton_Click"/>
+        </Grid>
+
+        <Border Grid.Row="1" Style="{StaticResource ToolbarPanel}" Margin="0,16,0,12">
+            <Grid>
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock x:Name="TeacherCountText" Text="老师 0" Margin="0,0,18,0"/>
+                    <TextBlock x:Name="CabinetCountText" Text="柜机 0" Margin="0,0,18,0"/>
+                    <TextBlock x:Name="ReadyCountText" Text="已同步 0" Foreground="{StaticResource SuccessBrush}"/>
+                </StackPanel>
+                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                    <Button x:Name="CheckSelectedButton" Content="检测选中" Style="{StaticResource SecondaryButton}"
+                            Click="CheckSelectedButton_Click"/>
+                    <Button x:Name="SyncSelectedButton" Content="同步选中" Style="{StaticResource SecondaryButton}"
+                            Margin="8,0,0,0" Click="SyncSelectedButton_Click"/>
+                    <Button x:Name="SyncAllButton" Content="同步全部在线柜机" Margin="8,0,0,0"
+                            Click="SyncAllButton_Click"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <Border Grid.Row="2" Style="{StaticResource Panel}">
+            <DataGrid x:Name="CabinetGrid" BorderThickness="0" IsReadOnly="True" SelectionMode="Extended">
+                <DataGrid.Columns>
+                    <DataGridTemplateColumn Width="48" Header="选中">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}" HorizontalAlignment="Center"/>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTextColumn Header="设备编号" Binding="{Binding DeviceNumber}" Width="110"/>
+                    <DataGridTextColumn Header="柜机名称" Binding="{Binding DeviceName}" Width="150"/>
+                    <DataGridTextColumn Header="CAB MAC" Binding="{Binding MeshMac}" Width="145"/>
+                    <DataGridTextColumn Header="在线" Binding="{Binding OnlineText}" Width="68"/>
+                    <DataGridTextColumn Header="老师数" Binding="{Binding TeacherTotal}" Width="72"/>
+                    <DataGridTextColumn Header="已同步" Binding="{Binding InSyncCount}" Width="72"/>
+                    <DataGridTextColumn Header="需更新" Binding="{Binding NeedSyncCount}" Width="72"/>
+                    <DataGridTextColumn Header="状态" Binding="{Binding Status}" Width="105"/>
+                    <DataGridTextColumn Header="详情" Binding="{Binding Detail}" Width="1.4*" MinWidth="160"/>
+                    <DataGridTemplateColumn Header="操作" Width="78">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <Button Content="同步" Tag="{Binding}" Click="SyncOneButton_Click"/>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                </DataGrid.Columns>
+            </DataGrid>
+        </Border>
+
+        <Grid Grid.Row="3" Margin="0,12,0,0">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <StackPanel>
+                <ProgressBar x:Name="SyncProgressBar" Height="6" Minimum="0" Maximum="100" Value="0"/>
+                <TextBlock x:Name="ProgressText" Style="{StaticResource PageStatusText}" Margin="0,6,0,0"/>
+            </StackPanel>
+            <Button Grid.Column="1" Content="关闭" Style="{StaticResource SecondaryButton}" Margin="16,0,0,0"
+                    VerticalAlignment="Bottom" Click="CloseButton_Click"/>
+        </Grid>
+    </Grid>
+</local:BorderlessWindow>

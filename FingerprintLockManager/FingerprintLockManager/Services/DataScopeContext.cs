@@ -56,6 +56,26 @@ namespace FingerprintLockManager
             return false;
         }
 
+        public bool CanCreate(User target)
+        {
+            if (CurrentUser == null) return false;
+            if (IsAdmin) return true;
+            if (!IsTeacher) return false;
+            return string.Equals(target.Role, "student", StringComparison.OrdinalIgnoreCase) &&
+                   !string.IsNullOrWhiteSpace(CurrentUser.ClassId) &&
+                   string.Equals(CurrentUser.ClassId, target.ClassId, StringComparison.OrdinalIgnoreCase);
+        }
+
+        public bool CanUpdate(User existing, User updated)
+        {
+            if (!CanModify(existing)) return false;
+            if (IsAdmin) return true;
+            return IsTeacher &&
+                   string.Equals(existing.Role, "student", StringComparison.OrdinalIgnoreCase) &&
+                   string.Equals(updated.Role, "student", StringComparison.OrdinalIgnoreCase) &&
+                   string.Equals(CurrentUser?.ClassId, updated.ClassId, StringComparison.OrdinalIgnoreCase);
+        }
+
         public List<string>? GetVisibleClassIds()
         {
             if (IsAdmin) return null;  // null = 不限制
@@ -74,6 +94,24 @@ namespace FingerprintLockManager
             {
                 throw new UnauthorizedAccessException(
                     $"当前用户 {CurrentUser?.UserId} ({CurrentUser?.Role}) 无权操作用户 {target.UserId} ({target.Role})");
+            }
+        }
+
+        public void EnsureCanCreate(User target)
+        {
+            if (!CanCreate(target))
+            {
+                throw new UnauthorizedAccessException(
+                    $"当前用户 {CurrentUser?.UserId} ({CurrentUser?.Role}) 无权创建用户 {target.UserId} ({target.Role})");
+            }
+        }
+
+        public void EnsureCanUpdate(User existing, User updated)
+        {
+            if (!CanUpdate(existing, updated))
+            {
+                throw new UnauthorizedAccessException(
+                    $"当前用户 {CurrentUser?.UserId} ({CurrentUser?.Role}) 无权修改用户 {existing.UserId}");
             }
         }
     }

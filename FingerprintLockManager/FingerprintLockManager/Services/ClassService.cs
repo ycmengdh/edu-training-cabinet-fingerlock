@@ -12,6 +12,15 @@ namespace FingerprintLockManager
                 .ToList();
         }
 
+        public List<ClassInfo> GetVisible()
+        {
+            var all = GetAll();
+            var visibleIds = DataScopeContext.Instance.GetVisibleClassIds();
+            return visibleIds == null
+                ? all
+                : all.Where(c => visibleIds.Contains(c.ClassId, StringComparer.OrdinalIgnoreCase)).ToList();
+        }
+
         public ClassInfo? Get(string classId)
         {
             if (string.IsNullOrWhiteSpace(classId)) return null;
@@ -22,6 +31,8 @@ namespace FingerprintLockManager
         {
             if (info == null || string.IsNullOrWhiteSpace(info.ClassId) ||
                 string.IsNullOrWhiteSpace(info.Name)) return false;
+            if (!DataScopeContext.Instance.IsAdmin)
+                throw new UnauthorizedAccessException("只有系统管理员可以创建班级");
 
             var list = _root.Read<ClassInfo>("classes");
             if (list.Any(c => c.ClassId == info.ClassId)) return false;
@@ -35,6 +46,7 @@ namespace FingerprintLockManager
         public bool Update(ClassInfo info)
         {
             if (info == null || string.IsNullOrWhiteSpace(info.ClassId)) return false;
+            EnsureCanManage(info.ClassId);
             var list = _root.Read<ClassInfo>("classes");
             var existing = list.FirstOrDefault(c => c.ClassId == info.ClassId);
             if (existing == null) return false;
@@ -45,6 +57,7 @@ namespace FingerprintLockManager
 
         public bool SetEnabled(string classId, bool enabled)
         {
+            EnsureCanManage(classId);
             var list = _root.Read<ClassInfo>("classes");
             var item = list.FirstOrDefault(c => c.ClassId == classId);
             if (item == null) return false;
@@ -55,6 +68,7 @@ namespace FingerprintLockManager
         public bool Delete(string classId)
         {
             if (string.IsNullOrWhiteSpace(classId)) return false;
+            EnsureCanManage(classId);
             // 有绑定用户时禁止删除
             if (App.UserService.GetAllUsers().Any(u => u.ClassId == classId))
                 return false;
@@ -62,6 +76,18 @@ namespace FingerprintLockManager
             var list = _root.Read<ClassInfo>("classes");
             int removed = list.RemoveAll(c => c.ClassId == classId);
             return removed > 0 && _root.Save("classes", list);
+        }
+
+        private static void EnsureCanManage(string classId)
+        {
+            var scope = DataScopeContext.Instance;
+            if (scope.IsAdmin) return;
+            if (scope.IsTeacher && string.Equals(scope.CurrentUser?.ClassId, classId,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new UnauthorizedAccessException("老师只能维护自己负责的班级");
+            }
+            throw new UnauthorizedAccessException("当前角色无权维护班级");
         }
     }
 }

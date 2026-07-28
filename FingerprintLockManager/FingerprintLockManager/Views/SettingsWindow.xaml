@@ -1,6 +1,7 @@
-<Window x:Class="FingerprintLockManager.SettingsWindow"
+<local:BorderlessWindow x:Class="FingerprintLockManager.SettingsWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:FingerprintLockManager"
         Title="系统设置" Height="520" Width="460"
         WindowStartupLocation="CenterOwner"
         ResizeMode="NoResize"
@@ -20,6 +21,11 @@
 
         <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
             <StackPanel>
+                <TextBlock Text="外观" Style="{StaticResource SectionTitleText}" Margin="0,0,0,10"/>
+                <TextBlock Text="界面主题" Style="{StaticResource LabelText}" Margin="0,0,0,6"/>
+                <ComboBox x:Name="AppearanceThemeBox" Margin="0,0,0,20"/>
+
+                <TextBlock Text="连接" Style="{StaticResource SectionTitleText}" Margin="0,0,0,10"/>
                 <TextBlock Text="传输类型" Style="{StaticResource LabelText}" Margin="0,0,0,6"/>
                 <ComboBox x:Name="TransportTypeBox" Margin="0,0,0,14" SelectionChanged="TransportTypeBox_SelectionChanged"/>
 
@@ -58,4 +64,4 @@
                     Style="{StaticResource SecondaryButton}" Click="CancelButton_Click"/>
         </StackPanel>
     </Grid>
-</Window>
+</local:BorderlessWindow>

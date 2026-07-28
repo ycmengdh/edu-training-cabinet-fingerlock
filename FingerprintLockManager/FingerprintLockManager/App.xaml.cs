@@ -5,8 +5,7 @@ namespace FingerprintLockManager
 {
     /// <summary>
     /// 应用程序入口
-    /// 负责启动 Mesh 桥接器（默认 USB 串口链路，可配置切换）、
-    /// 绑定消息处理器业务事件（含 ACK），并显示登录窗口。
+    /// 启动页配置串口并同步 SD 业务库 → 登录；退出时统一释放通讯资源。
     /// </summary>
     public partial class App : Application
     {
@@ -26,11 +25,16 @@ namespace FingerprintLockManager
         public static LogService LogService { get; } = new LogService();
         public static OperationLogService OperationLogService { get; } = new OperationLogService();
         public static CabinetSyncService CabinetSyncService { get; } = new CabinetSyncService();
+        public static CabinetBindingService CabinetBindingService { get; } = new CabinetBindingService();
+        public static CabinetSyncQueueService CabinetSyncQueueService { get; } = new CabinetSyncQueueService();
         public static CommandService CommandService { get; } = new CommandService();
         public static SystemHealthService SystemHealthService { get; } = new SystemHealthService();
 
         /// <summary>SD 卡集中存储服务（通过 Mesh 与根节点 SD 卡通信）</summary>
         public static SdStorageService SdStorageService { get; } = new SdStorageService();
+
+        /// <summary>SD ↔ 本机业务库同步</summary>
+        public static SdBusinessSyncService SdBusinessSyncService { get; } = new SdBusinessSyncService();
 
         /// <summary>指纹模板业务服务（采集-存储-分配解耦管理）</summary>
         public static FingerprintTemplateService FingerprintTemplateService { get; } = new FingerprintTemplateService();
@@ -38,48 +42,110 @@ namespace FingerprintLockManager
         /// <summary>当前登录用户（登录成功后赋值）</summary>
         public static User? CurrentUser { get; set; }
 
-        /// <summary>
-        /// 应用启动：绑定消息事件 -> 启动 Mesh 桥接器 -> 请求根节点注册 -> 显示登录窗口
-        /// </summary>
-        private void Application_Startup(object sender, StartupEventArgs e)
+        private readonly CancellationTokenSource _shutdownCts = new();
+        private int _exitStarted;
+        private static int _exitPromptOpen;
+
+        public static bool ExitApproved { get; private set; }
+
+        public static void RequestShutdown(Window? owner = null)
         {
-            // 1. 绑定消息处理器业务事件
-            WireUpMessageHandler();
+            if (Current?.Dispatcher.HasShutdownStarted == true) return;
+            if (ExitApproved)
+            {
+                Current?.Shutdown();
+                return;
+            }
+            if (Interlocked.Exchange(ref _exitPromptOpen, 1) != 0) return;
 
-            // 2. 初始化本地缓存目录（即使 SD 可用，也用于写入镜像）
-            try { LocalCacheService.Initialize(); } catch { }
-
-            // 3. 订阅 SD 降级 / 恢复事件（SD 恢复后自动回传本地缓存）
-            SdStorageService.StorageDegraded += OnStorageDegraded;
-            SdStorageService.StorageRecovered += OnStorageRecovered;
-
-            // 4. 启动 Mesh 桥接器（默认 USB 串口，可配置切换）
             try
             {
-                MeshBridge.MessageReceived += OnMessageReceived;
-                MeshBridge.DeviceConnected += OnDeviceConnected;
-                MeshBridge.DeviceDisconnected += OnDeviceDisconnected;
-                MeshBridge.ConnectionChanged += OnConnectionChanged;
+                bool uploadRequired = BusinessUploadStateService.IsUploadRequired(out string reason);
+                if (!uploadRequired)
+                {
+                    ExitApproved = true;
+                    Current?.Shutdown();
+                    return;
+                }
 
-                var transportConfig = ConfigHelper.Current.ToTransportConfig();
-                MeshBridge.Start(transportConfig);
+                ExitBusinessSyncWindow dialog;
+                try
+                {
+                    dialog = new ExitBusinessSyncWindow(reason);
+                    if (owner?.IsVisible == true) dialog.Owner = owner;
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"无法打开退出同步窗口：{ex.Message}\n\n程序将保持运行，请检查后重试。",
+                        "退出同步窗口错误", MessageBoxButton.OK, MessageBoxImage.Error);
+                    return;
+                }
+
+                bool confirmed = dialog.ShowDialog() == true && dialog.ExitAllowed;
+                if (!confirmed) return;
+
+                ExitApproved = true;
+                Current?.Shutdown();
             }
-            catch (Exception ex)
+            finally
             {
-                MessageBox.Show($"Mesh 链路启动失败：{ex.Message}\n请在登录页面打开“连接设置”检查链路配置。",
-                    "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
+                Interlocked.Exchange(ref _exitPromptOpen, 0);
             }
-
-            // 5. 显示登录窗口
-            var loginWindow = new LoginWindow();
-            loginWindow.Show();
         }
 
         /// <summary>
-        /// 应用退出：停止 Mesh 桥接器
+        /// 应用启动：初始化本机双库 → 绑定消息 → 显示启动页（串口 + SD 同步）
+        /// </summary>
+        private void Application_Startup(object sender, StartupEventArgs e)
+        {
+            ThemeManager.Apply(ConfigHelper.Current.AppearanceTheme);
+
+            // 1. 绑定消息处理器业务事件
+            WireUpMessageHandler();
+
+            // 2. 本地缓存目录 + 双 SQLite 库
+            try { LocalCacheService.Initialize(); } catch { }
+            try
+            {
+                BusinessDatabase.Initialize();
+                LogDatabase.Initialize();
+                BusinessDatabase.MigrateFromLocalCacheIfEmpty();
+                BusinessDatabase.MigrateFingerprintsFromLocalCacheIfEmpty();
+                LogDatabase.MigrateOperationLogsFromJsonIfEmpty();
+                LogDatabase.MigrateUnlockLogsFromCacheIfEmpty();
+                _ = CabinetSyncQueueService.RunAsync(_shutdownCts.Token);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"本地数据库初始化失败：{ex.Message}", "错误",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+
+            // 3. 订阅 SD 降级 / 恢复事件（恢复后回传本机业务库）
+            SdStorageService.StorageDegraded += OnStorageDegraded;
+            SdStorageService.StorageRecovered += OnStorageRecovered;
+
+            // 4. 绑定 Mesh 事件（链路由启动页按所选串口启动，此处不自动 Start）
+            MeshBridge.MessageReceived += OnMessageReceived;
+            MeshBridge.DeviceConnected += OnDeviceConnected;
+            MeshBridge.DeviceDisconnected += OnDeviceDisconnected;
+            MeshBridge.ConnectionChanged += OnConnectionChanged;
+
+            // 5. 显示启动页（同步完成后进入登录）
+            var startup = new StartupWindow();
+            startup.Show();
+        }
+
+        /// <summary>
+        /// 应用退出：业务数据上传校验已在主窗口 Closing 阶段完成，
+        /// 此处只取消后台任务并停止 Mesh。
         /// </summary>
         private void Application_Exit(object sender, ExitEventArgs e)
         {
+            if (Interlocked.Exchange(ref _exitStarted, 1) != 0) return;
+
+            try { _shutdownCts.Cancel(); } catch { }
+
             try
             {
                 MeshBridge.Stop();
@@ -105,13 +171,11 @@ namespace FingerprintLockManager
             MessageHandler.OnConfigSaved += OnConfigSavedHandler;
         }
 
-        /// <summary>设备连接回调（来自后台线程）</summary>
         private void OnDeviceConnected(DeviceClient device)
         {
-            // 仅日志记录，UI 状态由 MainWindow 自行订阅 MeshBridge 事件更新
+            CabinetSyncQueueService.Trigger();
         }
 
-        /// <summary>设备断开回调（来自后台线程）</summary>
         private void OnDeviceDisconnected(DeviceClient device)
         {
             try
@@ -123,11 +187,9 @@ namespace FingerprintLockManager
             }
             catch
             {
-                // 忽略
             }
         }
 
-        /// <summary>收到消息回调：交给 MessageHandler 分发</summary>
         private void OnMessageReceived(DeviceClient? device, Message msg)
         {
             try
@@ -136,130 +198,97 @@ namespace FingerprintLockManager
             }
             catch
             {
-                // 消息处理异常时忽略，避免影响接收循环
             }
         }
 
-        /// <summary>设备注册：根节点已写入设备表，上位机只接收通知。</summary>
         private void OnDeviceRegistered(string deviceId, string deviceName)
         {
             System.Diagnostics.Debug.WriteLine($"[APP] device registered: {deviceId} {deviceName}");
+            CabinetSyncQueueService.Trigger();
         }
 
-        /// <summary>根节点注册：记录根节点 ID 并初始化本地缓存目录（SD 不可用时由 RegisterRoot 触发 StorageDegraded）</summary>
+        private DateTime _lastTimeSyncAt = DateTime.MinValue;
+        private string _lastTimeSyncRootId = "";
+
         private void OnRootDeviceRegistered(string rootDeviceId, bool? storageReady)
         {
             try
             {
-                // 始终确保本地缓存目录就绪；SD 不可用时即进入降级模式
+                if (string.IsNullOrWhiteSpace(rootDeviceId)) return;
                 try { LocalCacheService.Initialize(); } catch { }
 
                 SdStorageService.RegisterRoot(rootDeviceId, storageReady);
-                MeshBridge.Send(rootDeviceId, Protocol.CmdTimeSync, new
+
+                // REGISTER 重传时不要每包都 TIME_SYNC，避免与 SD_SAVE 抢串口。
+                DateTime now = DateTime.UtcNow;
+                bool sameRoot = string.Equals(_lastTimeSyncRootId, rootDeviceId, StringComparison.OrdinalIgnoreCase);
+                if (!sameRoot || (now - _lastTimeSyncAt).TotalSeconds >= 10)
                 {
-                    timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
-                });
+                    _lastTimeSyncAt = now;
+                    _lastTimeSyncRootId = rootDeviceId;
+                    MeshBridge.Send(rootDeviceId, Protocol.CmdTimeSync, new
+                    {
+                        timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
+                    });
+                }
                 System.Diagnostics.Debug.WriteLine(
                     $"[APP] 根节点已注册: {rootDeviceId}，SD={storageReady?.ToString() ?? "unknown"}");
             }
             catch
             {
-                // 忽略
             }
         }
 
-        /// <summary>日志上报：SD 可用时由根节点落 SD；SD 不可用时上位机写入本地缓存等待回传。</summary>
+        /// <summary>
+        /// 日志上报：始终写入本机 logs.db 便于查询；
+        /// SD 在线时根节点自身也会落盘。
+        /// </summary>
         private void OnLogReport(string deviceId, string logJson)
         {
             try
             {
-                if (App.SdStorageService.IsAvailable)
-                {
-                    System.Diagnostics.Debug.WriteLine($"[APP] root persisted log report from {deviceId}");
-                    return;
-                }
-
-                // SD 不可用：解析日志并写入本地缓存
                 var log = ParseLogEntry(logJson, deviceId);
                 if (log != null)
                 {
-                    LocalCacheService.AppendLog(log);
-                    System.Diagnostics.Debug.WriteLine($"[APP] cached log from {deviceId}");
+                    LogDatabase.AppendUnlock(log);
+                    System.Diagnostics.Debug.WriteLine($"[APP] unlock log cached from {deviceId}");
                 }
             }
             catch
             {
-                // 忽略
             }
         }
 
-        /// <summary>SD 进入降级模式：仅记录日志（UI 通过 MainWindow 定时刷新感知）</summary>
         private void OnStorageDegraded()
         {
-            System.Diagnostics.Debug.WriteLine("[APP] SD 进入降级模式，启用本地缓存");
+            System.Diagnostics.Debug.WriteLine("[APP] SD 进入降级模式");
         }
 
-        /// <summary>SD 恢复：异步回传本地缓存到 SD 卡（失败不影响主流程）</summary>
         private void OnStorageRecovered()
         {
-            System.Diagnostics.Debug.WriteLine("[APP] SD 恢复，开始回传本地缓存");
-            _ = Task.Run(UploadLocalCacheToSdAsync);
+            CancellationToken cancellationToken = _shutdownCts.Token;
+            if (cancellationToken.IsCancellationRequested) return;
+            if (CurrentUser == null)
+            {
+                System.Diagnostics.Debug.WriteLine("[APP] 启动/登录阶段 SD 恢复，跳过反向上传");
+                return;
+            }
+
+            System.Diagnostics.Debug.WriteLine("[APP] SD 恢复，回传本机业务库");
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await SdBusinessSyncService.PushBusinessToSdAsync(
+                        cancellationToken: cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) { }
+                catch
+                {
+                }
+            }, cancellationToken);
         }
 
-        /// <summary>将本地缓存的业务表 / 日志 / 指纹模板回传到 SD 卡</summary>
-        private static async Task UploadLocalCacheToSdAsync()
-        {
-            try
-            {
-                // 业务表：devices / users / classes / permissions / role_permissions
-                string[] tables = { "devices", "users", "classes", "permissions", "role_permissions" };
-                foreach (string table in tables)
-                {
-                    var arr = LocalCacheService.ReadTable(table);
-                    if (arr == null) continue;
-                    uint v = LocalCacheService.ReadTableVersion(table);
-                    // 用本地版本号 - 1 作为 base_version（与 RootDataService.SaveArray 写入的 baseVersion + 1 对齐）
-                    uint baseVersion = v > 0 ? v - 1 : 0;
-                    await App.SdStorageService.SaveTableWithFallbackAsync(
-                        table, arr.ToString(Newtonsoft.Json.Formatting.None), baseVersion);
-                }
-
-                // 日志：追加到 SD logs 表，完成后清空本地缓存
-                var logs = LocalCacheService.ReadLogs();
-                if (logs.Count > 0)
-                {
-                    try
-                    {
-                        App.LogService.AddLogs(logs);
-                        LocalCacheService.ClearLogs();
-                    }
-                    catch
-                    {
-                        // 追加日志失败时保留本地缓存，等待下次回传
-                    }
-                }
-
-                // 指纹模板：逐个上传
-                foreach (var (userId, fingerIndex) in LocalCacheService.ListFpTemplates())
-                {
-                    var template = LocalCacheService.ReadFpTemplate(userId, fingerIndex);
-                    if (template == null || template.Length == 0) continue;
-                    bool ok = await App.SdStorageService.UploadFpTemplateWithFallbackAsync(
-                        userId, fingerIndex, template);
-                    if (ok)
-                    {
-                        // SD 上传成功后删除本地缓存（保留降级期间再次生成的模板）
-                        try { LocalCacheService.DeleteFpTemplate(userId); } catch { }
-                    }
-                }
-            }
-            catch
-            {
-                // 回传失败不影响主流程
-            }
-        }
-
-        /// <summary>从日志上报 JSON 解析 LogEntry（兼容单条/数组/字段命名差异）</summary>
         private static LogEntry? ParseLogEntry(string logJson, string deviceId)
         {
             if (string.IsNullOrWhiteSpace(logJson)) return null;
@@ -282,7 +311,6 @@ namespace FingerprintLockManager
                     Reason = obj.Value<string>("reason") ?? ""
                 };
 
-                // 时间字段兼容 create_time / time / timestamp（unix 秒）
                 string? timeStr = obj.Value<string>("create_time");
                 if (!string.IsNullOrWhiteSpace(timeStr) && DateTime.TryParse(timeStr, out var dt))
                 {
@@ -303,12 +331,9 @@ namespace FingerprintLockManager
             }
         }
 
-        /// <summary>ACK 应答：当前仅记录日志，可用于命令确认匹配</summary>
         private void OnAckReceived(string msgId, string result)
         {
             CommandService.HandleAck(msgId, result);
-            // UI command state may consume this event; never perform a
-            // synchronous root query from the transport receive thread.
             System.Diagnostics.Debug.WriteLine($"[APP] ACK {msgId}: {result}");
         }
 
@@ -328,7 +353,6 @@ namespace FingerprintLockManager
             CommandService.HandlePermissionSyncResult(deviceId, msgId, result);
         }
 
-        /// <summary>链路建立后重新发现根节点；断线时立即结束所有 SD 请求。</summary>
         private void OnConnectionChanged(bool connected)
         {
             SdStorageService.HandleConnectionChanged(connected);
@@ -336,14 +360,12 @@ namespace FingerprintLockManager
             if (connected)
             {
                 MeshBridge.Send("", Protocol.CmdRegister);
+                CabinetSyncQueueService.Trigger();
             }
         }
 
-        /// <summary>配置保存成功：占位实现（V2.7 之前由独立 AP 配置窗口展示提示，现已去除该窗口）</summary>
         private void OnConfigSavedHandler(string deviceId)
         {
-            // 占位：AP 配置功能已移除，无 UI 订阅此事件。保留以兼容协议层事件总线。
         }
-
     }
 }

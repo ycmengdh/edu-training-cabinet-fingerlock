@@ -6,12 +6,12 @@ namespace FingerprintLockManager
     /// 消息处理器
     /// 解析收到的消息，根据 cmd 字段分发到对应的处理方法，
     /// 并通过事件通知 UI 层（UI 层再调用 UserService / PermissionService / LogService 等完成业务）。
-    /// 维护最近 100 条 MsgId 的 LRU 缓存用于消息去重，避免 ACK/转发重复处理。
+    /// 维护最近 1024 条业务 MsgId 的 LRU 缓存用于消息去重，避免 ACK/转发重复处理。
     /// </summary>
     public class MessageHandler
     {
         /// <summary>LRU 去重缓存容量</summary>
-        private const int DedupCapacity = 100;
+        private const int DedupCapacity = 1024;
 
         /// <summary>最近处理过的 MsgId 缓存（链表头部为最新，尾部为最旧）</summary>
         private readonly LinkedList<string> _recentMsgIds = new LinkedList<string>();
@@ -64,6 +64,12 @@ namespace FingerprintLockManager
         /// </summary>
         public event Action<string, string, string, int>? OnVerifyWindowEvent;
 
+        /// <summary>柜机临时槽指纹测试事件。</summary>
+        public event Action<FingerprintTestEvent>? OnFingerprintTestEvent;
+
+        public event Action<string, string, PermissionProbeResult>? OnPermissionsResponse;
+        public event Action<string, string, FingerprintProbeResult>? OnFingerprintCheckResponse;
+
         /// <summary>
         /// V2.7 本机副指纹清单响应：deviceId, json（含 count + backups 数组）。
         /// </summary>
@@ -95,6 +101,7 @@ namespace FingerprintLockManager
             // SD_QUERY_PART / ENROLL_PROGRESS 复用同一 msg_id，禁止去重否则只剩第一条
             if (cmdType != CommandType.SdQueryPart &&
                 cmdType != CommandType.EnrollProgress &&
+                cmdType != CommandType.Heartbeat &&
                 !string.IsNullOrEmpty(msg.MsgId))
             {
                 string sourceId = device?.DeviceId ?? msg.SourceDeviceId ?? msg.DeviceId;
@@ -135,6 +142,15 @@ namespace FingerprintLockManager
                     break;
                 case CommandType.VerifyWindowEvent:
                     HandleVerifyWindowEvent(device, msg);
+                    break;
+                case CommandType.FingerprintTestEvent:
+                    HandleFingerprintTestEvent(device, msg);
+                    break;
+                case CommandType.PermissionsResponse:
+                    HandlePermissionsResponse(device, msg);
+                    break;
+                case CommandType.FingerprintCheckResponse:
+                    HandleFingerprintCheckResponse(device, msg);
                     break;
                 case CommandType.BackupFpList:
                     HandleBackupFpList(device, msg);
@@ -381,6 +397,57 @@ namespace FingerprintLockManager
             }
             catch { /* lock_id 可选字段 */ }
             OnVerifyWindowEvent?.Invoke(deviceId, evt, userId, lockId);
+        }
+
+        private void HandleFingerprintTestEvent(DeviceClient? device, Message msg)
+        {
+            string deviceId = device?.DeviceId ?? msg.SourceDeviceId ?? msg.DeviceId;
+            var data = msg.Data as JObject;
+            OnFingerprintTestEvent?.Invoke(new FingerprintTestEvent
+            {
+                DeviceId = deviceId,
+                Event = data?["event"]?.ToString() ?? "",
+                TestToken = data?["test_token"]?.ToString() ?? "",
+                FingerprintId = data?["fingerprint_id"]?.Value<int>() ?? -1,
+                Confidence = data?["confidence"]?.Value<int>() ?? 0,
+                IdleTimeoutSeconds = data?["idle_timeout_seconds"]?.Value<int>() ?? 60
+            });
+        }
+
+        private void HandlePermissionsResponse(DeviceClient? device, Message msg)
+        {
+            string deviceId = device?.DeviceId ?? msg.SourceDeviceId ?? msg.DeviceId;
+            var data = msg.Data as JObject;
+            OnPermissionsResponse?.Invoke(deviceId, msg.MsgId, new PermissionProbeResult
+            {
+                Found = data?["found"]?.Value<bool>() ?? false,
+                UserId = data?["user_id"]?.ToString() ?? "",
+                FingerprintId = data?["fingerprint_id"]?.Value<int>() ?? -1,
+                Role = data?["role"]?.Value<int>() ?? 2,
+                Permissions = new[]
+                {
+                    data?["lock_0"]?.Value<bool>() ?? false,
+                    data?["lock_1"]?.Value<bool>() ?? false,
+                    data?["lock_2"]?.Value<bool>() ?? false,
+                    data?["lock_3"]?.Value<bool>() ?? false
+                },
+                Version = data?["version"]?.Value<uint>() ?? 0
+            });
+        }
+
+        private void HandleFingerprintCheckResponse(DeviceClient? device, Message msg)
+        {
+            string deviceId = device?.DeviceId ?? msg.SourceDeviceId ?? msg.DeviceId;
+            var data = msg.Data as JObject;
+            OnFingerprintCheckResponse?.Invoke(deviceId, msg.MsgId, new FingerprintProbeResult
+            {
+                FingerprintId = data?["fingerprint_id"]?.Value<int>() ?? -1,
+                Exists = data?["exists"]?.Value<bool>() ?? false,
+                Readable = data?["readable"]?.Value<bool>() ?? false,
+                Matches = data?["matches"]?.Value<bool>() ?? false,
+                ExpectedCrc32 = data?["expected_crc32"]?.Value<uint>() ?? 0,
+                ActualCrc32 = data?["actual_crc32"]?.Value<uint>() ?? 0
+            });
         }
 
         /// <summary>V2.7 处理本机副指纹清单响应</summary>

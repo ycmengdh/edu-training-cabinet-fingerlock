@@ -1,6 +1,6 @@
 /**
  * message_handler.h - 消息处理模块（V2.7 窗口化验证版本）
- * 状态机：STATE_IDLE / STATE_WAIT_FINGER(常态轮询) / STATE_VERIFIED_WINDOW(10s) / STATE_ENROLLING
+ * 状态机：常态轮询 / 验证窗口 / 录入 / 临时槽指纹测试
  *
  * V2.7 流程反转：先验证指纹 -> 10 秒操作窗口 -> 按键开锁
  *   - STATE_WAIT_FINGER: 常态轮询 AS608，匹配成功则载入权限进入窗口态
@@ -43,7 +43,9 @@ public:
         STATE_IDLE = 0,           // 空闲（初始态，立即进入 WAIT_FINGER）
         STATE_WAIT_FINGER,        // 常态轮询指纹（V2.7：不再由按键触发）
         STATE_VERIFIED_WINDOW,    // 验证成功后的 10s 操作窗口
-        STATE_ENROLLING           // 正在录入指纹（主/副）
+        STATE_ENROLLING,          // 正在录入指纹（主/副）-> 录到临时槽 ID=0
+        STATE_ENROLL_VERIFY,      // 录入完成后的检测阶段：再按一次验证
+        STATE_FINGERPRINT_TEST    // 上位机显式启动的临时槽 0 测试模式
     };
 
     static VerifyState getState();
@@ -88,8 +90,11 @@ private:
     static void cmdReboot(const JsonObject &data, const String &msgId);
     static void cmdTimeSync(const JsonObject &data, const String &msgId);
     static void cmdRegister(const String &msgId);
-    static void cmdReadPermissions(const String &msgId);
+    static void cmdReadPermissions(const JsonObject &data, const String &msgId);
+    static void cmdCheckFingerprint(const JsonObject &data, const String &msgId);
     static void cmdDeleteAllFingerprints(const String &msgId);
+    static void cmdStartFingerprintTest(const JsonObject &data, const String &msgId);
+    static void cmdStopFingerprintTest(const JsonObject &data, const String &msgId);
     // V2.7 副指纹命令
     static void cmdAddBackupFingerprint(const JsonObject &data, const String &msgId);
     static void cmdDeleteBackupFingerprint(const JsonObject &data, const String &msgId);
@@ -118,6 +123,13 @@ private:
     static bool openIfPermitted(int lockId);
     // 上报验证窗口事件（进入/退出/超时/取消）
     static void sendVerifyWindowEvent(const char *event, int lockId = -1);
+    // 录入检测完成：模板从临时槽迁移到分配的真实 ID，回报结果
+    static void finishEnrollWithVerify(bool verifyOk);
+    // 发送录入进度帧
+    static void sendEnrollProgress(const char *phase, int step, int total,
+                                   const char *hint);
+    static void sendFingerprintTestEvent(const char *event, int confidence = 0);
+    static void finishFingerprintTest(const char *event);
 
     // 状态机超时检查
     static void checkTimeout();
@@ -148,6 +160,12 @@ private:
     static String enrollLastPhaseCode; // 避免重复上报同一阶段
     // V2.7：录入是否为副指纹
     static bool enrollIsBackup;
+    static String fingerprintTestToken;
+    static int fingerprintTestSourceId;
+    static unsigned long fingerprintTestLastActivity;
+    static unsigned long fingerprintTestLastPoll;
+    static unsigned long fingerprintTestLastActivityReport;
+    static bool fingerprintTestFingerDown;
     // 指纹验证失败次数（用于告警）
     static int verifyFailCount;
     // 权限丢失待上报标志

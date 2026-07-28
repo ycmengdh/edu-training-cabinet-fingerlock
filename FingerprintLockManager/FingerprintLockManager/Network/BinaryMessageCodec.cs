@@ -262,6 +262,51 @@ namespace FingerprintLockManager
             }
         }
 
+        /// <summary>柜机状态负载（24 字节定长，避免 Mesh 热路径传输 JSON）。</summary>
+        public static class CabinetStatusPayload
+        {
+            public const int Size = 24;
+            public const byte Version = 1;
+
+            public sealed class Values
+            {
+                public byte LockMask { get; init; }
+                public byte MeshLayer { get; init; }
+                public byte Flags { get; init; }
+                public uint Uptime { get; init; }
+                public ushort FingerprintCount { get; init; }
+                public ushort PermissionCount { get; init; }
+                public uint PermissionVersion { get; init; }
+                public ushort SendFailures { get; init; }
+                public ushort QueueFull { get; init; }
+                public sbyte Rssi { get; init; }
+                public byte AssocExpire { get; init; }
+                public ushort FingerprintPollMaxMs { get; init; }
+            }
+
+            public static bool TryUnpack(ReadOnlySpan<byte> data, out Values? values)
+            {
+                values = null;
+                if (data.Length < Size || data[0] != Version) return false;
+                values = new Values
+                {
+                    LockMask = data[1],
+                    MeshLayer = data[2],
+                    Flags = data[3],
+                    Uptime = BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(4, 4)),
+                    FingerprintCount = BinaryPrimitives.ReadUInt16LittleEndian(data.Slice(8, 2)),
+                    PermissionCount = BinaryPrimitives.ReadUInt16LittleEndian(data.Slice(10, 2)),
+                    PermissionVersion = BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(12, 4)),
+                    SendFailures = BinaryPrimitives.ReadUInt16LittleEndian(data.Slice(16, 2)),
+                    QueueFull = BinaryPrimitives.ReadUInt16LittleEndian(data.Slice(18, 2)),
+                    Rssi = unchecked((sbyte)data[20]),
+                    AssocExpire = data[21],
+                    FingerprintPollMaxMs = BinaryPrimitives.ReadUInt16LittleEndian(data.Slice(22, 2)),
+                };
+                return true;
+            }
+        }
+
         /// <summary>ACK 负载：ref_msg_id u16 + result_code u16 + result_tag（u8 len + 字节，最长 64，与固件 packAck 对齐）。</summary>
         public static class AckPayload
         {

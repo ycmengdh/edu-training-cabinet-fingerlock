@@ -19,5 +19,11 @@ namespace FingerprintLockManager
 
         [JsonIgnore]
         public string StatusText => Enabled ? "启用" : "停用";
+
+        [JsonIgnore]
+        public string TeacherText { get; set; } = "未分配";
+
+        [JsonIgnore]
+        public int StudentCount { get; set; }
     }
 }

@@ -7,6 +7,8 @@
     <UseWPF>true</UseWPF>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <!-- 高 DPI 下无边框窗口尺寸/边框对齐更稳定 -->
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
 
     <!-- 单文件独立编译配置：发布后单 exe，无需安装 .NET 运行时 -->
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
@@ -21,6 +23,8 @@
     <Company>学校实训中心</Company>
     <Version>1.0.0</Version>
     <RootNamespace>FingerprintLockManager</RootNamespace>
+    <!-- 可执行文件 / 任务栏图标 -->
+    <ApplicationIcon>Resources\logo.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
@@ -28,6 +32,13 @@
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
     <!-- USB 串口通讯（与 Mesh 根节点 USB 双链路） -->
     <PackageReference Include="System.IO.Ports" Version="8.0.0" />
+    <!-- 本机业务库 / 日志库 -->
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.11" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- WPF 资源：窗口 Icon / 关于页 / 侧栏品牌图 -->
+    <Resource Include="Resources\logo.ico" />
   </ItemGroup>
 
 </Project>

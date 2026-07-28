@@ -1,7 +1,7 @@
 /**
  * display.cpp - TFT status display for Root Node
- * Compact landscape status dashboard on 0.96" ST7735 160x80 display.
- * Updates every 1.5 seconds to show root node status.
+ * Compact landscape status console on 0.96" ST7735 160x80 display.
+ * Health stays visible in the top 30px; recent events use the lower 50px.
  *
  * Display failure must never reboot the root node. SD-less bring-up and
  * boards without a panel still need Mesh/USB uplink.
@@ -32,15 +32,22 @@
 
 bool Display::initialized = false;
 unsigned long Display::lastUpdate = 0;
+bool Display::eventsDirty = true;
+uint8_t Display::nextEventSequence = 0;
+String Display::eventLines[4];
+Display::EventLevel Display::eventLevels[4] = {
+    Display::EVENT_INFO, Display::EVENT_INFO,
+    Display::EVENT_INFO, Display::EVENT_INFO
+};
 
 #if !ROOT_DISABLE_TFT
 static TFT_eSPI tft = TFT_eSPI();
 #endif
 
-#define DISPLAY_UPDATE_INTERVAL_MS  1500
+#define DISPLAY_UPDATE_INTERVAL_MS  500
 #define COLOR_BG      TFT_BLACK
 #define COLOR_TITLE   TFT_CYAN
-#define COLOR_LABEL   TFT_YELLOW
+#define COLOR_LABEL   TFT_LIGHTGREY
 #define COLOR_OK      TFT_GREEN
 #define COLOR_FAIL    TFT_RED
 #define COLOR_TEXT    TFT_WHITE
@@ -50,10 +57,9 @@ static TFT_eSPI tft = TFT_eSPI();
 #if !ROOT_DISABLE_TFT
 namespace {
 constexpr int16_t HEADER_HEIGHT = 14;
-constexpr int16_t LEFT_X = 3;
-constexpr int16_t RIGHT_X = 83;
-constexpr int16_t VALUE_RIGHT_EDGE = 158;
-constexpr int16_t ROW_Y[] = {18, 33, 48, 63};
+constexpr int16_t SUMMARY_Y = 18;
+constexpr int16_t EVENT_TOP = 31;
+constexpr int16_t EVENT_Y[] = {34, 46, 58, 70};
 
 // The built-in GLCD font is 6 pixels wide at text size 1.
 String fitText(String text, int16_t pixelWidth, bool keepEnd = false) {
@@ -64,21 +70,25 @@ String fitText(String text, int16_t pixelWidth, bool keepEnd = false) {
                    : text.substring(0, maxChars);
 }
 
-String compactMac(String mac) {
-    mac.replace(":", "");
-    mac.replace("-", "");
-    return fitText(mac, 8 * 6, true);  // Keep the most distinctive last 4 bytes.
+String compactId(String value) {
+    value.replace("CABINET_", "CAB_");
+    if (value.length() > 12) return value.substring(value.length() - 12);
+    return value;
 }
 
-void drawLabel(int16_t x, int16_t y, const char *label) {
-    tft.setTextColor(COLOR_LABEL, COLOR_BG);
-    tft.setCursor(x, y);
-    tft.print(label);
+String formatRuntime(unsigned long seconds) {
+    unsigned long days = seconds / 86400UL;
+    unsigned long hours = (seconds / 3600UL) % 24UL;
+    unsigned long minutes = (seconds / 60UL) % 60UL;
+    char text[16];
+    if (days > 0) snprintf(text, sizeof(text), "%lud%02luh", days, hours);
+    else snprintf(text, sizeof(text), "%02lu:%02lu", hours, minutes);
+    return String(text);
 }
 
 void drawValue(int16_t x, int16_t y, const String &value,
                uint16_t color = COLOR_TEXT, uint16_t background = COLOR_BG,
-               int16_t rightEdge = VALUE_RIGHT_EDGE) {
+               int16_t rightEdge = 158) {
     const int16_t width = rightEdge - x + 1;
     tft.fillRect(x, y, width, 8, background);
     tft.setTextColor(color, background);
@@ -93,22 +103,53 @@ void drawLandscapeFrame() {
     tft.setTextSize(1);
     tft.setTextColor(COLOR_TITLE, COLOR_HEADER);
     tft.setCursor(4, 3);
-    tft.print("ROOT NODE");
+    tft.print("ROOT");
+    tft.drawFastHLine(0, EVENT_TOP - 2, tft.width(), COLOR_DIVIDER);
+}
 
-    // Two balanced columns; labels stay static and only values are refreshed.
-    tft.drawFastVLine(79, HEADER_HEIGHT + 2,
-                      tft.height() - HEADER_HEIGHT - 4, COLOR_DIVIDER);
-    drawLabel(LEFT_X, ROW_Y[0], "MESH:");
-    drawLabel(LEFT_X, ROW_Y[1], "CAB:");
-    drawLabel(LEFT_X, ROW_Y[2], "UPLK:");
-    drawLabel(LEFT_X, ROW_Y[3], "SD:");
-    drawLabel(RIGHT_X, ROW_Y[0], "ID:");
-    drawLabel(RIGHT_X, ROW_Y[1], "UP:");
-    drawLabel(RIGHT_X, ROW_Y[2], "FW:");
-    drawLabel(RIGHT_X, ROW_Y[3], "MAC:");
+uint16_t eventColor(Display::EventLevel level) {
+    if (level == Display::EVENT_OK) return COLOR_OK;
+    if (level == Display::EVENT_WARNING) return COLOR_FAIL;
+    return COLOR_TEXT;
 }
 }  // namespace
 #endif
+
+void Display::postEvent(const String &text, EventLevel level) {
+    char prefix[5];
+    snprintf(prefix, sizeof(prefix), "%02u ", (unsigned)nextEventSequence);
+    nextEventSequence = (uint8_t)((nextEventSequence + 1U) % 100U);
+    String compact(prefix);
+    compact += text;
+    compact.replace("\r", " ");
+    compact.replace("\n", " ");
+    for (int i = 3; i > 0; --i) {
+        eventLines[i] = eventLines[i - 1];
+        eventLevels[i] = eventLevels[i - 1];
+    }
+    eventLines[0] = compact;
+    eventLevels[0] = level;
+    eventsDirty = true;
+}
+
+void Display::notifyDevice(const String &deviceId, bool online) {
+    postEvent(String(online ? "+ CAB " : "- CAB ") + compactId(deviceId),
+              online ? EVENT_OK : EVENT_WARNING);
+}
+
+void Display::notifyDeviceTimeout(const String &deviceId) {
+    postEvent("! CAB " + compactId(deviceId), EVENT_WARNING);
+}
+
+void Display::notifyCommand(const char *command, const String &deviceId) {
+    String line = "> ";
+    line += command != nullptr ? command : "CMD";
+    if (deviceId.length() > 0) {
+        line += " ";
+        line += compactId(deviceId);
+    }
+    postEvent(line, EVENT_INFO);
+}
 
 void Display::init() {
 #if ROOT_DISABLE_TFT
@@ -135,10 +176,10 @@ void Display::init() {
     tft.init();
     tft.setRotation(ROOT_TFT_ROTATION);
     drawLandscapeFrame();
-    drawValue(106, 3, "BOOT", COLOR_LABEL, COLOR_HEADER, 156);
+    drawValue(112, 3, "BOOT", COLOR_LABEL, COLOR_HEADER, 156);
 
     initialized = true;
-    // Make the first loop paint live state immediately instead of waiting 1.5 s.
+    postEvent("SYSTEM START", EVENT_INFO);
     lastUpdate = millis() - DISPLAY_UPDATE_INTERVAL_MS;
     Debug::printf("[DISP] TFT initialized: %dx%d, rotation=%d\n",
                   tft.width(), tft.height(), ROOT_TFT_ROTATION);
@@ -155,16 +196,7 @@ void Display::update() {
     if (now - lastUpdate < DISPLAY_UPDATE_INTERVAL_MS) return;
     lastUpdate = now;
 
-    DeviceConfig cfg;
-    Storage::loadDeviceConfig(cfg);
-
     bool meshOk = MeshComm::isConnected();
-    bool uplinkOk = MeshBridge::isUplinkConnected();
-    const char *uplinkName = "N/A";
-    UplinkMode um = MeshBridge::getUplinkMode();
-    if (um == UPLINK_USB) uplinkName = "USB";
-    else if (um == UPLINK_AP) uplinkName = "AP";
-    else if (um == UPLINK_STA) uplinkName = "STA";
 
 #ifdef ENABLE_SD_CARD
     bool sdOk = SdStorage::isReady();
@@ -172,37 +204,53 @@ void Display::update() {
     bool sdOk = false;
 #endif
 
-    const char *overall = (meshOk && uplinkOk) ? "ONLINE" : "WAIT";
-    drawValue(106, 3, overall,
-              (meshOk && uplinkOk) ? COLOR_OK : COLOR_LABEL,
-              COLOR_HEADER, 156);
+    static String lastRuntime;
+    static int lastOnline = -1;
+    static int lastKnown = -1;
+    static int lastSdState = -1;
+    static int lastMeshState = -1;
 
-    // Left column: live connectivity and storage state.
-    drawValue(36, ROW_Y[0], meshOk ? "OK" : "WAIT",
-              meshOk ? COLOR_OK : COLOR_FAIL, COLOR_BG, 77);
-    // CAB：N=活跃路由(30s内有心跳/REGISTER)，M=曾连上过的总数（含已过期）
-    // 短 flap 时 N 短暂归零但 M 不变，方便快速判断"是否彻底掉线"
-    {
-        int n = MeshBridge::getRouteCount();
-        int m = MeshBridge::getRouteKnownCount();
-        String txt = String(n) + "/" + String(m);
-        drawValue(27, ROW_Y[1], txt,
-                  n > 0 ? COLOR_OK : (m > 0 ? COLOR_FAIL : COLOR_TEXT),
-                  COLOR_BG, 77);
+    String runtime = "UP " + formatRuntime(now / 1000UL);
+    if (runtime != lastRuntime) {
+        lastRuntime = runtime;
+        drawValue(91, 3, runtime, COLOR_TITLE, COLOR_HEADER, 156);
     }
-    drawValue(36, ROW_Y[2], uplinkName,
-              uplinkOk ? COLOR_OK : COLOR_FAIL, COLOR_BG, 77);
-#ifdef ENABLE_SD_CARD
-    drawValue(21, ROW_Y[3], sdOk ? "OK" : "FAIL",
-              sdOk ? COLOR_OK : COLOR_FAIL, COLOR_BG, 77);
-#else
-    drawValue(21, ROW_Y[3], "N/A", COLOR_FAIL, COLOR_BG, 77);
-#endif
 
-    // Right column: identity and diagnostics, clipped to its 80 px cell.
-    drawValue(101, ROW_Y[0], cfg.device_id);
-    drawValue(101, ROW_Y[1], String(millis() / 60000UL) + "m");
-    drawValue(101, ROW_Y[2], FIRMWARE_VERSION);
-    drawValue(107, ROW_Y[3], compactMac(MeshComm::getMeshMac()));
+    int online = MeshBridge::getRouteCount();
+    int known = MeshBridge::getRouteKnownCount();
+    if (online != lastOnline || known != lastKnown) {
+        lastOnline = online;
+        lastKnown = known;
+        drawValue(3, SUMMARY_Y, "CAB " + String(online) + "/" + String(known),
+                  online > 0 ? COLOR_OK : (known > 0 ? COLOR_FAIL : COLOR_TEXT),
+                  COLOR_BG, 65);
+    }
+#ifdef ENABLE_SD_CARD
+    int sdState = sdOk ? 1 : 0;
+    if (sdState != lastSdState) {
+        lastSdState = sdState;
+        drawValue(70, SUMMARY_Y, sdOk ? "SD OK" : "SD ERR",
+                  sdOk ? COLOR_OK : COLOR_FAIL, COLOR_BG, 108);
+    }
+#else
+    if (lastSdState != 0) {
+        lastSdState = 0;
+        drawValue(70, SUMMARY_Y, "SD N/A", COLOR_FAIL, COLOR_BG, 108);
+    }
+#endif
+    int meshState = meshOk ? 1 : 0;
+    if (meshState != lastMeshState) {
+        lastMeshState = meshState;
+        drawValue(113, SUMMARY_Y, meshOk ? "M OK" : "M ERR",
+                  meshOk ? COLOR_OK : COLOR_FAIL, COLOR_BG, 158);
+    }
+
+    if (eventsDirty) {
+        for (int i = 0; i < 4; ++i) {
+            drawValue(3, EVENT_Y[i], eventLines[i], eventColor(eventLevels[i]),
+                      COLOR_BG, 158);
+        }
+        eventsDirty = false;
+    }
 #endif
 }

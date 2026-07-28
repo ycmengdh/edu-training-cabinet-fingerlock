@@ -6,20 +6,28 @@ namespace FingerprintLockManager
     /// <summary>
     /// 角色默认权限配置页（仅 admin 可访问）
     /// 3 行（admin/teacher/student）× 4 列（Lock0-3）的权限矩阵。
-    /// 保存调用 RolePermissionService.SetRolePermission，并批量重新计算所有用户最终权限同步到设备。
+    /// 保存只更新新用户默认权限模板，不广播、不改变已有用户权限。
     /// </summary>
     public partial class RolePermissionPage : Page
     {
+        private bool _canEdit;
+
         public RolePermissionPage()
         {
             InitializeComponent();
-            Loaded += async (s, e) => await LoadRolePermissionsAsync();
+            Loaded += async (s, e) =>
+            {
+                _canEdit = DataScopeContext.Instance.IsAdmin;
+                PermissionMatrix.IsEnabled = _canEdit;
+                await LoadRolePermissionsAsync();
+                if (!_canEdit) PageStatusText.Text = "仅系统管理员可以修改默认权限模板";
+            };
         }
 
         /// <summary>加载角色默认权限到矩阵</summary>
         private async Task LoadRolePermissionsAsync()
         {
-            SetBusy(true, "正在读取角色权限");
+            SetBusy(true, "正在读取默认权限模板");
             List<RolePermission> roles;
             try
             {
@@ -53,12 +61,19 @@ namespace FingerprintLockManager
             StudentLock1.IsChecked = student.Lock1;
             StudentLock2.IsChecked = student.Lock2;
             StudentLock3.IsChecked = student.Lock3;
-            PageStatusText.Text = "角色权限已从根节点加载";
+            PageStatusText.Text = "默认权限模板已加载";
         }
 
-        /// <summary>保存按钮：保存 3 个角色默认权限，并批量同步到设备</summary>
+        /// <summary>保存按钮：只保存新用户默认权限模板。</summary>
         private async void SaveButton_Click(object sender, RoutedEventArgs e)
         {
+            if (!_canEdit)
+            {
+                MessageBox.Show("只有系统管理员可以修改角色默认权限", "无权操作",
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
             // 构造 3 个角色权限对象
             var now = DateTime.Now;
             var admin = new RolePermission
@@ -97,6 +112,11 @@ namespace FingerprintLockManager
                 ok = await Task.Run(() => App.RolePermissionService.SetAll(
                     new[] { admin, teacher, student }));
             }
+            catch (UnauthorizedAccessException ex)
+            {
+                MessageBox.Show(ex.Message, "无权操作", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
             catch (RootDataUnavailableException ex)
             {
                 MessageBox.Show(ex.Message, "根节点不可用", MessageBoxButton.OK, MessageBoxImage.Error);
@@ -113,23 +133,9 @@ namespace FingerprintLockManager
                 return;
             }
 
-            BroadcastCommandResult sent;
-            try
-            {
-                sent = await Task.Run(App.CabinetSyncService.SyncAllPermissions);
-            }
-            catch (RootDataUnavailableException ex)
-            {
-                PageStatusText.Text = ex.Message;
-                sent = BroadcastCommandResult.Failed(ex.Message);
-            }
-            string text = CabinetSyncService.FormatSyncResult(sent,
-                "角色权限已保存，所有在线柜子均已确认",
-                "角色权限已保存，但在线柜子未全部确认");
-            PageStatusText.Text = sent.Success ? "角色权限已保存，在线柜子均已确认" : "角色权限已保存，在线柜子未全部确认";
-            MessageBox.Show(text,
-                sent.Success ? "保存完成" : "同步提示", MessageBoxButton.OK,
-                sent.Success ? MessageBoxImage.Information : MessageBoxImage.Warning);
+            PageStatusText.Text = "默认权限模板已保存，仅后续新建用户采用";
+            MessageBox.Show("默认权限模板已保存。已有用户权限保持不变，未向柜机广播。",
+                "保存完成", MessageBoxButton.OK, MessageBoxImage.Information);
         }
 
         /// <summary>重新加载按钮</summary>
@@ -154,7 +160,7 @@ namespace FingerprintLockManager
 
         private void SetBusy(bool busy, string? status = null)
         {
-            SaveButton.IsEnabled = !busy;
+            SaveButton.IsEnabled = !busy && _canEdit;
             ReloadButton.IsEnabled = !busy;
             if (!string.IsNullOrEmpty(status)) PageStatusText.Text = status;
         }

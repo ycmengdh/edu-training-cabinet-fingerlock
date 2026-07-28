@@ -102,8 +102,8 @@
 | --- | --- | --- | --- | --- |
 | UART TX | 17 | 输出 | `FINGER_TX_PIN` | ESP32 GPIO17 → AS608 RX |
 | UART RX | 18 | 输入 | `FINGER_RX_PIN` | ESP32 GPIO18 ← AS608 TX |
-| 上电控制 | 42 | 输出 | `FINGER_PWR_PIN` | 控制模块电源通路（如 MOS/LDO EN） |
-| 上电状态 | 21 | 输入 | `FINGER_PWR_STATUS_PIN` | 读供电反馈 |
+| 上电控制 | 21 | 输出 | `FINGER_PWR_PIN` | 控制模块电源通路（如 MOS/LDO EN）；**低有效**（`FINGER_PWR_ON_LEVEL=LOW`） |
+| 上电状态 | 42 | 输入 | `FINGER_PWR_STATUS_PIN` | 读供电反馈；当前样机上电后读到 LOW，但模块握手正常，反馈极性/接线需实板确认 |
 
 通讯参数：
 
@@ -113,7 +113,7 @@
 
 上电时序（固件）：
 
-1. 配置 GPIO42 为输出，拉到**上电有效电平**（默认 HIGH，见 `FINGER_PWR_ON_LEVEL`）
+1. 配置 GPIO42 为输出，拉到**上电有效电平**（当前硬件 **LOW** 有效，见 `FINGER_PWR_ON_LEVEL`）
 2. 等待模块稳定（默认 300 ms）
 3. 读 GPIO21 状态日志
 4. 打开 UART2，执行 `verifyPassword()`
@@ -122,7 +122,7 @@
 
 - 必须共地
 - 供电电压以模块规格为准（多数 AS608 供电 3.3~5V，UART 常为 3.3V TTL）
-- 若实际电源开关是低电平有效，只需改 `config.h` 中 `FINGER_PWR_ON_LEVEL`
+- 当前板：控制脚**低电平上电**（`FINGER_PWR_ON_LEVEL=LOW`），状态反馈**高电平已上电**（`FINGER_PWR_STATUS_ON_LEVEL=HIGH`），两者独立配置
 
 ---
 
@@ -140,23 +140,23 @@
 
 | 595 输出 | 功能 | 逻辑 |
 | --- | --- | --- |
-| Q0 | 锁 1 / Lock0 继电器 | **低电平开锁**（0=开，1=关） |
+| Q0 | 锁 1 / Lock0 继电器 | **高电平开锁**（1=开，0=关） |
 | Q1 | 锁 2 / Lock1 继电器 | 同上 |
 | Q2 | 锁 3 / Lock2 继电器 | 同上 |
 | Q3 | 锁 4 / Lock3 继电器 | 同上 |
-| Q4 | 锁 1 状态 LED | **高电平亮** |
-| Q5 | 锁 2 状态 LED | 高电平亮 |
-| Q6 | 锁 3 状态 LED | 高电平亮 |
-| Q7 | 锁 4 状态 LED | 高电平亮 |
+| Q4 | 锁 1 状态 LED | **高电平亮**（1=亮，0=灭） |
+| Q5 | 锁 2 状态 LED | 同上 |
+| Q6 | 锁 3 状态 LED | 同上 |
+| Q7 | 锁 4 状态 LED | 同上 |
 
 对应关系：
 
-- 开锁时：对应继电器 bit=0，对应 LED bit=1
-- 关锁时：对应继电器 bit=1，对应 LED bit=0
+- 开锁时：对应继电器 bit=1，对应 LED bit=1
+- 关锁时：对应继电器 bit=0，对应 LED bit=0
 - 开锁保持时间：`LOCK_OPEN_DURATION_MS` = 3000 ms，超时自动关锁
 
-默认上电字节：`0x0F`  
-（Q0~Q3=1 全关锁，Q4~Q7=0 全灭 LED）
+默认上电字节：`0x00`
+（Q0~Q3=0 全关锁，Q4~Q7=0 全灭 LED）
 
 ---
 

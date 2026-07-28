@@ -14,13 +14,15 @@ namespace FingerprintLockManager
     /// 订阅 MeshBridge.TraceAdded 事件，实时展示链路收发数据、状态变化、协议帧等。
     /// 支持方向/类别/关键字过滤、自动滚动、清空、导出。
     /// </summary>
-    public partial class CommunicationLogWindow : Window
+    public partial class CommunicationLogWindow : BorderlessWindow
     {
         private readonly ObservableCollection<CommunicationTraceEntry> _allEntries = new();
         private readonly System.Windows.Threading.DispatcherTimer _refreshTimer;
         private int _sentCount;
         private int _receivedCount;
         private const int MaxEntries = 5000; // 限制内存占用
+        private bool _filterDirty;
+        private DateTime _lastFilterAt = DateTime.MinValue;
 
         public CommunicationLogWindow()
         {
@@ -58,25 +60,60 @@ namespace FingerprintLockManager
 
         private void OnTraceAdded(CommunicationTraceEntry entry)
         {
-            Dispatcher.Invoke(() =>
+            // 串口/线程池回调：始终异步切回 UI，避免与串口 I/O / CollectionView 交叉占用。
+            try
+            {
+                Dispatcher.BeginInvoke(new Action(() => AppendTrace(entry)),
+                    System.Windows.Threading.DispatcherPriority.Background);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[CommLog] OnTraceAdded: {ex.Message}");
+            }
+        }
+
+        private void AppendTrace(CommunicationTraceEntry entry)
+        {
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.BeginInvoke(new Action(() => AppendTrace(entry)),
+                    System.Windows.Threading.DispatcherPriority.Background);
+                return;
+            }
+            try
             {
                 if (entry.Direction == CommunicationDirection.Transmit) _sentCount++;
                 else if (entry.Direction == CommunicationDirection.Receive) _receivedCount++;
                 _allEntries.Add(entry);
 
-                // 限长
                 while (_allEntries.Count > MaxEntries)
                 {
                     _allEntries.RemoveAt(0);
                 }
 
-                // 应用过滤 & 滚动
-                ApplyFilter();
-            });
+                // 高频收包时合并过滤，避免 CollectionView 每条重建导致卡顿/线程竞争表象。
+                _filterDirty = true;
+                if ((DateTime.Now - _lastFilterAt).TotalMilliseconds >= 200)
+                {
+                    _lastFilterAt = DateTime.Now;
+                    _filterDirty = false;
+                    ApplyFilter();
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[CommLog] AppendTrace: {ex.Message}");
+            }
         }
 
         private void UpdateLinkStatus()
         {
+            if (_filterDirty)
+            {
+                _filterDirty = false;
+                _lastFilterAt = DateTime.Now;
+                ApplyFilter();
+            }
             bool connected = App.MeshBridge.IsConnected;
             LinkStatusDot.Fill = connected
                 ? (System.Windows.Media.Brush)FindResource("SuccessBrush")

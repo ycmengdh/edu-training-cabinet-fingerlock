@@ -2,7 +2,7 @@ using System.Windows;
 
 namespace FingerprintLockManager
 {
-    public partial class ChangePasswordWindow : Window
+    public partial class ChangePasswordWindow : BorderlessWindow
     {
         private bool _saving;
 

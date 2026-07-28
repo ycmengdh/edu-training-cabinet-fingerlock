@@ -4,8 +4,12 @@ using Newtonsoft.Json.Linq;
 namespace FingerprintLockManager
 {
     /// <summary>
-    /// Message ↔ AppMessage 映射（外层二进制信封 + 混合负载）。
-    /// 简单命令用定长二进制负载；复杂命令的 data 仍为 UTF-8 JSON 对象。
+    /// Message ↔ AppMessage 映射。
+    /// 统一协议模型：
+    ///   传输层 A5/5A 帧 → 应用层 B1/0F 二进制信封(cmd_id/msg_id/device_id) → payload。
+    /// 简单命令（CONTROL_LOCK/ACK/ERROR/HEARTBEAT）用定长二进制 payload；
+    /// 复杂命令（SD_*/SYNC_*/CONFIG/* 等）payload 仍为 UTF-8 JSON 对象字节。
+    /// 不再使用“整包 JSON 消息”作为主路径。
     /// </summary>
     public static class AppMessageMapper
     {
@@ -13,6 +17,9 @@ namespace FingerprintLockManager
         {
             CmdIds.ControlLock,
             CmdIds.AddFingerprint,
+            CmdIds.CancelEnroll,
+            CmdIds.StartFingerprintTest,
+            CmdIds.StopFingerprintTest,
             CmdIds.DeleteFingerprint,
             CmdIds.RestoreFingerprint,
             CmdIds.DeleteAllFingerprints,
@@ -207,6 +214,32 @@ namespace FingerprintLockManager
                             ["error_code"] = ecode,
                             ["message"] = emsg ?? "",
                             ["ref_msg_id"] = eref,
+                        };
+                    }
+                    break;
+                case CmdIds.StatusResponse:
+                    if (BinaryMessageCodec.CabinetStatusPayload.TryUnpack(payload, out var status) &&
+                        status != null)
+                    {
+                        return new JObject
+                        {
+                            ["uptime"] = status.Uptime,
+                            ["lock_status"] = new JArray(
+                                (status.LockMask & 0x01) != 0 ? 1 : 0,
+                                (status.LockMask & 0x02) != 0 ? 1 : 0,
+                                (status.LockMask & 0x04) != 0 ? 1 : 0,
+                                (status.LockMask & 0x08) != 0 ? 1 : 0),
+                            ["fingerprint_count"] = status.FingerprintCount,
+                            ["perm_count"] = status.PermissionCount,
+                            ["perm_version"] = status.PermissionVersion,
+                            ["mesh_layer"] = status.MeshLayer,
+                            ["mesh_send_failures"] = status.SendFailures,
+                            ["mesh_queue_full"] = status.QueueFull,
+                            ["mesh_link_rssi"] = status.Rssi,
+                            ["mesh_assoc_expire"] = status.AssocExpire,
+                            ["fp_poll_max_ms"] = status.FingerprintPollMaxMs,
+                            ["work_mode"] = (status.Flags & 0x02) != 0 ? "mesh" : "debug",
+                            ["time_synced"] = (status.Flags & 0x01) != 0,
                         };
                     }
                     break;

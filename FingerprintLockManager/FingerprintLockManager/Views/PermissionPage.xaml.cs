@@ -202,12 +202,12 @@ namespace FingerprintLockManager
                 return;
             }
 
-            var result = MessageBox.Show($"确认将用户「{_selectedUser.Name}」的权限重置为角色默认？\n所有个人覆盖项将被删除。",
+            var result = MessageBox.Show($"确认按当前角色模板重置用户「{_selectedUser.Name}」的个人权限？\n这只修改该用户当前权限。",
                 "确认重置", MessageBoxButton.YesNo, MessageBoxImage.Question);
             if (result != MessageBoxResult.Yes) return;
 
             bool reset;
-            SetBusy(true, "正在恢复角色默认权限");
+            SetBusy(true, "正在按模板重置个人权限");
             try
             {
                 reset = await Task.Run(() => App.PermissionService.DeleteAllUserPermissions(_selectedUser.UserId));
@@ -228,8 +228,8 @@ namespace FingerprintLockManager
                 BroadcastCommandResult synced = await SyncPermissionsAsync();
                 MessageBox.Show(
                     CabinetSyncService.FormatSyncResult(synced,
-                        "已恢复角色默认权限，所有在线柜子均已确认",
-                        "已恢复角色默认权限，但在线柜子未全部确认"),
+                        "个人权限已按模板重置，所有在线柜子均已确认",
+                        "个人权限已按模板重置，但在线柜子未全部确认"),
                     "重置完成", MessageBoxButton.OK,
                     synced.Success ? MessageBoxImage.Information : MessageBoxImage.Warning);
             }

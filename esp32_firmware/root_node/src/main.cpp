@@ -9,6 +9,7 @@
  */
 
 #include <Arduino.h>
+#include <esp_system.h>
 #include <WiFi.h>
 #include <time.h>
 #include "config.h"
@@ -25,6 +26,11 @@
 #include "sd_storage.h"
 #endif
 
+// Arduino-ESP32 builds the framework core separately, so a project build flag
+// alone may not override its weak default. This application-level override is
+// the authoritative loopTask stack size.
+SET_LOOP_TASK_STACK_SIZE(32 * 1024);
+
 // ====== Global variables ======
 DeviceConfig deviceConfig;
 unsigned long bootTime = 0;
@@ -35,6 +41,22 @@ const char *NTP_SERVER_1 = "ntp.aliyun.com";
 const char *NTP_SERVER_2 = "pool.ntp.org";
 const long  GMT_OFFSET_SEC = 8 * 3600;
 const int   DAYLIGHT_OFFSET_SEC = 0;
+
+static const char *resetReasonName(esp_reset_reason_t reason) {
+    switch (reason) {
+        case ESP_RST_POWERON: return "POWERON";
+        case ESP_RST_EXT: return "EXTERNAL";
+        case ESP_RST_SW: return "SOFTWARE";
+        case ESP_RST_PANIC: return "PANIC";
+        case ESP_RST_INT_WDT: return "INT_WDT";
+        case ESP_RST_TASK_WDT: return "TASK_WDT";
+        case ESP_RST_WDT: return "WDT";
+        case ESP_RST_DEEPSLEEP: return "DEEPSLEEP";
+        case ESP_RST_BROWNOUT: return "BROWNOUT";
+        case ESP_RST_SDIO: return "SDIO";
+        default: return "UNKNOWN";
+    }
+}
 
 // ====== Message callbacks ======
 // Root: messages targeted at root itself (routed by MeshBridge)
@@ -47,6 +69,10 @@ void onMessageReceived(const String &message) {
 // transparent uplink forward for both binary app envelopes and legacy JSON.
 void onMeshMessage(const uint8_t *fromMac, const String &json) {
     MeshBridge::onMeshMessage(fromMac, json);
+}
+
+void onPeerConnectionChanged(const uint8_t *mac, bool connected) {
+    MeshBridge::handlePeerConnection(mac, connected);
 }
 
 // ====== NTP time sync (Root STA uplink mode only) ======
@@ -75,6 +101,8 @@ void initNTP() {
 // ====== Status report ======
 void reportStatus() {
     MemPool::noteHeapSample();
+    const uint32_t loopStackFree =
+        (uint32_t)uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t);
     String data = "{";
     data += "\"online\":true,";
     data += "\"uptime\":" + String((millis() - bootTime) / 1000) + ",";
@@ -86,6 +114,9 @@ void reportStatus() {
     data += "\"free_psram\":" + String(MemPool::freePsram()) + ",";
     data += "\"min_free_heap\":" + String(MemPool::minFreeInternalHeap()) + ",";
     data += "\"largest_free_block\":" + String(MemPool::largestFreeBlock()) + ",";
+    data += "\"loop_stack_free\":" + String(loopStackFree) + ",";
+    data += "\"mesh_link_rssi\":" + String(MeshComm::getLinkRssi()) + ",";
+    data += "\"mesh_assoc_expire\":" + String(MeshComm::getApAssocExpireSeconds()) + ",";
 #ifdef ENABLE_SD_CARD
     data += "\"sd_ready\":" + String(SdStorage::isReady() ? "true" : "false") + ",";
     data += "\"sd_total\":" + String((unsigned long)SdStorage::getTotalBytes()) + ",";
@@ -101,13 +132,21 @@ void reportStatus() {
 // ====== Initialization ======
 void setup() {
     // Host link is USB-Serial-JTAG on GPIO19/20 (Serial when CDC_ON_BOOT=1).
+    // Arduino HWCDC defaults to a 256-byte RX queue. SD_SAVE app frames are
+    // commonly 300-700 bytes, so the default silently drops their tail and the
+    // frame parser reports a CRC error. Allocate the queues before begin().
+    Serial.setRxBufferSize(8192);
+    Serial.setTxBufferSize(8192);
     Serial.begin(UPLINK_USB_BAUD);
     unsigned long serialWait = millis();
     while (!Serial && millis() - serialWait < 3000) {
         delay(10);
     }
     delay(200);
+    esp_reset_reason_t resetReason = esp_reset_reason();
     Serial.print("\r\n[ROOT_BOOT] USB-SERIAL-JTAG ALIVE (GPIO19/20)\r\n");
+    Serial.printf("[ROOT_BOOT] RESET_REASON=%d(%s)\r\n",
+                  (int)resetReason, resetReasonName(resetReason));
     Serial.flush();
     Debug::println();
     Debug::println(F("========================================"));
@@ -170,6 +209,7 @@ void setup() {
     MessageHandler::init();
     MeshComm::setMessageCallback(onMessageReceived);
     MeshComm::setMeshMessageCallback(onMeshMessage);
+    MeshComm::setPeerConnectionCallback(onPeerConnectionChanged);
     MeshComm::init();
     MeshBridge::init();
     if (deviceConfig.uplink_mode == UPLINK_USB) {
@@ -209,6 +249,10 @@ void setup() {
         Serial.flush();
     }
     Display::init();
+#ifdef ENABLE_SD_CARD
+    Display::postEvent(SdStorage::isReady() ? "SD READY" : "SD UNAVAILABLE",
+                       SdStorage::isReady() ? Display::EVENT_OK : Display::EVENT_WARNING);
+#endif
     if (!Display::isActive()) {
         Debug::println(F("[MAIN] WARNING: display not active — continuing headless"));
     }
@@ -225,6 +269,9 @@ void setup() {
     lastStatusReport = millis();
 
     Debug::println(F("[MAIN] Init done, entering main loop"));
+    Debug::printf("[MAIN] loop stack configured=%u bytes, free=%u bytes\n",
+                  (unsigned)getArduinoLoopTaskStackSize(),
+                  (unsigned)(uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t)));
     Debug::printf("[MAIN] SD=%s Display=%s MeshInit=ok\n",
 #ifdef ENABLE_SD_CARD
                   SdStorage::isReady() ? "ready" : "missing",
@@ -237,9 +284,10 @@ void setup() {
 
 // ====== Main loop ======
 void loop() {
-    // 1. Mesh communication (includes MeshBridge update for root)
+    // Service host input before and after each bounded Mesh batch. This keeps
+    // USB responsive during heartbeat or reconnect bursts from 100 cabinets.
+    MeshBridge::update();
     MeshComm::update();
-    // Drain deferred mesh event logs (sys_evt task can't safely print)
     MeshComm::drainEventLog();
     MeshBridge::update();
 

@@ -1,6 +1,7 @@
-<Window x:Class="FingerprintLockManager.BackupFingerprintWindow"
+<local:BorderlessWindow x:Class="FingerprintLockManager.BackupFingerprintWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:FingerprintLockManager"
         Title="设备专属副指纹录入" Height="520" Width="520"
         WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
         Background="{StaticResource BackgroundBrush}">
@@ -40,4 +41,4 @@
             <Button x:Name="EnrollButton" Content="开始录入副指纹" Margin="8,0,0,0" Click="EnrollButton_Click"/>
         </StackPanel>
     </Grid>
-</Window>
+</local:BorderlessWindow>

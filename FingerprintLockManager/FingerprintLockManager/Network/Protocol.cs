@@ -77,6 +77,9 @@ namespace FingerprintLockManager
         /// <summary>日志上报（下位机 -> 上位机）</summary>
         public const string CmdLogReport = "LOG_REPORT";
 
+        /// <summary>固件调试日志（Debug::printf 封帧上行）</summary>
+        public const string CmdDebugLog = "LOG";
+
         /// <summary>配置读取响应（下位机 -> 上位机）</summary>
         public const string CmdConfigResponse = "CONFIG_RESPONSE";
 
@@ -97,6 +100,8 @@ namespace FingerprintLockManager
 
         /// <summary>命令处理失败响应</summary>
         public const string CmdError = "ERROR";
+
+        public const string CmdCancelEnroll = "CANCEL_ENROLL";
 
         // ===== SD 卡集中存储命令（上位机 <-> 根节点） =====
 
@@ -158,6 +163,20 @@ namespace FingerprintLockManager
 
         /// <summary>验证窗口事件（柜子 -> 上位机：enter/timeout/cancel/unlocked）</summary>
         public const string CmdVerifyWindowEvent = "VERIFY_WINDOW_EVENT";
+
+        /// <summary>写入临时槽 ID=0 并开始指纹测试（上位机 -> 柜子）</summary>
+        public const string CmdStartFingerprintTest = "START_FINGERPRINT_TEST";
+
+        /// <summary>结束指纹测试并删除临时槽 ID=0（上位机 -> 柜子）</summary>
+        public const string CmdStopFingerprintTest = "STOP_FINGERPRINT_TEST";
+
+        /// <summary>指纹测试事件（柜子 -> 上位机）</summary>
+        public const string CmdFingerprintTestEvent = "FINGERPRINT_TEST_EVENT";
+
+        public const string CmdReadPermissions = "READ_PERMISSIONS";
+        public const string CmdPermissionsResponse = "PERMISSIONS_RESPONSE";
+        public const string CmdCheckFingerprint = "CHECK_FINGERPRINT";
+        public const string CmdFingerprintCheckResponse = "FINGERPRINT_CHECK_RESPONSE";
 
         // ===== 错误码常量（ACK 中 result 字段使用） =====
 
@@ -224,6 +243,7 @@ namespace FingerprintLockManager
                 case CommandType.TimeSync: return CmdTimeSync;
                 case CommandType.Ack: return CmdAck;
                 case CommandType.Error: return CmdError;
+                case CommandType.CancelEnroll: return CmdCancelEnroll;
                 case CommandType.SdQuery: return CmdSdQuery;
                 case CommandType.SdQueryResponse: return CmdSdQueryResponse;
                 case CommandType.SdQueryPart: return CmdSdQueryPart;
@@ -243,6 +263,13 @@ namespace FingerprintLockManager
                 case CommandType.DeleteBackupFingerprint: return CmdDeleteBackupFingerprint;
                 case CommandType.DeleteBackupFingerprintResult: return CmdDeleteBackupFingerprintResult;
                 case CommandType.VerifyWindowEvent: return CmdVerifyWindowEvent;
+                case CommandType.StartFingerprintTest: return CmdStartFingerprintTest;
+                case CommandType.StopFingerprintTest: return CmdStopFingerprintTest;
+                case CommandType.FingerprintTestEvent: return CmdFingerprintTestEvent;
+                case CommandType.ReadPermissions: return CmdReadPermissions;
+                case CommandType.PermissionsResponse: return CmdPermissionsResponse;
+                case CommandType.CheckFingerprint: return CmdCheckFingerprint;
+                case CommandType.FingerprintCheckResponse: return CmdFingerprintCheckResponse;
                 default: return null;
             }
         }
@@ -284,6 +311,7 @@ namespace FingerprintLockManager
                 case CmdTimeSync: return CommandType.TimeSync;
                 case CmdAck: return CommandType.Ack;
                 case CmdError: return CommandType.Error;
+                case CmdCancelEnroll: return CommandType.CancelEnroll;
                 case CmdSdQuery: return CommandType.SdQuery;
                 case CmdSdQueryResponse: return CommandType.SdQueryResponse;
                 case CmdSdQueryPart: return CommandType.SdQueryPart;
@@ -303,6 +331,13 @@ namespace FingerprintLockManager
                 case CmdDeleteBackupFingerprint: return CommandType.DeleteBackupFingerprint;
                 case CmdDeleteBackupFingerprintResult: return CommandType.DeleteBackupFingerprintResult;
                 case CmdVerifyWindowEvent: return CommandType.VerifyWindowEvent;
+                case CmdStartFingerprintTest: return CommandType.StartFingerprintTest;
+                case CmdStopFingerprintTest: return CommandType.StopFingerprintTest;
+                case CmdFingerprintTestEvent: return CommandType.FingerprintTestEvent;
+                case CmdReadPermissions: return CommandType.ReadPermissions;
+                case CmdPermissionsResponse: return CommandType.PermissionsResponse;
+                case CmdCheckFingerprint: return CommandType.CheckFingerprint;
+                case CmdFingerprintCheckResponse: return CommandType.FingerprintCheckResponse;
                 default: return null;
             }
         }
