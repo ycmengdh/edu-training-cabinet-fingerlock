@@ -1,6 +1,11 @@
 /**
  * lock_control.h - 4 路锁控制 via 74HC595 移位寄存器
- * 595 Q0-Q3: 继电器(高电平开锁, LOW=关锁), Q4-Q7: 锁状态LED(高电平亮)
+ * 595 Q0-Q3: 锁状态 LED，Q4-Q7: 继电器（均高电平有效）
+ *
+ * LED 三种用途：
+ *   - 开锁时常亮（跟随继电器）
+ *   - 验证窗口内：有权限的锁慢闪提示可按
+ *   - 空闲时熄灭
  */
 #ifndef LOCK_CONTROL_H
 #define LOCK_CONTROL_H
@@ -26,21 +31,31 @@ public:
     // 获取锁状态：1=正在开锁，0=关闭
     static void getLockStatus(bool status[LOCK_COUNT]);
 
-    // 主循环调用，处理非阻塞自动关锁
+    // 主循环调用，处理非阻塞自动关锁 + 权限提示灯慢闪
     static void update();
 
     // 是否有任意锁正在开锁
     static bool anyLockActive();
 
+    // 验证窗口：按权限位启动对应锁 LED 慢闪（继电器不受影响）
+    static void setPermissionHint(const bool perms[LOCK_COUNT]);
+    // 结束验证窗口 / 开锁后：关闭所有提示慢闪
+    static void clearPermissionHint();
+
 private:
     static bool lockActive[LOCK_COUNT];         // 是否处于开锁激活状态
     static unsigned long lockOpenTime[LOCK_COUNT]; // 开锁触发时刻
+    static bool ledHint[LOCK_COUNT];            // 验证窗口权限提示
+    static bool blinkPhaseOn;                   // 慢闪当前相位（亮/灭）
+    static unsigned long lastBlinkToggleMs;     // 上次慢闪切换时刻
 
     // 向 74HC595 移位写入 1 字节
     static void shiftOut595(uint8_t data);
 
-    // 根据锁状态计算并更新 595 输出
+    // 根据锁状态 + 提示灯相位计算并更新 595 输出
     static void updateShiftRegister();
+
+    static bool anyHintActive();
 };
 
 #endif // LOCK_CONTROL_H

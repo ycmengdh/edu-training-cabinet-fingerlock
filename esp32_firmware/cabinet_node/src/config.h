@@ -40,11 +40,14 @@
 #define FINGER_RETRY_DELAY_MS       200
 
 // ===================== 74HC595 移位寄存器 =====================
-// Q0-Q3: 继电器(高电平开锁, LOW=关锁), Q4-Q7: 锁状态 LED(高电平亮, LOW=灭)
+// 实板映射：Q0-Q3 为锁状态 LED，Q4-Q7 为继电器。
+// 两组均高电平有效；权限提示只能写 LED 位，禁止改动继电器位。
 // 待机默认 595 输出 0x00（锁全关、LED 全灭）
 #define SHIFT_DS_PIN            4
 #define SHIFT_STCP_PIN          15
 #define SHIFT_SHCP_PIN          16
+#define LOCK_LED_BIT_BASE       0
+#define LOCK_RELAY_BIT_BASE     4
 
 // ===================== 按键: K1-K4 开锁, K5 取消 =====================
 // K1=47, K2=48, K3=45, K4=39, K5=40
@@ -64,8 +67,8 @@
 //   识别中：绿灯慢闪（500ms 周期）
 //   成功：  绿灯常亮（持续至 10s 操作窗口结束）
 //   失败：  红灯闪烁 3 次
+// 验证窗口内，有权限的锁 LED（595 Q0~Q3）另由 LockControl 慢闪提示。
 // 若硬件为单 GPIO 双色（共阳/共阴），可通过 FP_LED_COMMON_ANODE 切换极性。
-// 若硬件无独立双色 LED，可复用 74HC595 的保留位（需在 lock_control 中扩展）。
 #define FP_LED_GREEN_PIN        41
 #define FP_LED_RED_PIN          38
 // 共阳极 LED：HIGH=灭, LOW=亮。共阴极 LED：HIGH=亮, LOW=灭。

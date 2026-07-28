@@ -4,7 +4,8 @@
  *
  * V2.7 流程反转：先验证指纹 -> 10 秒操作窗口 -> 按键开锁
  *   - STATE_WAIT_FINGER: 常态轮询 AS608，匹配成功则载入权限进入窗口态
- *   - STATE_VERIFIED_WINDOW: 10s 内按键开锁；超时/取消回 IDLE
+ *   - STATE_VERIFIED_WINDOW: 指纹头绿灯常亮 + 有权限锁 LED 慢闪；
+ *     10s 内按对应键开锁 / K5 取消 / 超时回 WAIT_FINGER
  *   - STATE_ENROLLING: 主/副指纹录入
  *
  * 开锁鉴权只读取本地权限缓存；网络仅用于管理/同步。
@@ -121,6 +122,8 @@ private:
     static bool loadVerifiedPermission(int as608Id);
     // V2.7：在窗口态按键时尝试开锁
     static bool openIfPermitted(int lockId);
+    // 结束验证窗口（清权限、关锁灯提示、回 WAIT_FINGER）
+    static void endVerifiedWindow(const char *event, int lockId = -1);
     // 上报验证窗口事件（进入/退出/超时/取消）
     static void sendVerifyWindowEvent(const char *event, int lockId = -1);
     // 录入检测完成：模板从临时槽迁移到分配的真实 ID，回报结果

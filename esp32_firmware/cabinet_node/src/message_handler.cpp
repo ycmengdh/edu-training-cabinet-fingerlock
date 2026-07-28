@@ -198,11 +198,8 @@ void MessageHandler::onCancel() {
     Debug::printf("[MSG] Cancel: state %d -> WAIT_FINGER\n", (int)state);
 
     if (state == STATE_VERIFIED_WINDOW) {
-        // 取消验证窗口：清空权限，回 WAIT_FINGER
-        sendVerifyWindowEvent("cancel");
-        verifiedPermsValid = false;
-        FpLed::setOff();
-        setState(STATE_WAIT_FINGER);
+        // 取消验证窗口：清空权限 + 关锁灯提示，回 WAIT_FINGER
+        endVerifiedWindow("cancel");
         return;
     }
 
@@ -291,11 +288,36 @@ bool MessageHandler::loadVerifiedPermission(int as608Id) {
             Debug::printf("[MSG] permission expired: user=%s\n", perm.user_id.c_str());
             return false;
         }
+        bool hasLockPermission = false;
+        for (int i = 0; i < LOCK_COUNT; i++) {
+            if (perm.lock_perm[i]) {
+                hasLockPermission = true;
+                break;
+            }
+        }
+        if (!hasLockPermission) {
+            Logger::log(perm.user_id, as608Id, -1,
+                        "open", "fail", "local_no_permission");
+            Debug::printf("[MSG] user has no lock permission: user=%s\n",
+                          perm.user_id.c_str());
+            return false;
+        }
         verifiedPerms = perm;
         verifiedPermsValid = true;
         return true;
     }
     return false;
+}
+
+// 结束验证窗口：关提示灯、清权限、回常态轮询
+void MessageHandler::endVerifiedWindow(const char *event, int lockId) {
+    if (event != nullptr) {
+        sendVerifyWindowEvent(event, lockId);
+    }
+    verifiedPermsValid = false;
+    LockControl::clearPermissionHint();
+    FpLed::setOff();
+    setState(STATE_WAIT_FINGER);
 }
 
 // 在验证窗口态按键时尝试开锁
@@ -310,11 +332,8 @@ bool MessageHandler::openIfPermitted(int lockId) {
         Debug::printf("[MSG] windowed unlock success: user=%s lock=%d backup=%d\n",
                       verifiedPerms.user_id.c_str(), lockId,
                       verifiedPerms.is_backup ? 1 : 0);
-        // 开锁后结束窗口
-        sendVerifyWindowEvent("unlocked", lockId);
-        verifiedPermsValid = false;
-        FpLed::setOff();
-        setState(STATE_WAIT_FINGER);
+        // 开锁后结束窗口（该路 LED 已由 openLock 改常亮）
+        endVerifiedWindow("unlocked", lockId);
         return true;
     } else {
         // 本地权限不足（窗口未结束，可继续按其他有权限的锁）
@@ -322,7 +341,7 @@ bool MessageHandler::openIfPermitted(int lockId) {
                     "open", "fail", "no_permission_in_window");
         Debug::printf("[MSG] no permission for lock %d in window (user=%s)\n",
                       lockId, verifiedPerms.user_id.c_str());
-        // 红灯短闪一次提示无权限（不结束窗口）
+        // 红灯短闪一次提示无权限（不结束窗口，有权限的锁继续慢闪）
         FpLed::setFail();
         return false;
     }
@@ -348,14 +367,11 @@ void MessageHandler::checkTimeout() {
     if (state == STATE_VERIFIED_WINDOW &&
         (now - stateEnterTime > VERIFY_WINDOW_TIMEOUT_MS)) {
         Debug::println(F("[MSG] verify window timeout, return to WAIT_FINGER"));
-        sendVerifyWindowEvent("timeout");
         if (verifiedPermsValid) {
             Logger::log(verifiedPerms.user_id, verifiedPerms.local_fp_id, -1,
                         "open", "fail", "window_timeout");
         }
-        verifiedPermsValid = false;
-        FpLed::setOff();
-        setState(STATE_WAIT_FINGER);
+        endVerifiedWindow("timeout");
     }
     // WAIT_FINGER 异常恢复（30 秒无任何事件，复位 LED）
     if (state == STATE_WAIT_FINGER &&
@@ -540,12 +556,19 @@ void MessageHandler::update() {
                 // permission cache. The network is for management/sync only;
                 // it must never be part of the unlock critical path.
                 if (loadVerifiedPermission(as608Id)) {
-                    // 权限载入成功：进入 10s 操作窗口，绿灯常亮
+                    // 权限载入成功：进入 10s 操作窗口
+                    // 指纹头绿灯常亮 + 有权限的锁 LED 慢闪提示可按
                     FpLed::setSuccess();
+                    LockControl::setPermissionHint(verifiedPerms.lock_perm);
                     setState(STATE_VERIFIED_WINDOW);
                     sendVerifyWindowEvent("enter");
-                    Debug::printf("[MSG] fingerprint verified: as608_id=%d user=%s, enter 10s window\n",
-                                  as608Id, verifiedPerms.user_id.c_str());
+                    Debug::printf("[MSG] fingerprint verified: as608_id=%d user=%s, enter 10s window "
+                                  "locks=[%d%d%d%d]\n",
+                                  as608Id, verifiedPerms.user_id.c_str(),
+                                  verifiedPerms.lock_perm[0] ? 1 : 0,
+                                  verifiedPerms.lock_perm[1] ? 1 : 0,
+                                  verifiedPerms.lock_perm[2] ? 1 : 0,
+                                  verifiedPerms.lock_perm[3] ? 1 : 0);
                 } else {
                     // 模板存在但权限缓存未同步或已过期：红灯闪烁
                     Logger::log("", as608Id, -1,
@@ -560,8 +583,13 @@ void MessageHandler::update() {
 
         case STATE_VERIFIED_WINDOW: {
             checkTimeout();
-            // 窗口期内保持绿灯常亮（由 FpLed::update 维护）
+            // 窗口期内：指纹头保持成功绿灯；若刚提示过无权限（红闪），闪完后恢复常亮
+            // 有权限的锁 LED 慢闪由 LockControl::update 维护
             // 按键事件由 onKeyPressed 处理
+            if (FpLed::getState() != FpLed::STATE_SUCCESS &&
+                FpLed::getState() != FpLed::STATE_FAIL) {
+                FpLed::setSuccess();
+            }
             break;
         }
 

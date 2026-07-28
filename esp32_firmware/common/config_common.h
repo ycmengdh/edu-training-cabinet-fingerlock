@@ -24,6 +24,8 @@
 #define FP_LED_FAIL_BLINK_COUNT  3
 #define FP_LED_BLINK_HALF_MS     125
 #define FP_LED_IDENTIFY_HALF_MS  250   // 识别中：500ms 周期慢闪
+// 验证窗口内：有权限的锁 LED 慢闪（800ms 周期 = 400ms 亮 + 400ms 灭）
+#define LOCK_LED_HINT_HALF_MS    400
 
 // ===================== ESP-MESH 网络配置 =====================
 #define MESH_CHANNEL            6
