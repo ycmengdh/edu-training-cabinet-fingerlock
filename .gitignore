@@ -47,6 +47,14 @@ temp/
 *.tmp
 *.log
 app_config.json
+__pycache__/
+.artifacts/
+.zcode/
+debug/output/
+通讯日志_*.xls
+esp32_firmware/cabinet_node/src/Untitled-*.txt
+esp32_firmware/cabinet_node/src/[[]CABINET_BOOT[]]*.txt
+esp32_firmware/doc/柜子/高档金属指纹DM900用户使用手册/
 
 # 文档构建输出
 publish/

@@ -1,7 +1,7 @@
 """长时监听柜子 COM10，抓 boot loop / panic backtrace。
 
 特性：
-  - 持续 600s，实时写文件 cabinet_long.bin
+  - 持续 600s，实时写文件 debug/output/cabinet_long.bin
   - 每收到字节就打印时间戳和大致内容
   - 检测到 panic 关键字立即高亮
   - 异常时重试串口打开
@@ -10,11 +10,12 @@ import serial
 import time
 import sys
 from datetime import datetime
+from pathlib import Path
 
 PORT = "COM10"
 BAUD = 921600
 DURATION = 600.0
-OUTFILE = "cabinet_long.bin"
+OUTFILE = Path(__file__).resolve().parent / "output" / "cabinet_long.bin"
 
 PANIC_KW = (b"Guru", b"panic", b"abort", b"assert", b"Backtrace",
             b"Rebooting", b"Stack canary", b"CORRUPT", b"WDT",
@@ -33,6 +34,7 @@ def main():
     print(f"=== 长监听 {PORT} {DURATION:.0f}s ({datetime.now()}) ===")
     s = reopen()
     t0 = time.time()
+    OUTFILE.parent.mkdir(parents=True, exist_ok=True)
     out = open(OUTFILE, "wb")
     total = 0
     last_report = t0
