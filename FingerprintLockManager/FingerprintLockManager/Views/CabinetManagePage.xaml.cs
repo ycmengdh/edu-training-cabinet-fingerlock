@@ -140,6 +140,7 @@ namespace FingerprintLockManager
                     "online" => device.IsOnline,
                     "offline" => !device.IsOnline,
                     "lagging" => device.IsOnline && device.PermissionSyncText == "落后",
+                    "attention" => device.NeedsAttention,
                     _ => true
                 };
                 return keywordMatched && statusMatched;
@@ -160,17 +161,18 @@ namespace FingerprintLockManager
             try
             {
                 var result = await Task.Run(App.CabinetSyncService.SyncAllPermissions);
-                MessageBox.Show(
-                    CabinetSyncService.FormatSyncResult(result,
-                        "所有在线柜子均已确认权限同步",
-                        "权限同步未全部完成"),
-                    result.Success ? "同步完成" : "同步提示", MessageBoxButton.OK,
-                    result.Success ? MessageBoxImage.Information : MessageBoxImage.Warning);
+                string summary = CabinetSyncService.FormatSyncResult(result,
+                    "所有在线柜子均已确认权限同步",
+                    "权限同步未全部完成");
+                if (result.Success) AppToast.Success("全部在线柜权限已同步");
+                else AppToast.Warning("部分柜子未确认，详见提示");
+                if (!result.Success)
+                    MessageBox.Show(summary, "同步提示", MessageBoxButton.OK, MessageBoxImage.Warning);
                 await LoadCabinetsAsync(quiet: true);
             }
             catch (RootDataUnavailableException ex)
             {
-                MessageBox.Show(ex.Message, "根节点不可用", MessageBoxButton.OK, MessageBoxImage.Error);
+                AppToast.Error(ex.Message);
             }
             finally
             {
@@ -181,6 +183,42 @@ namespace FingerprintLockManager
         private void OpenDetailButton_Click(object sender, RoutedEventArgs e)
         {
             if (sender is Button { Tag: Device device }) OpenDetail(device);
+        }
+
+        private async void SyncOneButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not Button { Tag: Device device }) return;
+            if (!device.IsOnline)
+            {
+                App.CabinetSyncQueueService.EnqueueCabinet(device.DeviceId, "手动同步（离线排队）");
+                App.CabinetSyncQueueService.Trigger();
+                AppToast.Info($"{device.DisplayIdentity} 离线，已加入待同步队列");
+                return;
+            }
+
+            SetBusy(true, $"正在同步 {device.DisplayIdentity}…");
+            try
+            {
+                CabinetDataSyncResult result = await App.CabinetSyncService
+                    .SyncCabinetDataAsync(device.DeviceId);
+                if (result.Success)
+                    AppToast.Success($"{device.DisplayIdentity} 已同步");
+                else
+                {
+                    AppToast.Warning($"{device.DisplayIdentity} 同步未完成");
+                    MessageBox.Show(result.FormatForDisplay(), "同步未完成",
+                        MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
+                await LoadCabinetsAsync(quiet: true);
+            }
+            catch (Exception ex)
+            {
+                AppToast.Error($"同步失败：{ex.Message}");
+            }
+            finally
+            {
+                SetBusy(false);
+            }
         }
 
         private async void EditDeviceButton_Click(object sender, RoutedEventArgs e)
@@ -277,15 +315,15 @@ namespace FingerprintLockManager
                 });
                 if (!result.saved)
                 {
-                    MessageBox.Show(result.error, "保存失败", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    AppToast.Warning(string.IsNullOrWhiteSpace(result.error) ? "保存失败" : result.error);
                     return;
                 }
+                AppToast.Success("柜子信息已保存");
                 await LoadCabinetsAsync(quiet: true);
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"柜子信息保存失败：{ex.Message}", "保存失败",
-                    MessageBoxButton.OK, MessageBoxImage.Error);
+                AppToast.Error($"柜子信息保存失败：{ex.Message}");
             }
             finally
             {

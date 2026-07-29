@@ -7,6 +7,7 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
         <Grid Grid.Row="0" Margin="0,0,0,16">
@@ -62,20 +63,26 @@
             </ScrollViewer>
         </Grid>
 
-        <Border x:Name="RoleFilterPanel" Grid.Row="1" Style="{StaticResource ToolbarPanel}" Margin="0,0,0,12">
+        <Border Grid.Row="1" Style="{StaticResource ToolbarPanel}" Margin="0,0,0,12">
             <StackPanel Orientation="Horizontal">
-                <TextBlock Text="角色" Style="{StaticResource LabelText}" Margin="0,0,10,0"/>
-                <ComboBox x:Name="RoleFilterBox" Width="140" SelectionChanged="RoleFilterBox_SelectionChanged">
-                    <ComboBoxItem Content="全部角色" Tag=""/>
-                    <ComboBoxItem Content="管理员" Tag="admin"/>
-                    <ComboBoxItem Content="老师" Tag="teacher"/>
-                    <ComboBoxItem Content="学生" Tag="student"/>
-                </ComboBox>
+                <StackPanel x:Name="RoleFilterPanel" Orientation="Horizontal">
+                    <TextBlock Text="角色" Style="{StaticResource LabelText}" Margin="0,0,10,0"/>
+                    <ComboBox x:Name="RoleFilterBox" Width="140" SelectionChanged="RoleFilterBox_SelectionChanged">
+                        <ComboBoxItem Content="全部角色" Tag=""/>
+                        <ComboBoxItem Content="管理员" Tag="admin"/>
+                        <ComboBoxItem Content="老师" Tag="teacher"/>
+                        <ComboBoxItem Content="学生" Tag="student"/>
+                    </ComboBox>
+                </StackPanel>
+                <TextBlock Text="搜索" Style="{StaticResource LabelText}" Margin="16,0,8,0"/>
+                <TextBox x:Name="UserSearchBox" Width="200" Height="34"
+                         ToolTip="姓名 / 用户 ID / 班级" TextChanged="UserSearchBox_TextChanged"/>
             </StackPanel>
         </Border>
 
         <Border Grid.Row="2" Style="{StaticResource Panel}">
-            <DataGrid x:Name="UserDataGrid" BorderThickness="0" IsReadOnly="True" SelectionMode="Extended">
+            <DataGrid x:Name="UserDataGrid" BorderThickness="0" IsReadOnly="True" SelectionMode="Extended"
+                      EnableRowVirtualization="True">
                 <DataGrid.Resources>
                     <Style TargetType="TextBlock" BasedOn="{StaticResource DataGridTextBlockStyle}"/>
                 </DataGrid.Resources>
@@ -97,5 +104,13 @@
                 </DataGrid.Columns>
             </DataGrid>
         </Border>
+
+        <StackPanel Grid.Row="3" Style="{StaticResource PagerBar}">
+            <Button x:Name="PrevPageButton" Style="{StaticResource SecondaryButton}" Content="上一页" Width="80"
+                    Click="PrevPageButton_Click"/>
+            <TextBlock x:Name="PageInfoText" Style="{StaticResource PagerInfoText}" Text="第 1 / 1 页"/>
+            <Button x:Name="NextPageButton" Style="{StaticResource SecondaryButton}" Content="下一页" Width="80"
+                    Click="NextPageButton_Click"/>
+        </StackPanel>
     </Grid>
 </Page>

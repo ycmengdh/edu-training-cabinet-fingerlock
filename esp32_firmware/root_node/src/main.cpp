@@ -253,9 +253,6 @@ void setup() {
     Display::postEvent(SdStorage::isReady() ? "SD READY" : "SD UNAVAILABLE",
                        SdStorage::isReady() ? Display::EVENT_OK : Display::EVENT_WARNING);
 #endif
-    if (!Display::isActive()) {
-        Debug::println(F("[MAIN] WARNING: display not active — continuing headless"));
-    }
     if (deviceConfig.uplink_mode == UPLINK_USB) {
         Serial.printf("\r\n[ROOT_BOOT] DISPLAY=%s; entering main loop\r\n",
                       Display::isActive() ? "READY" : "OFF");

@@ -4,7 +4,7 @@
         xmlns:local="clr-namespace:FingerprintLockManager"
         Title="启动 - 实训柜指纹权限管理系统"
         Icon="pack://application:,,,/Resources/logo.ico"
-        Width="540" Height="540" MinWidth="520" MinHeight="500"
+        Width="540" Height="620" MinWidth="520" MinHeight="560"
         WindowStartupLocation="CenterScreen" ResizeMode="NoResize"
         Background="{StaticResource BackgroundBrush}"
         UseLayoutRounding="True" SnapsToDevicePixels="True">
@@ -133,7 +133,7 @@
                     </Grid>
                 </StackPanel>
 
-                <!-- 链路状态 + 进度 -->
+                <!-- 链路状态 + 分步进度 -->
                 <StackPanel Grid.Row="2" VerticalAlignment="Center" HorizontalAlignment="Stretch"
                             Margin="0,16,0,0">
                     <Border Background="{StaticResource HintBrush}" BorderThickness="0"
@@ -157,21 +157,49 @@
                         </Grid>
                     </Border>
 
+                    <!-- 分步指示：1连接 2就绪 3备份 4同步 5完成 -->
+                    <UniformGrid x:Name="StepStrip" Columns="5" Margin="0,14,0,0">
+                        <TextBlock x:Name="Step1Text" Text="1 连接" FontSize="10" TextAlignment="Center"
+                                   Foreground="{StaticResource SubTextBrush}"/>
+                        <TextBlock x:Name="Step2Text" Text="2 就绪" FontSize="10" TextAlignment="Center"
+                                   Foreground="{StaticResource SubTextBrush}"/>
+                        <TextBlock x:Name="Step3Text" Text="3 备份" FontSize="10" TextAlignment="Center"
+                                   Foreground="{StaticResource SubTextBrush}"/>
+                        <TextBlock x:Name="Step4Text" Text="4 同步" FontSize="10" TextAlignment="Center"
+                                   Foreground="{StaticResource SubTextBrush}"/>
+                        <TextBlock x:Name="Step5Text" Text="5 完成" FontSize="10" TextAlignment="Center"
+                                   Foreground="{StaticResource SubTextBrush}"/>
+                    </UniformGrid>
+
                     <TextBlock x:Name="ProgressText" Text="正在准备…" Foreground="{StaticResource SubTextBrush}"
-                               FontSize="11" TextWrapping="Wrap" Margin="0,14,0,8" MinHeight="28" />
+                               FontSize="11" TextWrapping="Wrap" Margin="0,10,0,8" MinHeight="28" />
                     <ProgressBar x:Name="SyncProgress" Height="5" IsIndeterminate="False"
                                  Minimum="0" Maximum="100" Value="0" />
+                    <TextBlock x:Name="LastPortHintText" Text=""
+                               Foreground="{StaticResource SubTextBrush}" FontSize="10"
+                               Margin="0,8,0,0" TextWrapping="Wrap"/>
                 </StackPanel>
             </Grid>
         </Border>
 
-        <!-- 底部操作区：默认仅显示「退出」；同步失败后才显示「重试 / 使用本地历史数据继续」 -->
+        <!-- 底部操作区：默认仅显示「退出」；同步失败后才显示「重试 / 仅本地继续」 -->
         <StackPanel Grid.Row="1" Margin="0,14,0,0">
             <StackPanel x:Name="FailurePanel" Visibility="Collapsed" Margin="0,0,0,10">
+                <Border Background="{StaticResource HintBrush}" BorderBrush="{StaticResource WarningBrush}"
+                        BorderThickness="1" CornerRadius="8" Padding="12,10" Margin="0,0,0,10">
+                    <StackPanel>
+                        <TextBlock Text="设备同步未完成" FontWeight="SemiBold" FontSize="12"/>
+                        <TextBlock x:Name="FailureHintText"
+                                   Text="可重试连接；若设备暂不可用，可用本机历史业务库进入（只读/受限，不代表 SD 最新）。"
+                                   Foreground="{StaticResource SubTextBrush}" FontSize="11"
+                                   TextWrapping="Wrap" Margin="0,4,0,0"/>
+                    </StackPanel>
+                </Border>
                 <Button x:Name="RetryButton" Content="重新连接并同步" Height="38"
                         Click="RetryButton_Click" IsEnabled="False" />
                 <Button x:Name="UseLocalButton" Style="{StaticResource SecondaryButton}"
-                        Content="使用本地历史数据继续" Height="38" Margin="0,8,0,0"
+                        Content="仅用本机数据进入登录" Height="38" Margin="0,8,0,0"
+                        ToolTip="使用最近备份或本机 business.db，不拉取 SD。适合设备离线应急。"
                         Click="UseLocalButton_Click" IsEnabled="False" />
             </StackPanel>
             <Button x:Name="ExitButton" Style="{StaticResource GhostButton}"

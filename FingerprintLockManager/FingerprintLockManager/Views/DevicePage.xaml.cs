@@ -1,5 +1,6 @@
 using System.Windows;
 using System.Windows.Controls;
+using Newtonsoft.Json.Linq;
 
 namespace FingerprintLockManager
 {
@@ -9,6 +10,7 @@ namespace FingerprintLockManager
         private Device? _selectedDevice;
         private System.Windows.Threading.DispatcherTimer? _refreshTimer;
         private List<DeviceFingerprintInfo> _fingerprints = new();
+        private List<BackupFingerprintRow> _backupFingerprints = new();
         private bool _loading;
         private bool _busy;
         private int _fpListLoadVersion;
@@ -44,7 +46,10 @@ namespace FingerprintLockManager
 
             await LoadCabinetAsync();
             if (_selectedDevice != null)
+            {
                 await LoadDeviceFpListAsync(_selectedDevice.DeviceId);
+                await LoadBackupFingerprintListAsync(quiet: true);
+            }
 
             _refreshTimer = new System.Windows.Threading.DispatcherTimer
             {
@@ -224,15 +229,17 @@ namespace FingerprintLockManager
                     _selectedDevice.DeviceId, progress);
                 await LoadDeviceFpListAsync(_selectedDevice.DeviceId);
                 await LoadCabinetAsync(quiet: true);
-                MessageBox.Show(
-                    result.FormatForDisplay(),
-                    result.Success ? "柜机数据已同步" : "柜机数据未完全同步", MessageBoxButton.OK,
-                    result.Success ? MessageBoxImage.Information : MessageBoxImage.Warning);
+                if (result.Success) AppToast.Success("柜机数据已同步");
+                else
+                {
+                    AppToast.Warning("柜机数据未完全同步");
+                    MessageBox.Show(result.FormatForDisplay(), "柜机数据未完全同步",
+                        MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"柜机数据同步失败：{ex.Message}", "错误",
-                    MessageBoxButton.OK, MessageBoxImage.Error);
+                AppToast.Error($"柜机数据同步失败：{ex.Message}");
             }
             finally
             {
@@ -283,11 +290,9 @@ namespace FingerprintLockManager
                         ["operator"] = App.CurrentUser?.UserId ?? "system"
                     });
                 var result = await App.CommandService.SendAsync(_selectedDevice.DeviceId, message);
-                MessageBox.Show(result.Success
-                        ? $"柜子已确认 Lock {lockId} 开锁"
-                        : result.ErrorMessage,
-                    result.Success ? "开锁完成" : "开锁失败", MessageBoxButton.OK,
-                    result.Success ? MessageBoxImage.Information : MessageBoxImage.Error);
+                if (result.Success) AppToast.Success($"Lock {lockId} 已开锁");
+                else AppToast.Error(string.IsNullOrWhiteSpace(result.ErrorMessage)
+                    ? "开锁失败" : result.ErrorMessage);
             }
             finally
             {
@@ -387,21 +392,126 @@ namespace FingerprintLockManager
         {
             if (_selectedDevice == null) return;
             if (!EnsureDeviceOnline("录入副指纹")) return;
-            string? userId = (DeviceFpListGrid.SelectedItem as DeviceFingerprintInfo)?.UserId;
+            string? userId = (DeviceFpListGrid.SelectedItem as DeviceFingerprintInfo)?.UserId
+                ?? (BackupFpListGrid.SelectedItem as BackupFingerprintRow)?.UserId;
             var window = new BackupFingerprintWindow(_selectedDevice.DeviceId, userId)
             {
                 Owner = Window.GetWindow(this)
             };
             window.ShowDialog();
             _ = LoadDeviceFpListAsync(_selectedDevice.DeviceId);
+            _ = LoadBackupFingerprintListAsync();
+        }
+
+        private async void RefreshBackupListButton_Click(object sender, RoutedEventArgs e) =>
+            await LoadBackupFingerprintListAsync();
+
+        private async Task LoadBackupFingerprintListAsync(bool quiet = false)
+        {
+            if (_selectedDevice == null) return;
+            if (!quiet) BackupListStatusText.Text = "正在请求本机副指纹清单…";
+            if (!IsDeviceMeshOnline(_selectedDevice))
+            {
+                _backupFingerprints.Clear();
+                ApplyBackupList();
+                BackupListStatusText.Text = "柜子离线，无法读取副指纹清单";
+                return;
+            }
+
+            try
+            {
+                string? json = await App.CommandService.GetBackupFingerprintListAsync(
+                    _selectedDevice.DeviceId);
+                if (string.IsNullOrWhiteSpace(json))
+                {
+                    _backupFingerprints.Clear();
+                    ApplyBackupList();
+                    BackupListStatusText.Text = "未收到副指纹清单（超时或固件不支持）";
+                    return;
+                }
+
+                _backupFingerprints = ParseBackupList(json);
+                ApplyBackupList();
+                BackupListStatusText.Text = _backupFingerprints.Count == 0
+                    ? "本柜暂无副指纹 · 仅本机生效，不占其他柜槽位"
+                    : $"本机副指纹 {_backupFingerprints.Count} 条 · 不覆盖全局主指纹";
+            }
+            catch (Exception ex)
+            {
+                BackupListStatusText.Text = "读取副指纹失败：" + ex.Message;
+            }
+        }
+
+        private void ApplyBackupList()
+        {
+            if (BackupFpListGrid == null) return;
+            BackupFpListGrid.ItemsSource = _backupFingerprints.ToList();
+            BackupEmptyState.Visibility = _backupFingerprints.Count == 0
+                ? Visibility.Visible : Visibility.Collapsed;
+            BackupEmptyText.Text = "本柜暂无副指纹";
+            UpdateSelectionActions();
+        }
+
+        private List<BackupFingerprintRow> ParseBackupList(string json)
+        {
+            var rows = new List<BackupFingerprintRow>();
+            try
+            {
+                JToken root = JToken.Parse(json);
+                JArray? backups = root["backups"] as JArray
+                    ?? root["items"] as JArray
+                    ?? root as JArray;
+                if (backups == null) return rows;
+
+                Dictionary<string, User> users;
+                try
+                {
+                    users = App.UserService.GetVisibleUsers()
+                        .ToDictionary(u => u.UserId, StringComparer.OrdinalIgnoreCase);
+                }
+                catch
+                {
+                    users = new Dictionary<string, User>(StringComparer.OrdinalIgnoreCase);
+                }
+
+                foreach (JToken item in backups)
+                {
+                    string userId = item["user_id"]?.ToString()
+                        ?? item["userId"]?.ToString()
+                        ?? "";
+                    if (string.IsNullOrWhiteSpace(userId)) continue;
+                    int localId = item["local_fp_id"]?.Value<int?>()
+                        ?? item["fingerprint_id"]?.Value<int?>()
+                        ?? item["fp_id"]?.Value<int?>()
+                        ?? 0;
+                    users.TryGetValue(userId, out User? user);
+                    rows.Add(new BackupFingerprintRow
+                    {
+                        UserId = userId,
+                        UserName = user?.Name ?? userId,
+                        LocalFpId = localId > 0 ? localId.ToString() : "—",
+                        Note = "本机备用 · 不参与全局同步覆盖"
+                    });
+                }
+            }
+            catch
+            {
+                // keep empty
+            }
+            return rows.OrderBy(r => r.UserId, StringComparer.OrdinalIgnoreCase).ToList();
         }
 
         private async void DeleteBackupFpButton_Click(object sender, RoutedEventArgs e)
         {
-            if (!TryGetSelectedFingerprint(out var selected) || _selectedDevice == null) return;
+            if (_selectedDevice == null) return;
+            if (BackupFpListGrid.SelectedItem is not BackupFingerprintRow selected)
+            {
+                MessageBox.Show("请在「本机副指纹」列表中选择一条记录", "提示");
+                return;
+            }
             if (!EnsureDeviceOnline("删除副指纹")) return;
             if (MessageBox.Show(
-                    $"确认删除「{selected.UserName}」在当前柜子的副指纹？",
+                    $"确认删除「{selected.UserName}」在当前柜子的副指纹（槽 {selected.LocalFpId}）？",
                     "删除副指纹", MessageBoxButton.YesNo,
                     MessageBoxImage.Warning) != MessageBoxResult.Yes)
                 return;
@@ -410,10 +520,11 @@ namespace FingerprintLockManager
             try
             {
                 var result = await App.CommandService.DeleteBackupFingerprintAsync(
-                    _selectedDevice.DeviceId, selected.UserId!);
-                MessageBox.Show(result.Success ? "副指纹已删除" : result.ErrorMessage,
-                    result.Success ? "删除完成" : "删除失败", MessageBoxButton.OK,
-                    result.Success ? MessageBoxImage.Information : MessageBoxImage.Warning);
+                    _selectedDevice.DeviceId, selected.UserId);
+                if (result.Success) AppToast.Success("副指纹已删除");
+                else AppToast.Error(string.IsNullOrWhiteSpace(result.ErrorMessage)
+                    ? "删除副指纹失败" : result.ErrorMessage);
+                await LoadBackupFingerprintListAsync();
                 await LoadDeviceFpListAsync(_selectedDevice.DeviceId);
             }
             finally
@@ -423,6 +534,9 @@ namespace FingerprintLockManager
         }
 
         private void DeviceFpListGrid_SelectionChanged(object sender, SelectionChangedEventArgs e) =>
+            UpdateSelectionActions();
+
+        private void BackupFpListGrid_SelectionChanged(object sender, SelectionChangedEventArgs e) =>
             UpdateSelectionActions();
 
         private bool TryGetSelectedFingerprint(out DeviceFingerprintInfo selected)
@@ -457,11 +571,13 @@ namespace FingerprintLockManager
 
         private void UpdateSelectionActions()
         {
-            bool hasSelection = !_busy &&
+            bool hasMain = !_busy &&
                 DeviceFpListGrid?.SelectedItem is DeviceFingerprintInfo item &&
                 item.FingerprintId > 0 && !string.IsNullOrWhiteSpace(item.UserId);
-            if (DeleteSelectedFpButton != null) DeleteSelectedFpButton.IsEnabled = hasSelection;
-            if (DeleteBackupFpButton != null) DeleteBackupFpButton.IsEnabled = hasSelection;
+            bool hasBackup = !_busy &&
+                BackupFpListGrid?.SelectedItem is BackupFingerprintRow;
+            if (DeleteSelectedFpButton != null) DeleteSelectedFpButton.IsEnabled = hasMain;
+            if (DeleteBackupFpButton != null) DeleteBackupFpButton.IsEnabled = hasBackup;
         }
 
         private void SetBusy(bool busy, string? status = null)
@@ -474,9 +590,18 @@ namespace FingerprintLockManager
             EnrollFingerprintButton.IsEnabled = !busy;
             EnrollBackupFpButton.IsEnabled = !busy;
             RefreshFpListButton.IsEnabled = !busy;
+            RefreshBackupListButton.IsEnabled = !busy;
             LockSelectBox.IsEnabled = !busy;
             if (!string.IsNullOrWhiteSpace(status)) PageStatusText.Text = status;
             UpdateSelectionActions();
+        }
+
+        private sealed class BackupFingerprintRow
+        {
+            public string UserId { get; init; } = "";
+            public string UserName { get; init; } = "";
+            public string LocalFpId { get; init; } = "";
+            public string Note { get; init; } = "";
         }
     }
 }

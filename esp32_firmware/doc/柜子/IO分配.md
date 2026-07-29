@@ -1,18 +1,20 @@
 # 柜子节点 IO 分配（ESP32-S3）
 
-更新时间：2026-07-19  
+更新时间：2026-07-28  
 适用范围：`esp32_firmware/cabinet_node`  
-板型：ESP32-S3（工程按 N16R8；**主机口为 UART0，非 USB CDC**）
+板型：**ESP32-S3 N16R8**（16MB Flash + 8MB PSRAM；**主机维护口为 UART0，非 USB CDC**）
 
-本文以**实际 PCB 接线**为准。固件引脚定义见 `cabinet_node/src/config.h`。
+本文以**实际 PCB 接线**为准。固件引脚定义见 `cabinet_node/src/config.h`。  
+系统级组网说明见仓库 `doc/系统架构与组网说明.md`。
 
-芯片与根节点同为 ESP32-S3 核心板时：Flash/PSRAM、板级电源、UART0 默认脚位等可按根节点同类配置理解；  
+芯片与根节点同为 **N16R8**：Flash/PSRAM、板级电源等同类；  
 **外设 IO（指纹/按键/595）以本文为准，与根节点 TFT/SD 不同。**
 
-通信：
+通信（两种模式并存）：
 
-- **Mesh 模式（默认）**：组网找 Root + **同时常开 UART0 协议口**（与根节点 USB 同协议帧/波特率）
-- **Debug 模式**：仅 UART0，不组 Mesh；长按任意键 10s 切换
+- **Mesh 模式（默认，多柜）**：ESP-MESH 组网找 Root；**同时可常开 UART0 协议口**（与根节点 USB 同协议帧/波特率，便于旁路）
+- **Debug / 单柜 UART 模式**：仅 UART0 直连上位机，**不组 Mesh**；长按任意键约 10s 切换并重启  
+- 单柜控制协议与接 Root 相同，**不是** AP+TCP
 
 ---
 

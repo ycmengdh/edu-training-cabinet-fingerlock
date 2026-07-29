@@ -12,6 +12,7 @@ namespace FingerprintLockManager
     public partial class FingerprintTemplatePage : Page
     {
         private List<FingerprintTemplate> _allTemplates = new();
+        private readonly ListPager _pager = new(50);
 
         public FingerprintTemplatePage()
         {
@@ -20,15 +21,14 @@ namespace FingerprintLockManager
         }
 
         /// <summary>加载模板列表</summary>
-        private async Task LoadTemplatesAsync()
+        private async Task LoadTemplatesAsync(bool resetPage = true)
         {
+            if (resetPage) _pager.Reset();
             SetBusy(true, "正在读取指纹模板列表");
             try
             {
                 _allTemplates = await Task.Run(App.FingerprintTemplateService.GetAllTemplates);
-                TemplateDataGrid.ItemsSource = _allTemplates;
-                int unassigned = _allTemplates.Count(t => string.IsNullOrWhiteSpace(t.UserId));
-                SummaryText.Text = $"共 {_allTemplates.Count} 个模板，{unassigned} 个未关联用户";
+                ApplyTemplatePage();
                 PageStatusText.Text = App.SdStorageService.IsAvailable
                     ? "SD 卡可用，模板可上传到 SD 卡集中备份"
                     : "SD 不可用，模板仅保存在本地缓存";
@@ -43,10 +43,30 @@ namespace FingerprintLockManager
             }
         }
 
+        private void ApplyTemplatePage()
+        {
+            var page = _pager.Slice(_allTemplates);
+            TemplateDataGrid.ItemsSource = page;
+            _pager.BindChrome(PrevPageButton, NextPageButton, PageInfoText);
+            int unassigned = _allTemplates.Count(t => string.IsNullOrWhiteSpace(t.UserId));
+            SummaryText.Text =
+                $"{_pager.StatusText(page.Count)}，其中未关联用户 {unassigned} 个";
+        }
+
         /// <summary>刷新按钮</summary>
         private async void RefreshButton_Click(object sender, RoutedEventArgs e)
         {
-            await LoadTemplatesAsync();
+            await LoadTemplatesAsync(resetPage: false);
+        }
+
+        private void PrevPageButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_pager.Prev()) ApplyTemplatePage();
+        }
+
+        private void NextPageButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_pager.Next()) ApplyTemplatePage();
         }
 
         private void TestFingerprintButton_Click(object sender, RoutedEventArgs e)

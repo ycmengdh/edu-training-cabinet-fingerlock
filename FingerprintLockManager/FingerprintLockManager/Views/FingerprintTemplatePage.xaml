@@ -17,7 +17,8 @@
             </Grid.ColumnDefinitions>
             <StackPanel>
                 <TextBlock Text="指纹模板库" Style="{StaticResource TitleText}"/>
-                <TextBlock x:Name="PageStatusText" Text="采集后未分配的模板暂存于此，可批量下发到柜子"
+                <TextBlock x:Name="PageStatusText"
+                           Text="用户可存多枚指纹；下发到柜机时每柜每用户只占 1 个槽位（模块约 200 槽），在学生详情按柜选择当前指纹"
                            Style="{StaticResource PageStatusText}"/>
             </StackPanel>
             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Bottom">
@@ -96,11 +97,17 @@
             </DataGrid>
         </Border>
 
-        <Border Grid.Row="3" Style="{StaticResource ToolbarPanel}" Margin="0,12,0,0">
-            <StackPanel Orientation="Horizontal">
-                <TextBlock x:Name="SummaryText" Text="共 0 个模板，0 个未关联用户"
-                           Foreground="{StaticResource SubTextBrush}" FontSize="11"/>
+        <Grid Grid.Row="3" Margin="0,12,0,0">
+            <TextBlock x:Name="SummaryText" Text="共 0 个模板，0 个未关联用户"
+                       Foreground="{StaticResource SubTextBrush}" FontSize="11"
+                       VerticalAlignment="Center"/>
+            <StackPanel Style="{StaticResource PagerBar}" HorizontalAlignment="Right" Margin="0">
+                <Button x:Name="PrevPageButton" Style="{StaticResource SecondaryButton}" Content="上一页" Width="80"
+                        Click="PrevPageButton_Click"/>
+                <TextBlock x:Name="PageInfoText" Style="{StaticResource PagerInfoText}" Text="第 1 / 1 页"/>
+                <Button x:Name="NextPageButton" Style="{StaticResource SecondaryButton}" Content="下一页" Width="80"
+                        Click="NextPageButton_Click"/>
             </StackPanel>
-        </Border>
+        </Grid>
     </Grid>
 </Page>

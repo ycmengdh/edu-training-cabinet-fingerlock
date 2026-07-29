@@ -13,6 +13,8 @@ namespace FingerprintLockManager
     {
         /// <summary>当前选中的用户</summary>
         private User? _selectedUser;
+        private readonly ListPager _pager = new(40);
+        private List<User> _filteredUsers = new();
 
         public PermissionPage()
         {
@@ -21,20 +23,33 @@ namespace FingerprintLockManager
         }
 
         /// <summary>加载用户列表</summary>
-        private async Task LoadUsersAsync()
+        private async Task LoadUsersAsync(bool resetPage = true)
         {
+            if (resetPage) _pager.Reset();
+            string keyword = UserSearchBox?.Text?.Trim() ?? "";
             SetBusy(true, "正在读取根节点权限数据");
             try
             {
                 // V2.7：使用 GetVisibleUsers 实现教师数据范围隔离
-                var users = await Task.Run(App.UserService.GetVisibleUsers);
-                UserListBox.ItemsSource = users;
-                PageStatusText.Text = $"共 {users.Count} 个用户";
+                _filteredUsers = await Task.Run(() =>
+                {
+                    IEnumerable<User> users = App.UserService.GetVisibleUsers();
+                    if (!string.IsNullOrWhiteSpace(keyword))
+                    {
+                        users = users.Where(u =>
+                            (u.Name?.Contains(keyword, StringComparison.OrdinalIgnoreCase) ?? false) ||
+                            (u.UserId?.Contains(keyword, StringComparison.OrdinalIgnoreCase) ?? false));
+                    }
+                    return users.OrderBy(u => u.Role).ThenBy(u => u.Name).ToList();
+                });
+                ApplyUserPage();
             }
             catch (RootDataUnavailableException ex)
             {
+                _filteredUsers.Clear();
                 UserListBox.ItemsSource = null;
                 PageStatusText.Text = ex.Message;
+                _pager.BindChrome(PrevPageButton, NextPageButton, PageInfoText);
             }
             finally
             {
@@ -42,9 +57,33 @@ namespace FingerprintLockManager
             }
         }
 
+        private void ApplyUserPage()
+        {
+            var page = _pager.Slice(_filteredUsers);
+            UserListBox.ItemsSource = page;
+            _pager.BindChrome(PrevPageButton, NextPageButton, PageInfoText);
+            PageStatusText.Text = _pager.StatusText(page.Count);
+        }
+
         private async void RefreshButton_Click(object sender, RoutedEventArgs e)
         {
-            await LoadUsersAsync();
+            await LoadUsersAsync(resetPage: false);
+        }
+
+        private async void UserSearchBox_TextChanged(object sender, TextChangedEventArgs e)
+        {
+            if (!IsLoaded) return;
+            await LoadUsersAsync(resetPage: true);
+        }
+
+        private void PrevPageButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_pager.Prev()) ApplyUserPage();
+        }
+
+        private void NextPageButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_pager.Next()) ApplyUserPage();
         }
 
         /// <summary>用户列表选中变化：加载该用户权限</summary>

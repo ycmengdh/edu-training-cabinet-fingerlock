@@ -35,6 +35,17 @@ FROM cabinet_sync_queue ORDER BY update_time DESC";
             return jobs;
         }
 
+        /// <summary>未完成任务（pending/running/failed 待重试）。</summary>
+        public IReadOnlyList<CabinetSyncJob> GetOpen() =>
+            GetAll().Where(job => !string.Equals(job.State, "completed", StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(job => job.UpdateTime)
+                .ToList();
+
+        public int CountOpen() => GetOpen().Count;
+
+        public int CountFailed() => GetOpen().Count(job =>
+            string.Equals(job.State, "failed", StringComparison.OrdinalIgnoreCase));
+
         public CabinetSyncJob? GetUserJob(string userId, string deviceId) => GetAll()
             .FirstOrDefault(job => job.JobKind == "user" &&
                 string.Equals(job.UserId, userId, StringComparison.OrdinalIgnoreCase) &&

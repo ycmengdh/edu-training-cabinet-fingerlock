@@ -67,7 +67,7 @@
 
 // ===================== Flash 分区偏移 =====================
 // 离线日志使用自定义分区 logstore（见 common/partitions_16MB_log.csv）
-// 分区表结束于 0x800000，兼容 8MB/16MB 模组；logstore 固定在 0x7E0000。
+// 实物与工程统一为 ESP32-S3 N16R8（16MB Flash + 8MB PSRAM）；logstore 固定在 0x7E0000。
 // 权限与配置已迁移到 NVS，下列 PERM/CONFIG 偏移仅作历史参考，不再使用。
 // #define PERM_STORE_OFFSET       0x314000
 #define LOG_STORE_OFFSET        0x7E0000

@@ -86,12 +86,13 @@
                         <TextBlock Text="搜索" Style="{StaticResource LabelText}" Margin="0,0,7,0"/>
                         <TextBox x:Name="CabinetSearchBox" Width="210" Height="34"
                                  ToolTip="按设备编号、名称、MAC 或通讯 ID 搜索" TextChanged="CabinetFilter_Changed"/>
-                        <ComboBox x:Name="CabinetStatusFilter" Width="126" Height="34" Margin="10,0,0,0"
+                        <ComboBox x:Name="CabinetStatusFilter" Width="132" Height="34" Margin="10,0,0,0"
                                   SelectionChanged="CabinetFilter_Changed">
                             <ComboBoxItem Content="全部状态" Tag="all" IsSelected="True"/>
                             <ComboBoxItem Content="在线" Tag="online"/>
                             <ComboBoxItem Content="离线" Tag="offline"/>
                             <ComboBoxItem Content="权限落后" Tag="lagging"/>
+                            <ComboBoxItem Content="需要处理" Tag="attention"/>
                         </ComboBox>
                     </StackPanel>
                 </Grid>
@@ -102,6 +103,16 @@
                               KeyDown="CabinetDataGrid_KeyDown" EnableRowVirtualization="True">
                         <DataGrid.Resources>
                             <Style TargetType="TextBlock" BasedOn="{StaticResource DataGridTextBlockStyle}"/>
+                            <Style TargetType="DataGridRow" BasedOn="{StaticResource {x:Type DataGridRow}}">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding AttentionKind}" Value="lagging">
+                                        <Setter Property="Background" Value="{StaticResource DangerSurfaceBrush}"/>
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding AttentionKind}" Value="offline">
+                                        <Setter Property="Opacity" Value="0.78"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
                         </DataGrid.Resources>
                         <DataGrid.Columns>
                             <DataGridTemplateColumn Header="状态" Width="86">
@@ -116,6 +127,13 @@
                                                             <DataTrigger Binding="{Binding IsOnline}" Value="True">
                                                                 <Setter Property="Fill" Value="{StaticResource SuccessBrush}"/>
                                                             </DataTrigger>
+                                                            <MultiDataTrigger>
+                                                                <MultiDataTrigger.Conditions>
+                                                                    <Condition Binding="{Binding IsOnline}" Value="True"/>
+                                                                    <Condition Binding="{Binding PermissionSyncText}" Value="落后"/>
+                                                                </MultiDataTrigger.Conditions>
+                                                                <Setter Property="Fill" Value="{StaticResource WarningBrush}"/>
+                                                            </MultiDataTrigger>
                                                         </Style.Triggers>
                                                     </Style>
                                                 </Ellipse.Style>
@@ -125,19 +143,17 @@
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
                             </DataGridTemplateColumn>
-                            <DataGridTextColumn Header="柜子名称" Binding="{Binding DeviceName}" Width="1.2*" MinWidth="120"
+                            <DataGridTextColumn Header="设备编号" Binding="{Binding DeviceNumber}" Width="92"
                                                 ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                            <DataGridTextColumn Header="设备编号" Binding="{Binding DeviceNumber}" Width="100"
+                            <DataGridTextColumn Header="柜子名称" Binding="{Binding DeviceName}" Width="1.1*" MinWidth="110"
+                                                ElementStyle="{StaticResource DataGridLeftTextBlockStyle}"/>
+                            <DataGridTextColumn Header="通讯 ID" Binding="{Binding DeviceId}" Width="1.15*" MinWidth="120"
+                                                ElementStyle="{StaticResource DataGridLeftTextBlockStyle}"/>
+                            <DataGridTextColumn Header="指纹槽" Binding="{Binding FingerprintSlotHint}" Width="70"
                                                 ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                            <DataGridTextColumn Header="CAB MAC" Binding="{Binding MeshMac}" Width="132"
+                            <DataGridTextColumn Header="权限数" Binding="{Binding Status.PermissionCount}" Width="70"
                                                 ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                            <DataGridTextColumn Header="通讯 ID" Binding="{Binding DeviceId}" Width="1.2*" MinWidth="135"
-                                                ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                            <DataGridTextColumn Header="指纹数" Binding="{Binding Status.FingerprintCount}" Width="76"
-                                                ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                            <DataGridTextColumn Header="权限数" Binding="{Binding Status.PermissionCount}" Width="76"
-                                                ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                            <DataGridTemplateColumn Header="权限同步" Width="96">
+                            <DataGridTemplateColumn Header="权限同步" Width="88">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
                                         <TextBlock Text="{Binding PermissionSyncText}" HorizontalAlignment="Center" VerticalAlignment="Center">
@@ -153,6 +169,9 @@
                                                             <Setter Property="Foreground" Value="{StaticResource WarningBrush}"/>
                                                             <Setter Property="FontWeight" Value="SemiBold"/>
                                                         </DataTrigger>
+                                                        <DataTrigger Binding="{Binding PermissionSyncText}" Value="离线">
+                                                            <Setter Property="Foreground" Value="{StaticResource DangerBrush}"/>
+                                                        </DataTrigger>
                                                     </Style.Triggers>
                                                 </Style>
                                             </TextBlock.Style>
@@ -160,18 +179,22 @@
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
                             </DataGridTemplateColumn>
-                            <DataGridTextColumn Header="权限版本" Binding="{Binding Status.PermissionVersion}" Width="86"
+                            <DataGridTextColumn Header="版本" Binding="{Binding Status.PermissionVersion}" Width="72"
                                                 ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                            <DataGridTextColumn Header="最后在线" Binding="{Binding LastSeenTime, StringFormat={}{0:MM-dd HH:mm:ss}}" Width="132"
+                            <DataGridTextColumn Header="最后在线" Binding="{Binding LastSeenTime, StringFormat={}{0:MM-dd HH:mm}}" Width="100"
                                                 ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                            <DataGridTemplateColumn Header="操作" Width="104">
+                            <DataGridTemplateColumn Header="操作" Width="168">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
                                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                            <Button Tag="{Binding}" Click="SyncOneButton_Click"
+                                                    Style="{StaticResource IconButton}" Content="&#xE895;"
+                                                    ToolTip="同步本柜指纹与权限（每用户一槽）" Width="30" MinWidth="30"
+                                                    Height="30" MinHeight="30" Margin="0,0,4,0"/>
                                             <Button Tag="{Binding}" Click="EditDeviceButton_Click"
                                                     Style="{StaticResource IconButton}" Content="&#xE70F;"
                                                     ToolTip="修改柜子名称和编号" Width="30" MinWidth="30"
-                                                    Height="30" MinHeight="30" Margin="0,0,6,0"/>
+                                                    Height="30" MinHeight="30" Margin="0,0,4,0"/>
                                             <Button Tag="{Binding}" Click="OpenDetailButton_Click"
                                                     Style="{StaticResource IconButton}" Content="&#xE76C;"
                                                     ToolTip="打开柜子详情" Width="30" MinWidth="30"

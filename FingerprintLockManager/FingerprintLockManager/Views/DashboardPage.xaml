@@ -68,12 +68,13 @@
                 </Grid>
             </Border>
 
-            <Border Grid.Column="6" Style="{StaticResource StatusMetric}">
+            <Border Grid.Column="6" Style="{StaticResource StatusMetric}" Cursor="Hand"
+                    MouseLeftButtonUp="PendingSyncMetric_Click" ToolTip="点击查看待同步队列">
                 <Grid>
                     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                    <TextBlock x:Name="StorageMetricLabel" Text="根节点存储" Style="{StaticResource LabelText}"/>
-                    <TextBlock x:Name="StorageValueText" Grid.Row="1" Text="-" Style="{StaticResource MetricValueText}" Margin="0,8,0,4"/>
-                    <TextBlock x:Name="StorageDetailText" Grid.Row="2" Text="等待 SD 信息" Foreground="{StaticResource SubTextBrush}" FontSize="10"/>
+                    <TextBlock x:Name="PendingSyncMetricLabel" Text="待同步" Style="{StaticResource LabelText}"/>
+                    <TextBlock x:Name="PendingSyncValueText" Grid.Row="1" Text="0" Style="{StaticResource MetricValueText}" Margin="0,8,0,4"/>
+                    <TextBlock x:Name="PendingSyncDetailText" Grid.Row="2" Text="柜机队列空闲" Foreground="{StaticResource SubTextBrush}" FontSize="10"/>
                 </Grid>
             </Border>
 
@@ -105,7 +106,9 @@
                         </Grid>
                     </Border>
                     <DataGrid x:Name="AlertDataGrid" Grid.Row="1" BorderThickness="0" IsReadOnly="True"
-                              SelectionMode="Single" RowHeight="48">
+                              SelectionMode="Single" RowHeight="48"
+                              MouseDoubleClick="AlertDataGrid_MouseDoubleClick"
+                              ToolTip="双击柜子相关告警可打开详情">
                         <DataGrid.Resources>
                             <Style TargetType="TextBlock" BasedOn="{StaticResource DataGridTextBlockStyle}"/>
                         </DataGrid.Resources>
@@ -143,33 +146,67 @@
                 </Grid>
             </Border>
 
-            <Border Grid.Column="2" Style="{StaticResource Panel}">
-                <Grid>
-                    <Grid.RowDefinitions><RowDefinition Height="46"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-                    <Border Padding="14,0">
-                        <Grid>
-                            <TextBlock Text="最近开锁" Style="{StaticResource SectionTitleText}" VerticalAlignment="Center"/>
-                            <TextBlock x:Name="PendingLogText" Text="待传 0" HorizontalAlignment="Right" VerticalAlignment="Center"
-                                       Foreground="{StaticResource SubTextBrush}" FontSize="11"/>
-                        </Grid>
-                    </Border>
-                    <DataGrid x:Name="RecentLogDataGrid" Grid.Row="1" BorderThickness="0" IsReadOnly="True" SelectionMode="Single">
-                        <DataGrid.Resources>
-                            <Style TargetType="TextBlock" BasedOn="{StaticResource DataGridTextBlockStyle}"/>
-                        </DataGrid.Resources>
-                        <DataGrid.Columns>
-                            <DataGridTextColumn Header="时间" Binding="{Binding CreateTime, StringFormat=MM-dd HH:mm}" Width="88"
-                                                ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                            <DataGridTextColumn Header="柜子" Binding="{Binding DeviceId}" Width="100"
-                                                ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                            <DataGridTextColumn Header="用户" Binding="{Binding UserId}" Width="*"
-                                                ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                            <DataGridTextColumn Header="结果" Binding="{Binding Result}" Width="62"
-                                                ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                        </DataGrid.Columns>
-                    </DataGrid>
-                </Grid>
-            </Border>
+            <Grid Grid.Column="2">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="1.05*"/>
+                    <RowDefinition Height="12"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <Border Grid.Row="0" Style="{StaticResource Panel}">
+                    <Grid>
+                        <Grid.RowDefinitions><RowDefinition Height="40"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                        <Border Padding="14,0">
+                            <Grid>
+                                <TextBlock Text="实时柜机" Style="{StaticResource SectionTitleText}" VerticalAlignment="Center"/>
+                                <TextBlock x:Name="LiveEventCountText" Text="0 条" HorizontalAlignment="Right" VerticalAlignment="Center"
+                                           Foreground="{StaticResource SubTextBrush}" FontSize="11"/>
+                            </Grid>
+                        </Border>
+                        <DataGrid x:Name="LiveEventDataGrid" Grid.Row="1" BorderThickness="0" IsReadOnly="True"
+                                  SelectionMode="Single" HeadersVisibility="None"
+                                  MouseDoubleClick="LiveEventDataGrid_MouseDoubleClick"
+                                  ToolTip="双击可打开对应柜子">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Binding="{Binding TimeText}" Width="52"
+                                                    ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                                <DataGridTextColumn Binding="{Binding DeviceText}" Width="88"
+                                                    ElementStyle="{StaticResource DataGridLeftTextBlockStyle}"/>
+                                <DataGridTextColumn Binding="{Binding Summary}" Width="*"
+                                                    ElementStyle="{StaticResource DataGridLeftTextBlockStyle}"/>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </Grid>
+                </Border>
+
+                <Border Grid.Row="2" Style="{StaticResource Panel}">
+                    <Grid>
+                        <Grid.RowDefinitions><RowDefinition Height="40"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                        <Border Padding="14,0">
+                            <Grid>
+                                <TextBlock Text="最近开锁" Style="{StaticResource SectionTitleText}" VerticalAlignment="Center"/>
+                                <TextBlock x:Name="PendingLogText" Text="待传 0" HorizontalAlignment="Right" VerticalAlignment="Center"
+                                           Foreground="{StaticResource SubTextBrush}" FontSize="11"/>
+                            </Grid>
+                        </Border>
+                        <DataGrid x:Name="RecentLogDataGrid" Grid.Row="1" BorderThickness="0" IsReadOnly="True" SelectionMode="Single">
+                            <DataGrid.Resources>
+                                <Style TargetType="TextBlock" BasedOn="{StaticResource DataGridTextBlockStyle}"/>
+                            </DataGrid.Resources>
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="时间" Binding="{Binding CreateTime, StringFormat=MM-dd HH:mm}" Width="72"
+                                                    ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                                <DataGridTextColumn Header="柜子" Binding="{Binding DeviceId}" Width="80"
+                                                    ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                                <DataGridTextColumn Header="用户" Binding="{Binding UserId}" Width="*"
+                                                    ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                                <DataGridTextColumn Header="结果" Binding="{Binding Result}" Width="52"
+                                                    ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </Grid>
+                </Border>
+            </Grid>
         </Grid>
 
         <TextBlock x:Name="RefreshTimeText" Grid.Row="3" HorizontalAlignment="Right"

@@ -6,25 +6,30 @@ namespace FingerprintLockManager
 {
     public partial class TeacherManagePage : Page
     {
+        private readonly ListPager _pager = new(30);
+        private List<User> _teachers = new();
+
         public TeacherManagePage()
         {
             InitializeComponent();
             Loaded += async (_, _) => await LoadTeachersAsync();
         }
 
-        private async Task LoadTeachersAsync()
+        private async Task LoadTeachersAsync(bool resetPage = true)
         {
+            if (resetPage) _pager.Reset();
             SetBusy(true, "正在读取老师账号");
             try
             {
-                var teachers = await Task.Run(() => App.UserService.GetUsersByRole("teacher"));
-                TeacherDataGrid.ItemsSource = teachers;
-                PageStatusText.Text = $"共 {teachers.Count} 位老师，负责班级可在此调整";
+                _teachers = await Task.Run(() => App.UserService.GetUsersByRole("teacher"));
+                ApplyTeacherPage();
             }
             catch (RootDataUnavailableException ex)
             {
+                _teachers.Clear();
                 TeacherDataGrid.ItemsSource = null;
                 PageStatusText.Text = ex.Message;
+                _pager.BindChrome(PrevPageButton, NextPageButton, PageInfoText);
             }
             finally
             {
@@ -32,7 +37,26 @@ namespace FingerprintLockManager
             }
         }
 
-        private async void RefreshButton_Click(object sender, RoutedEventArgs e) => await LoadTeachersAsync();
+        private void ApplyTeacherPage()
+        {
+            var page = _pager.Slice(_teachers);
+            TeacherDataGrid.ItemsSource = page;
+            _pager.BindChrome(PrevPageButton, NextPageButton, PageInfoText);
+            PageStatusText.Text = _pager.StatusText(page.Count) + " · 负责班级可在此调整";
+        }
+
+        private async void RefreshButton_Click(object sender, RoutedEventArgs e) =>
+            await LoadTeachersAsync(resetPage: false);
+
+        private void PrevPageButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_pager.Prev()) ApplyTeacherPage();
+        }
+
+        private void NextPageButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_pager.Next()) ApplyTeacherPage();
+        }
 
         private void FingerprintSyncButton_Click(object sender, RoutedEventArgs e)
         {

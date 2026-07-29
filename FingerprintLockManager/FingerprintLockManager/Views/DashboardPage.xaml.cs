@@ -1,12 +1,17 @@
+using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Threading;
+// MouseButtonEventArgs via System.Windows.Input
 
 namespace FingerprintLockManager
 {
     public partial class DashboardPage : Page
     {
+        private const int MaxLiveEvents = 40;
         private readonly DispatcherTimer _refreshTimer;
+        private readonly ObservableCollection<LiveCabinetEventRow> _liveEvents = new();
         private bool _loading;
 
         private bool IsDirectUart => string.Equals(ConfigHelper.Current.LinkMode, "Uart",
@@ -15,8 +20,9 @@ namespace FingerprintLockManager
         public DashboardPage()
         {
             InitializeComponent();
-            _refreshTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(30) };
+            _refreshTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(8) };
             _refreshTimer.Tick += async (_, _) => await LoadSnapshotAsync();
+            LiveEventDataGrid.ItemsSource = _liveEvents;
             Loaded += OnLoaded;
             Unloaded += OnUnloaded;
         }
@@ -25,7 +31,10 @@ namespace FingerprintLockManager
         {
             App.MeshBridge.ConnectionChanged += OnConnectionChanged;
             App.MessageHandler.OnStatusResponse += OnStatusResponse;
+            App.MessageHandler.OnVerifyWindowEvent += OnVerifyWindowEvent;
+            App.MessageHandler.OnDeviceRegistered += OnDeviceRegistered;
             _refreshTimer.Start();
+            RefreshLiveEventCount();
             await LoadSnapshotAsync();
         }
 
@@ -34,6 +43,8 @@ namespace FingerprintLockManager
             _refreshTimer.Stop();
             App.MeshBridge.ConnectionChanged -= OnConnectionChanged;
             App.MessageHandler.OnStatusResponse -= OnStatusResponse;
+            App.MessageHandler.OnVerifyWindowEvent -= OnVerifyWindowEvent;
+            App.MessageHandler.OnDeviceRegistered -= OnDeviceRegistered;
         }
 
         private void OnConnectionChanged(bool connected) =>
@@ -45,8 +56,95 @@ namespace FingerprintLockManager
             Dispatcher.BeginInvoke(new Action(ApplyDirectSnapshot));
         }
 
+        private void OnVerifyWindowEvent(string deviceId, string evt, string userId, int lockId)
+        {
+            string summary = evt?.ToLowerInvariant() switch
+            {
+                "enter" => string.IsNullOrWhiteSpace(userId)
+                    ? "验证窗口开始"
+                    : $"验证通过 · {userId}",
+                "unlocked" => lockId >= 0 ? $"开锁 L{lockId}" : "开锁",
+                "timeout" => "验证超时",
+                "cancel" => "取消验证",
+                _ => string.IsNullOrWhiteSpace(evt) ? "柜机事件" : evt
+            };
+            PushLiveEvent(deviceId, summary);
+        }
+
+        private void OnDeviceRegistered(string deviceId, string deviceName) =>
+            PushLiveEvent(deviceId, string.IsNullOrWhiteSpace(deviceName) ? "上线注册" : $"上线 · {deviceName}");
+
+        private void PushLiveEvent(string deviceId, string summary)
+        {
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.BeginInvoke(new Action(() => PushLiveEvent(deviceId, summary)));
+                return;
+            }
+
+            _liveEvents.Insert(0, new LiveCabinetEventRow
+            {
+                TimeText = DateTime.Now.ToString("HH:mm:ss"),
+                DeviceId = deviceId ?? "",
+                DeviceText = CompactDevice(deviceId),
+                Summary = summary
+            });
+            while (_liveEvents.Count > MaxLiveEvents)
+                _liveEvents.RemoveAt(_liveEvents.Count - 1);
+            RefreshLiveEventCount();
+        }
+
+        private void RefreshLiveEventCount() =>
+            LiveEventCountText.Text = _liveEvents.Count == 0 ? "暂无" : $"{_liveEvents.Count} 条";
+
+        private static string CompactDevice(string? deviceId)
+        {
+            if (string.IsNullOrWhiteSpace(deviceId)) return "—";
+            string value = deviceId.Replace("CABINET_", "C", StringComparison.OrdinalIgnoreCase)
+                .Replace("CAB_", "C", StringComparison.OrdinalIgnoreCase);
+            return value.Length <= 12 ? value : value[^12..];
+        }
+
         private async void RefreshButton_Click(object sender, RoutedEventArgs e) =>
             await LoadSnapshotAsync();
+
+        private void PendingSyncMetric_Click(object sender, MouseButtonEventArgs e)
+        {
+            Window? owner = Window.GetWindow(this);
+            var window = new SyncQueueWindow();
+            if (owner != null) window.Owner = owner;
+            window.ShowDialog();
+            PopulatePendingSyncMetric();
+        }
+
+        private void AlertDataGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+        {
+            if (AlertDataGrid.SelectedItem is not SystemAlert alert) return;
+            if (string.IsNullOrWhiteSpace(alert.DeviceId))
+            {
+                AppToast.Info(string.IsNullOrWhiteSpace(alert.ActionHint)
+                    ? "系统级告警，请按建议处理"
+                    : alert.ActionHint);
+                if (alert.Source.Contains("Mesh", StringComparison.OrdinalIgnoreCase) ||
+                    alert.Message.Contains("尚未发现", StringComparison.OrdinalIgnoreCase))
+                {
+                    (Window.GetWindow(this) as MainWindow)?.NavigateToCabinetList();
+                }
+                return;
+            }
+            (Window.GetWindow(this) as MainWindow)?.NavigateToCabinetDetail(alert.DeviceId);
+        }
+
+        private void LiveEventDataGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+        {
+            if (LiveEventDataGrid.SelectedItem is not LiveCabinetEventRow row) return;
+            if (string.IsNullOrWhiteSpace(row.DeviceId))
+            {
+                AppToast.Info("该事件未关联具体柜子");
+                return;
+            }
+            (Window.GetWindow(this) as MainWindow)?.NavigateToCabinetDetail(row.DeviceId);
+        }
 
         private async Task LoadSnapshotAsync()
         {
@@ -55,6 +153,7 @@ namespace FingerprintLockManager
             RefreshButton.IsEnabled = false;
             PageStatusText.Text = "正在读取根节点运行状态";
             UpdateLinkMetric();
+            PopulatePendingSyncMetric();
             try
             {
                 if (IsDirectUart)
@@ -79,7 +178,7 @@ namespace FingerprintLockManager
                     ? $"发现 {snapshot.CriticalCount} 项异常，需要处理"
                     : snapshot.WarningCount > 0
                         ? $"系统可用，有 {snapshot.WarningCount} 项需要关注"
-                        : "系统运行状态正常";
+                        : "系统运行状态正常 · 每柜每用户仅一枚指纹槽";
             }
             catch (RootDataUnavailableException ex)
             {
@@ -100,13 +199,9 @@ namespace FingerprintLockManager
                 ? "尚未发现柜子"
                 : $"离线 {snapshot.Devices.Count - snapshot.OnlineCount}";
             SyncValueText.Text = $"{snapshot.SynchronizedCount} / {snapshot.Devices.Count}";
-            SyncDetailText.Text = $"根节点权限版本 {snapshot.Version.GlobalVersion}";
-            StorageValueText.Text = snapshot.Version.SdTotalBytes == 0
-                ? "-"
-                : $"{snapshot.SdUsagePercent:F0}%";
-            StorageDetailText.Text = snapshot.Version.SdTotalBytes == 0
-                ? "未读取到容量"
-                : $"{FormatBytes(snapshot.Version.SdUsedBytes)} / {FormatBytes(snapshot.Version.SdTotalBytes)}";
+            SyncDetailText.Text = snapshot.Version.SdTotalBytes == 0
+                ? $"权限版本 {snapshot.Version.GlobalVersion}"
+                : $"SD {snapshot.SdUsagePercent:F0}% · v{snapshot.Version.GlobalVersion}";
             AlertDataGrid.ItemsSource = snapshot.Alerts;
             AlertCountText.Text = snapshot.Alerts.Count == 0
                 ? "无告警"
@@ -114,9 +209,8 @@ namespace FingerprintLockManager
             RecentLogDataGrid.ItemsSource = snapshot.RecentLogs;
             PendingLogText.Text = $"待传 {snapshot.PendingLogCount}";
             RefreshTimeText.Text = $"最近刷新 {snapshot.RefreshedAt:yyyy-MM-dd HH:mm:ss}";
-
-            // V2.7：学生绑定设备统计（已分配权限的学生数 / 总学生数）
             PopulateStudentBindMetric();
+            PopulatePendingSyncMetric();
         }
 
         private void ApplyDirectSnapshot()
@@ -128,7 +222,7 @@ namespace FingerprintLockManager
             LinkMetricLabel.Text = "柜机直连";
             DeviceMetricLabel.Text = "当前柜机";
             SyncMetricLabel.Text = "权限记录";
-            StorageMetricLabel.Text = "指纹数量";
+            PendingSyncMetricLabel.Text = "指纹槽位";
             StudentBindMetricLabel.Text = "柜门状态";
 
             LinkStatusDot.Fill = FindResource(connected ? "SuccessBrush" : "DangerBrush")
@@ -145,15 +239,17 @@ namespace FingerprintLockManager
                     ? cabinet.DeviceId
                     : $"{cabinet.DeviceName} · {cabinet.DeviceId}";
             SyncValueText.Text = status.PermissionCount.ToString();
-            SyncDetailText.Text = $"权限版本 {status.PermissionVersion}";
-            StorageValueText.Text = status.FingerprintCount.ToString();
-            StorageDetailText.Text = "柜机内已录入指纹";
+            SyncDetailText.Text = $"权限版本 {status.PermissionVersion} · 一人一槽";
+            PendingSyncValueText.Text = status.FingerprintCount.ToString();
+            PendingSyncDetailText.Text = status.FingerprintCount >= 180
+                ? "接近 200 上限，请精简"
+                : "本机已用槽位";
 
             int openLocks = status.LockStatus?.Count(value => value != 0) ?? 0;
             StudentBindValueText.Text = openLocks == 0 ? "全部关闭" : $"{openLocks} 路开启";
             StudentBindDetailText.Text = $"运行时间 {status.UptimeText}";
             PageStatusText.Text = connected
-                ? $"已直连 {cabinet?.DeviceId} · 应急维护模式"
+                ? $"已直连 {cabinet?.DeviceId} · 应急维护 · 每用户一枚指纹"
                 : "柜机串口直连已断开";
 
             AlertDataGrid.ItemsSource = null;
@@ -179,14 +275,30 @@ namespace FingerprintLockManager
             LinkMetricLabel.Text = "根节点链路";
             DeviceMetricLabel.Text = "柜子在线";
             SyncMetricLabel.Text = "权限一致";
-            StorageMetricLabel.Text = "根节点存储";
+            PendingSyncMetricLabel.Text = "待同步";
             StudentBindMetricLabel.Text = "学生绑定";
         }
 
-        /// <summary>
-        /// V2.7：统计已分配权限覆盖的学生数与总学生数。
-        /// 教师仅统计本班学生（数据范围隔离）。
-        /// </summary>
+        private void PopulatePendingSyncMetric()
+        {
+            try
+            {
+                int open = App.CabinetSyncQueueService.CountOpen();
+                int failed = App.CabinetSyncQueueService.CountFailed();
+                PendingSyncValueText.Text = open.ToString();
+                PendingSyncDetailText.Text = open == 0
+                    ? "队列空闲 · 点此查看"
+                    : failed > 0
+                        ? $"失败 {failed} · 点此处理"
+                        : "等待下发 · 点此查看";
+            }
+            catch
+            {
+                PendingSyncValueText.Text = "-";
+                PendingSyncDetailText.Text = "队列不可用";
+            }
+        }
+
         private void PopulateStudentBindMetric()
         {
             try
@@ -213,8 +325,8 @@ namespace FingerprintLockManager
             DeviceDetailText.Text = "根节点不可用";
             SyncValueText.Text = "-";
             SyncDetailText.Text = "等待版本信息";
-            StorageValueText.Text = "-";
-            StorageDetailText.Text = "等待 SD 信息";
+            PendingSyncValueText.Text = "-";
+            PendingSyncDetailText.Text = "根节点不可用";
             StudentBindValueText.Text = "-";
             StudentBindDetailText.Text = "根节点不可用";
             AlertDataGrid.ItemsSource = null;
@@ -222,6 +334,7 @@ namespace FingerprintLockManager
             AlertCountText.Text = "无法读取";
             PendingLogText.Text = "待传 -";
             RefreshTimeText.Text = "";
+            PopulatePendingSyncMetric();
         }
 
         private void UpdateLinkMetric()
@@ -242,8 +355,20 @@ namespace FingerprintLockManager
             };
         }
 
-        private static string FormatBytes(ulong bytes) => bytes >= 1024UL * 1024 * 1024
-            ? $"{bytes / 1024d / 1024 / 1024:F1} GB"
-            : $"{bytes / 1024d / 1024:F0} MB";
+        private static string FormatBytes(ulong bytes)
+        {
+            if (bytes < 1024) return $"{bytes} B";
+            if (bytes < 1024 * 1024) return $"{bytes / 1024.0:F1} KB";
+            if (bytes < 1024UL * 1024 * 1024) return $"{bytes / (1024.0 * 1024):F1} MB";
+            return $"{bytes / (1024.0 * 1024 * 1024):F1} GB";
+        }
+
+        private sealed class LiveCabinetEventRow
+        {
+            public string TimeText { get; init; } = "";
+            public string DeviceId { get; init; } = "";
+            public string DeviceText { get; init; } = "";
+            public string Summary { get; init; } = "";
+        }
     }
 }

@@ -6,6 +6,7 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
         <Grid Grid.Row="0" Margin="0,0,0,16">
@@ -52,5 +53,13 @@
                 </DataGrid.Columns>
             </DataGrid>
         </Border>
+
+        <StackPanel Grid.Row="2" Style="{StaticResource PagerBar}">
+            <Button x:Name="PrevPageButton" Style="{StaticResource SecondaryButton}" Content="上一页" Width="80"
+                    Click="PrevPageButton_Click"/>
+            <TextBlock x:Name="PageInfoText" Style="{StaticResource PagerInfoText}" Text="第 1 / 1 页"/>
+            <Button x:Name="NextPageButton" Style="{StaticResource SecondaryButton}" Content="下一页" Width="80"
+                    Click="NextPageButton_Click"/>
+        </StackPanel>
     </Grid>
 </Page>

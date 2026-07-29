@@ -45,14 +45,16 @@ namespace FingerprintLockManager
                 string source = string.IsNullOrWhiteSpace(device.DeviceName)
                     ? device.DeviceId
                     : device.DeviceName;
+                string deviceId = device.DeviceId ?? string.Empty;
                 if (!device.IsOnline)
                 {
                     alerts.Add(new SystemAlert
                     {
                         Severity = SystemAlertSeverity.Critical,
                         Source = source,
+                        DeviceId = deviceId,
                         Message = "柜子离线",
-                        ActionHint = "检查供电、天线和 Mesh 路由"
+                        ActionHint = "双击打开柜子详情 · 检查供电与 Mesh"
                     });
                     continue;
                 }
@@ -64,8 +66,9 @@ namespace FingerprintLockManager
                     {
                         Severity = SystemAlertSeverity.Critical,
                         Source = source,
+                        DeviceId = deviceId,
                         Message = "状态数据超过 3 分钟未更新",
-                        ActionHint = "刷新设备并检查心跳"
+                        ActionHint = "双击打开柜子 · 检查心跳"
                     });
                 }
                 if (!device.Status.TimeSynced)
@@ -74,8 +77,9 @@ namespace FingerprintLockManager
                     {
                         Severity = SystemAlertSeverity.Warning,
                         Source = source,
+                        DeviceId = deviceId,
                         Message = "设备时间尚未同步",
-                        ActionHint = "检查根节点与上位机连接"
+                        ActionHint = "双击打开柜子 · 检查链路"
                     });
                 }
                 if (device.Status.PermissionVersion != version.GlobalVersion)
@@ -84,8 +88,9 @@ namespace FingerprintLockManager
                     {
                         Severity = SystemAlertSeverity.Warning,
                         Source = source,
+                        DeviceId = deviceId,
                         Message = $"权限版本 {device.Status.PermissionVersion}，根节点版本 {version.GlobalVersion}",
-                        ActionHint = "重新执行权限同步"
+                        ActionHint = "双击打开柜子并同步权限"
                     });
                 }
                 if (device.Status.PendingLogCount > 0)
@@ -96,8 +101,9 @@ namespace FingerprintLockManager
                             ? SystemAlertSeverity.Warning
                             : SystemAlertSeverity.Info,
                         Source = source,
+                        DeviceId = deviceId,
                         Message = $"有 {device.Status.PendingLogCount} 条日志等待上报",
-                        ActionHint = "保持设备在线并观察队列是否下降"
+                        ActionHint = "保持在线，双击可查看柜子"
                     });
                 }
             }

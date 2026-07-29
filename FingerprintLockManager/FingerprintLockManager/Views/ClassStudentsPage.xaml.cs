@@ -10,6 +10,7 @@ namespace FingerprintLockManager
         private readonly string _classId;
         private readonly string _className;
         private List<ClassStudentRow> _rows = new();
+        private readonly ListPager _studentPager = new(50);
         private bool _busy;
 
         public ClassStudentsPage(string classId, string className)
@@ -23,14 +24,15 @@ namespace FingerprintLockManager
             Loaded += async (_, _) => await LoadAsync();
         }
 
-        private async Task LoadAsync()
+        private async Task LoadAsync(bool resetStudentPage = true)
         {
+            if (resetStudentPage) _studentPager.Reset();
             SetBusy(true, "正在读取学生、柜子和指纹数据");
             try
             {
                 ClassWorkspaceSnapshot workspace = await Task.Run(BuildWorkspace);
                 _rows = workspace.Students;
-                StudentDataGrid.ItemsSource = _rows;
+                ApplyStudentPage();
                 CabinetOverviewGrid.ItemsSource = workspace.Cabinets;
                 SyncStatusGrid.ItemsSource = workspace.SyncRows;
                 StudentCountText.Text = _rows.Count.ToString();
@@ -46,7 +48,9 @@ namespace FingerprintLockManager
                 TeacherText.Text = teachers.Count == 0
                     ? "老师：未分配"
                     : "老师：" + string.Join("、", teachers);
-                PageStatusText.Text = $"共 {_rows.Count} 名学生 · 可使用 {_rows.Count(row => row.IsReady)} · 待处理 {_rows.Count(row => !row.IsReady)}";
+                int pageCount = (StudentDataGrid.ItemsSource as System.Collections.ICollection)?.Count ?? 0;
+                PageStatusText.Text =
+                    $"{_studentPager.StatusText(pageCount)} · 可使用 {_rows.Count(row => row.IsReady)} · 待处理 {_rows.Count(row => !row.IsReady)}";
             }
             catch (RootDataUnavailableException ex)
             {
@@ -62,6 +66,23 @@ namespace FingerprintLockManager
             {
                 SetBusy(false);
             }
+        }
+
+        private void ApplyStudentPage()
+        {
+            var page = _studentPager.Slice(_rows);
+            StudentDataGrid.ItemsSource = page;
+            _studentPager.BindChrome(StudentPrevPageButton, StudentNextPageButton, StudentPageInfoText);
+        }
+
+        private void StudentPrevPageButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_studentPager.Prev()) ApplyStudentPage();
+        }
+
+        private void StudentNextPageButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_studentPager.Next()) ApplyStudentPage();
         }
 
         private ClassWorkspaceSnapshot BuildWorkspace()

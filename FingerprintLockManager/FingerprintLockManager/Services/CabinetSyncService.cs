@@ -445,26 +445,35 @@ namespace FingerprintLockManager
             return permissions;
         }
 
+        /// <summary>
+        /// 生成单柜权限行：每个用户在该柜最多一枚指纹（AS608 约 200 槽，按人占槽）。
+        /// 学生仅分配到该柜才下发；老师/管理员用其默认主指纹。
+        /// </summary>
         private static List<Dictionary<string, object>> BuildRowsForDevice(
             IEnumerable<Dictionary<string, object>> rows, string deviceId)
         {
             Dictionary<string, User> users = App.UserService.GetAllUsers()
                 .ToDictionary(user => user.UserId, StringComparer.OrdinalIgnoreCase);
             List<FingerprintTemplate> templates = BusinessDatabase.ReadAllFpTemplateMetas();
-            var result = new List<Dictionary<string, object>>();
+            // user_id → 唯一一行，防止同一用户多指纹模板被重复下发占槽
+            var byUser = new Dictionary<string, Dictionary<string, object>>(
+                StringComparer.OrdinalIgnoreCase);
             foreach (Dictionary<string, object> row in rows)
             {
                 string userId = row["user_id"]?.ToString() ?? "";
-                if (!users.TryGetValue(userId, out User? user)) continue;
+                if (string.IsNullOrWhiteSpace(userId) || !users.TryGetValue(userId, out User? user))
+                    continue;
                 int? fingerprintId = App.CabinetBindingService.GetActiveFingerprintId(
                     user, deviceId, templates);
                 if (!fingerprintId.HasValue) continue;
-                result.Add(new Dictionary<string, object>(row)
+                byUser[userId] = new Dictionary<string, object>(row)
                 {
                     ["fingerprint_id"] = fingerprintId.Value
-                });
+                };
             }
-            return result;
+            return byUser.Values
+                .OrderBy(row => row["user_id"]?.ToString() ?? "", StringComparer.OrdinalIgnoreCase)
+                .ToList();
         }
 
         /// <summary>

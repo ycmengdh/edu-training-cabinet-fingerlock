@@ -85,8 +85,37 @@ namespace FingerprintLockManager
             }
         }
 
+        /// <summary>列表筛选/着色：offline / lagging / ok / unknown</summary>
+        [JsonIgnore]
+        public string AttentionKind
+        {
+            get
+            {
+                if (!IsOnline) return "offline";
+                if (PermissionSyncText == "落后") return "lagging";
+                if (PermissionSyncText == "已同步") return "ok";
+                return "unknown";
+            }
+        }
+
+        [JsonIgnore]
+        public bool NeedsAttention => AttentionKind is "offline" or "lagging";
+
         [JsonIgnore]
         public string TimeSyncedText => Status.TimeSynced ? "是" : "否";
+
+        /// <summary>指纹槽占用提示（模块约 200）。</summary>
+        [JsonIgnore]
+        public string FingerprintSlotHint
+        {
+            get
+            {
+                int count = Status?.FingerprintCount ?? 0;
+                if (count <= 0) return "0";
+                if (count >= 180) return $"{count}⚠";
+                return count.ToString();
+            }
+        }
     }
 
     public class DeviceRuntimeStatus

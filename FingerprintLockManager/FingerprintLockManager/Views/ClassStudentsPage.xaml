@@ -81,37 +81,50 @@
             <TabItem Header="学生名单">
                 <Border Background="{StaticResource CardBrush}" BorderBrush="{StaticResource BorderBrush}"
                         BorderThickness="1" CornerRadius="0,6,6,6" Padding="1">
-                    <DataGrid x:Name="StudentDataGrid" BorderThickness="0" IsReadOnly="True"
-                              SelectionMode="Extended" MouseDoubleClick="StudentDataGrid_MouseDoubleClick">
-                        <DataGrid.Resources>
-                            <Style TargetType="TextBlock" BasedOn="{StaticResource DataGridTextBlockStyle}"/>
-                        </DataGrid.Resources>
-                        <DataGrid.Columns>
-                            <DataGridTextColumn Header="姓名" Binding="{Binding Name}" Width="1.0*"/>
-                            <DataGridTextColumn Header="学号" Binding="{Binding UserId}" Width="1.05*"/>
-                            <DataGridTextColumn Header="性别" Binding="{Binding GenderText}" Width="66"/>
-                            <DataGridTextColumn Header="使用状态" Binding="{Binding WorkflowStatus}" Width="105"/>
-                            <DataGridTextColumn Header="用户指纹" Binding="{Binding FingerprintText}" Width="1.25*"
-                                                ElementStyle="{StaticResource DataGridLeftTextBlockStyle}"/>
-                            <DataGridTextColumn Header="分配柜机" Binding="{Binding CabinetText}" Width="1.4*"
-                                                ElementStyle="{StaticResource DataGridLeftTextBlockStyle}"/>
-                            <DataGridTemplateColumn Header="操作" Width="210">
-                                <DataGridTemplateColumn.CellTemplate>
-                                    <DataTemplate>
-                                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                                            <Button Content="编辑" Tag="{Binding}" Style="{StaticResource SecondaryButton}"
-                                                    Width="58" MinWidth="58" Margin="0,0,6,0"
-                                                    Click="EditStudentButton_Click"/>
-                                            <Button Content="管理" Tag="{Binding}" Width="58" MinWidth="58"
-                                                    Margin="0,0,6,0" Click="ManageStudentButton_Click"/>
-                                            <Button Content="删除" Tag="{Binding}" Style="{StaticResource DangerButton}"
-                                                    Width="58" MinWidth="58" Click="DeleteStudentButton_Click"/>
-                                        </StackPanel>
-                                    </DataTemplate>
-                                </DataGridTemplateColumn.CellTemplate>
-                            </DataGridTemplateColumn>
-                        </DataGrid.Columns>
-                    </DataGrid>
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <DataGrid x:Name="StudentDataGrid" BorderThickness="0" IsReadOnly="True"
+                                  SelectionMode="Extended" MouseDoubleClick="StudentDataGrid_MouseDoubleClick">
+                            <DataGrid.Resources>
+                                <Style TargetType="TextBlock" BasedOn="{StaticResource DataGridTextBlockStyle}"/>
+                            </DataGrid.Resources>
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="姓名" Binding="{Binding Name}" Width="1.0*"/>
+                                <DataGridTextColumn Header="学号" Binding="{Binding UserId}" Width="1.05*"/>
+                                <DataGridTextColumn Header="性别" Binding="{Binding GenderText}" Width="66"/>
+                                <DataGridTextColumn Header="使用状态" Binding="{Binding WorkflowStatus}" Width="105"/>
+                                <DataGridTextColumn Header="用户指纹" Binding="{Binding FingerprintText}" Width="1.25*"
+                                                    ElementStyle="{StaticResource DataGridLeftTextBlockStyle}"/>
+                                <DataGridTextColumn Header="分配柜机" Binding="{Binding CabinetText}" Width="1.4*"
+                                                    ElementStyle="{StaticResource DataGridLeftTextBlockStyle}"/>
+                                <DataGridTemplateColumn Header="操作" Width="210">
+                                    <DataGridTemplateColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                                <Button Content="编辑" Tag="{Binding}" Style="{StaticResource SecondaryButton}"
+                                                        Width="58" MinWidth="58" Margin="0,0,6,0"
+                                                        Click="EditStudentButton_Click"/>
+                                                <Button Content="管理" Tag="{Binding}" Width="58" MinWidth="58"
+                                                        Margin="0,0,6,0" Click="ManageStudentButton_Click"/>
+                                                <Button Content="删除" Tag="{Binding}" Style="{StaticResource DangerButton}"
+                                                        Width="58" MinWidth="58" Click="DeleteStudentButton_Click"/>
+                                            </StackPanel>
+                                        </DataTemplate>
+                                    </DataGridTemplateColumn.CellTemplate>
+                                </DataGridTemplateColumn>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                        <StackPanel Grid.Row="1" Style="{StaticResource PagerBar}" Margin="8,6,8,8">
+                            <Button x:Name="StudentPrevPageButton" Style="{StaticResource SecondaryButton}"
+                                    Content="上一页" Width="80" Click="StudentPrevPageButton_Click"/>
+                            <TextBlock x:Name="StudentPageInfoText" Style="{StaticResource PagerInfoText}" Text="第 1 / 1 页"/>
+                            <Button x:Name="StudentNextPageButton" Style="{StaticResource SecondaryButton}"
+                                    Content="下一页" Width="80" Click="StudentNextPageButton_Click"/>
+                        </StackPanel>
+                    </Grid>
                 </Border>
             </TabItem>
 

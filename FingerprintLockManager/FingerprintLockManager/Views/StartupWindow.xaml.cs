@@ -42,6 +42,8 @@ namespace FingerprintLockManager
 
             LoadPortList(GetPreferredPort());
             UpdateLinkStatus();
+            UpdateLastPortHint();
+            SetStartupStep(0);
 
             // 串口列表非空时自动开始连接并同步
             if (IsSelectedPortAvailable() && !_autoStarted)
@@ -72,10 +74,18 @@ namespace FingerprintLockManager
         private void LoadPortList(string? preferred)
         {
             string current = preferred ?? SerialPortBox.Text ?? "";
+            string remembered = GetPreferredPort();
             SerialPortBox.Items.Clear();
             try
             {
-                foreach (string p in SerialPortDiscovery.GetPortNames())
+                // 上次成功串口优先排在列表最前，便于辨认
+                var ports = SerialPortDiscovery.GetPortNames().ToList();
+                if (!string.IsNullOrWhiteSpace(remembered) &&
+                    ports.RemoveAll(p => string.Equals(p, remembered, StringComparison.OrdinalIgnoreCase)) > 0)
+                {
+                    ports.Insert(0, remembered);
+                }
+                foreach (string p in ports)
                     SerialPortBox.Items.Add(p);
             }
             catch { }
@@ -83,6 +93,10 @@ namespace FingerprintLockManager
             if (!string.IsNullOrWhiteSpace(current) && SerialPortBox.Items.Contains(current))
             {
                 SerialPortBox.Text = current;
+            }
+            else if (!string.IsNullOrWhiteSpace(remembered) && SerialPortBox.Items.Contains(remembered))
+            {
+                SerialPortBox.Text = remembered;
             }
             else if (!string.IsNullOrWhiteSpace(current))
             {
@@ -96,7 +110,29 @@ namespace FingerprintLockManager
                 else
                     SerialPortBox.SelectedIndex = 0;
             }
-            SerialPortBox.ToolTip = SerialPortDiscovery.GetPortDescription(SerialPortBox.Text ?? "");
+            string tip = SerialPortDiscovery.GetPortDescription(SerialPortBox.Text ?? "") ?? "";
+            if (!string.IsNullOrWhiteSpace(remembered) &&
+                string.Equals(SerialPortBox.Text, remembered, StringComparison.OrdinalIgnoreCase))
+                tip = string.IsNullOrWhiteSpace(tip) ? "上次使用的串口" : tip + " · 上次使用";
+            SerialPortBox.ToolTip = tip;
+            UpdateLastPortHint();
+        }
+
+        private void UpdateLastPortHint()
+        {
+            if (LastPortHintText == null) return;
+            string remembered = GetPreferredPort();
+            if (string.IsNullOrWhiteSpace(remembered))
+            {
+                LastPortHintText.Text = IsDirectUart
+                    ? "提示：将自动记住本次柜机 UART 串口"
+                    : "提示：将自动记住本次组网 U 盘串口";
+                return;
+            }
+            bool present = SerialPortBox.Items.Contains(remembered);
+            LastPortHintText.Text = present
+                ? $"上次使用：{remembered}（已优先列出）"
+                : $"上次使用：{remembered}（当前未检测到，请插线后刷新）";
         }
 
         private void RefreshPortsButton_Click(object sender, RoutedEventArgs e)
@@ -268,6 +304,7 @@ namespace FingerprintLockManager
                     return;
                 }
 
+                SetStartupStep(1);
                 SetProgress(IsDirectUart ? "正在启动柜机串口直连…" : "正在连接组网U盘…", 10);
                 try { App.MeshBridge.Stop(); } catch { }
                 App.MeshBridge.Start(ConfigHelper.Current.ToTransportConfig());
@@ -275,6 +312,7 @@ namespace FingerprintLockManager
 
                 if (IsDirectUart)
                 {
+                    SetStartupStep(2);
                     SetProgress("等待柜机协议响应…", 35);
                     bool cabinetReady = await WaitForDirectCabinetAsync(WaitDirectTimeoutMs);
                     UpdateLinkStatus();
@@ -285,6 +323,7 @@ namespace FingerprintLockManager
                         return;
                     }
 
+                    SetStartupStep(5);
                     SetProgress("柜机串口直连已就绪", 100);
                     DirectMaintenanceStateService.BeginSession(
                         App.MeshBridge.GetOnlineDevices()
@@ -294,6 +333,7 @@ namespace FingerprintLockManager
                     return;
                 }
 
+                SetStartupStep(2);
                 SetProgress("等待根节点与 SD 就绪…", 25);
                 bool ready = await WaitForSdReadyAsync(WaitRootTimeoutMs);
                 UpdateLinkStatus();
@@ -315,6 +355,7 @@ namespace FingerprintLockManager
                 }
 
                 // 同步前：备份当前主库 + 切到临时库
+                SetStartupStep(3);
                 SetProgress("正在备份本地业务库…", 35);
                 try { BusinessDatabaseBackupService.BeginSyncToTemp(); }
                 catch (Exception ex)
@@ -326,6 +367,7 @@ namespace FingerprintLockManager
                 }
 
                 // 重试同步，最多 MaxSyncAttempts 次
+                SetStartupStep(4);
                 for (int attempt = 1; attempt <= MaxSyncAttempts; attempt++)
                 {
                     SetProgress($"正在从 SD 同步业务库（第 {attempt}/{MaxSyncAttempts} 次）…", 45);
@@ -344,6 +386,7 @@ namespace FingerprintLockManager
                             ShowRetryOrLocal();
                             return;
                         }
+                        SetStartupStep(5);
                         SetProgress(result.Message + "，即将进入登录…", 100);
                         await Task.Delay(400);
                         GoToLogin();
@@ -362,6 +405,7 @@ namespace FingerprintLockManager
                             ShowRetryOrLocal();
                             return;
                         }
+                        SetStartupStep(5);
                         SetProgress(result.Message + "，即将进入登录…", 100);
                         await Task.Delay(400);
                         GoToLogin();
@@ -535,8 +579,19 @@ namespace FingerprintLockManager
             FailurePanel.Visibility = Visibility.Visible; // 同步失败后才显示
             RetryButton.IsEnabled = true;
             // 历史备份或当前主库有数据时，允许使用本地历史数据继续
-            UseLocalButton.IsEnabled = BusinessDatabaseBackupService.GetLatestBackup() != null
+            bool hasLocal = BusinessDatabaseBackupService.GetLatestBackup() != null
                 || BusinessDatabase.HasAnyBusinessData();
+            UseLocalButton.IsEnabled = true; // 始终可点；无数据时再二次确认
+            if (FailureHintText != null)
+            {
+                FailureHintText.Text = hasLocal
+                    ? "建议先点「重新连接并同步」。若设备短期不可用，可用「仅用本机数据进入登录」：" +
+                      "使用最近备份/本机库，可管理已有账号；柜机鉴权不依赖上位机，但 SD 权威数据可能不是最新。"
+                    : "本机暂无业务备份。可重试连接；或进入后仅内置管理员可能可用，建议尽快恢复设备同步。";
+            }
+            AppToast.Warning(hasLocal
+                ? "同步失败，可重试或仅用本机数据进入"
+                : "同步失败，本机暂无历史数据");
         }
 
         // ===== 按钮回调 =====
@@ -562,20 +617,35 @@ namespace FingerprintLockManager
                 try
                 {
                     BusinessDatabaseBackupService.RestoreLatestBackup();
-                    SetProgress($"已恢复历史数据（{latest.Time:yyyy-MM-dd HH:mm:ss}），即将进入登录…", 100);
+                    SetStartupStep(5);
+                    SetProgress(
+                        $"已加载本机历史库（{latest.Time:yyyy-MM-dd HH:mm:ss}）。" +
+                        "此为应急模式：不代表 SD 最新，恢复组网后请再同步。即将进入登录…", 100);
+                    AppToast.Warning("已进入本机应急数据模式");
                 }
                 catch (Exception ex)
                 {
                     SetProgress($"恢复历史数据失败：{ex.Message}", 0);
+                    AppToast.Error("恢复本机数据失败");
                     return;
                 }
             }
-            else if (!BusinessDatabase.HasAnyBusinessData())
+            else if (BusinessDatabase.HasAnyBusinessData())
+            {
+                SetStartupStep(5);
+                SetProgress("将使用当前本机业务库进入（未从 SD 刷新）。恢复组网后请再同步。", 100);
+                AppToast.Warning("使用本机现有业务库进入");
+            }
+            else
             {
                 var r = MessageBox.Show(
-                    "本机业务库为空且无历史备份。仍要进入登录吗？（仅内置管理员可能可用）",
-                    "本地数据", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+                    "本机业务库为空且无历史备份。\n\n" +
+                    "仍要进入登录吗？\n" +
+                    "• 可能仅内置管理员可用\n" +
+                    "• 用户/权限数据需设备恢复后才能同步",
+                    "仅本地登录（无业务数据）", MessageBoxButton.YesNo, MessageBoxImage.Warning);
                 if (r != MessageBoxResult.Yes) return;
+                AppToast.Warning("无本地业务数据，仅可能内置管理员可用");
             }
 
             // 确保链路按当前配置启动（便于登录后继续通讯）
@@ -645,6 +715,53 @@ namespace FingerprintLockManager
             else if (_busy)
             {
                 SyncProgress.IsIndeterminate = true;
+            }
+        }
+
+        /// <summary>
+        /// 启动分步：0 待命，1 连接，2 就绪，3 备份，4 同步，5 完成。
+        /// 直连模式跳过 3/4，直接到 5。
+        /// </summary>
+        private void SetStartupStep(int step)
+        {
+            TextBlock[] steps = { Step1Text, Step2Text, Step3Text, Step4Text, Step5Text };
+            if (IsDirectUart)
+            {
+                Step3Text.Text = "3 —";
+                Step4Text.Text = "4 —";
+            }
+            else
+            {
+                Step3Text.Text = "3 备份";
+                Step4Text.Text = "4 同步";
+            }
+
+            Brush active = (Brush)FindResource("PrimaryBrush");
+            Brush done = (Brush)FindResource("SuccessBrush");
+            Brush idle = (Brush)FindResource("SubTextBrush");
+            for (int i = 0; i < steps.Length; i++)
+            {
+                int n = i + 1;
+                if (step <= 0)
+                {
+                    steps[i].Foreground = idle;
+                    steps[i].FontWeight = FontWeights.Normal;
+                }
+                else if (n < step)
+                {
+                    steps[i].Foreground = done;
+                    steps[i].FontWeight = FontWeights.SemiBold;
+                }
+                else if (n == step)
+                {
+                    steps[i].Foreground = active;
+                    steps[i].FontWeight = FontWeights.Bold;
+                }
+                else
+                {
+                    steps[i].Foreground = idle;
+                    steps[i].FontWeight = FontWeights.Normal;
+                }
             }
         }
     }

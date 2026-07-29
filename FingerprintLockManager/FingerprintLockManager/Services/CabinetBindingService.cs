@@ -2,6 +2,11 @@ using Newtonsoft.Json.Linq;
 
 namespace FingerprintLockManager
 {
+    /// <summary>
+    /// 柜机绑定：用户可在模板库拥有多枚指纹，但<strong>每台柜机对每个用户只启用一枚</strong>
+    ///（<see cref="CabinetAssignment.ActiveFingerprintId"/>），节省 AS608 约 200 槽位。
+    /// 不同柜子可为同一用户选择不同手指；副指纹仅本机录入，不走本服务全局分配。
+    /// </summary>
     public sealed class CabinetBindingService
     {
         private const string LegacyTableName = "cabinet_user_bindings";
@@ -320,15 +325,24 @@ namespace FingerprintLockManager
 
         private static void ApplyAssignments(User user, IEnumerable<CabinetAssignment> assignments)
         {
+            // 按柜去重：同一 device_id 只保留一条，即该柜仅一枚 active 指纹
             List<CabinetAssignment> normalized = assignments
                 .Where(item => item != null && !string.IsNullOrWhiteSpace(item.DeviceId))
                 .GroupBy(item => item.DeviceId.Trim(), StringComparer.OrdinalIgnoreCase)
-                .Select(group => Clone(group.Last()))
+                .Select(group => NormalizeAssignment(group.Last()))
                 .OrderBy(item => item.DeviceId, StringComparer.OrdinalIgnoreCase)
                 .ToList();
             user.CabinetAssignments = normalized;
             user.AssignedDeviceIds = normalized.Select(item => item.DeviceId).ToList();
             user.UpdateTime = DateTime.Now;
+        }
+
+        private static CabinetAssignment NormalizeAssignment(CabinetAssignment item)
+        {
+            CabinetAssignment clone = Clone(item);
+            // 一柜一人一指纹：ActiveFingerprintId 至多一个有效正整数
+            if (clone.ActiveFingerprintId is <= 0) clone.ActiveFingerprintId = null;
+            return clone;
         }
 
         private static CabinetAssignment Clone(CabinetAssignment item) => new()

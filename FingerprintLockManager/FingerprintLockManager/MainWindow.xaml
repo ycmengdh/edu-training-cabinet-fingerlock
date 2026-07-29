@@ -196,6 +196,7 @@
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
@@ -203,25 +204,35 @@
                     <Ellipse x:Name="MeshStatusDot" Width="8" Height="8" Fill="{StaticResource DangerBrush}"/>
                     <TextBlock x:Name="MeshStatusText" Text="链路未连接" Margin="7,0,0,0" FontSize="11"/>
                 </StackPanel>
-                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="22,0,0,0">
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="18,0,0,0">
                     <Ellipse x:Name="RootDataStatusDot" Width="8" Height="8" Fill="{StaticResource DangerBrush}"/>
                     <TextBlock x:Name="RootDataStatusText" Text="根节点数据不可用" Margin="7,0,0,0" FontSize="11"/>
                 </StackPanel>
-                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="22,0,0,0">
+                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="18,0,0,0">
                     <TextBlock x:Name="OnlineDeviceLabel" Text="在线柜子" Foreground="{StaticResource SubTextBrush}" FontSize="11"/>
                     <TextBlock x:Name="OnlineDeviceCount" Text="0" Foreground="{StaticResource PrimaryBrush}" FontWeight="SemiBold" FontSize="11" Margin="6,0,0,0"/>
                 </StackPanel>
-                <TextBlock x:Name="TransportTypeText" Grid.Column="3" Text="USB 串口" Foreground="{StaticResource SubTextBrush}" FontSize="11" Margin="22,0,0,0" VerticalAlignment="Center"/>
-                <StackPanel Grid.Column="4" Orientation="Horizontal" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="0,0,16,0">
+                <Button x:Name="PendingSyncButton" Grid.Column="3" Style="{StaticResource CompactSecondaryButton}"
+                        Margin="14,0,0,0" MinWidth="88" Padding="10,0" Height="24"
+                        ToolTip="查看柜机待同步队列（每柜每用户仅一枚指纹）"
+                        Click="PendingSyncButton_Click">
+                    <StackPanel Orientation="Horizontal">
+                        <Ellipse x:Name="PendingSyncDot" Width="7" Height="7" Fill="{StaticResource SubTextBrush}"
+                                 VerticalAlignment="Center" Margin="0,0,6,0"/>
+                        <TextBlock x:Name="PendingSyncText" Text="待同步 0" FontSize="11" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Button>
+                <TextBlock x:Name="TransportTypeText" Grid.Column="4" Text="USB 串口" Foreground="{StaticResource SubTextBrush}" FontSize="11" Margin="14,0,0,0" VerticalAlignment="Center"/>
+                <StackPanel Grid.Column="5" Orientation="Horizontal" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="0,0,12,0">
                     <Button x:Name="SyncToSdButton" Style="{StaticResource CompactSecondaryButton}"
                             Content="立即同步到 SD" MinWidth="110"
                             ToolTip="将本机业务库与指纹模板立即上传到根节点 SD 卡"
                             Click="SyncToSdButton_Click"/>
                     <TextBlock x:Name="SyncStatusText" Text="" Foreground="{StaticResource SubTextBrush}"
-                               FontSize="11" Margin="10,0,0,0" VerticalAlignment="Center" MaxWidth="280"
+                               FontSize="11" Margin="10,0,0,0" VerticalAlignment="Center" MaxWidth="240"
                                TextTrimming="CharacterEllipsis"/>
                 </StackPanel>
-                <TextBlock x:Name="CurrentTimeText" Grid.Column="5" Foreground="{StaticResource SubTextBrush}" FontSize="11" VerticalAlignment="Center"/>
+                <TextBlock x:Name="CurrentTimeText" Grid.Column="6" Foreground="{StaticResource SubTextBrush}" FontSize="11" VerticalAlignment="Center"/>
             </Grid>
         </Border>
     </Grid>

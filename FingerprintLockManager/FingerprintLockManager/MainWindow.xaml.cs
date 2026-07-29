@@ -195,8 +195,7 @@ namespace FingerprintLockManager
             if (!App.SdStorageService.IsAvailable)
             {
                 SyncStatusText.Text = "SD 不可用，无法同步";
-                MessageBox.Show("根节点 SD 当前不可用，请检查通讯链路后再试。",
-                    "同步到 SD", MessageBoxButton.OK, MessageBoxImage.Warning);
+                AppToast.Warning("根节点 SD 不可用，请检查通讯链路");
                 return;
             }
 
@@ -224,17 +223,15 @@ namespace FingerprintLockManager
                 }
                 catch { }
 
-                if (!result.Success)
-                {
-                    MessageBox.Show(result.Message ?? "同步失败", "同步到 SD",
-                        MessageBoxButton.OK, MessageBoxImage.Warning);
-                }
+                if (result.Success)
+                    AppToast.Success(string.IsNullOrWhiteSpace(result.Message) ? "已同步到 SD" : result.Message);
+                else
+                    AppToast.Error(string.IsNullOrWhiteSpace(result.Message) ? "同步到 SD 失败" : result.Message);
             }
             catch (Exception ex)
             {
                 SyncStatusText.Text = "同步异常";
-                MessageBox.Show($"同步失败：{ex.Message}", "同步到 SD",
-                    MessageBoxButton.OK, MessageBoxImage.Error);
+                AppToast.Error("同步到 SD 失败：" + ex.Message);
             }
             finally
             {
@@ -348,6 +345,39 @@ namespace FingerprintLockManager
             ContentFrame.Navigate(page);
         }
 
+        /// <summary>供总览等子页跳转到柜子详情。</summary>
+        public void NavigateToCabinetDetail(string deviceId)
+        {
+            if (string.IsNullOrWhiteSpace(deviceId)) return;
+            try
+            {
+                Device? device = App.DeviceService.GetAllDevices()
+                    .FirstOrDefault(d => string.Equals(d.DeviceId, deviceId,
+                        StringComparison.OrdinalIgnoreCase));
+                if (device == null)
+                {
+                    AppToast.Warning("未找到该柜子，请先刷新设备列表");
+                    SelectNavButton(NavDevice);
+                    NavigateToPage(new CabinetManagePage());
+                    return;
+                }
+                SelectNavButton(NavDevice);
+                NavigateToPage(new DevicePage(device));
+                AppToast.Info($"已打开 {device.DisplayIdentity}");
+            }
+            catch (Exception ex)
+            {
+                AppToast.Error("打开柜子失败：" + ex.Message);
+            }
+        }
+
+        /// <summary>打开柜子管理列表。</summary>
+        public void NavigateToCabinetList()
+        {
+            SelectNavButton(NavDevice);
+            NavigateToPage(new CabinetManagePage());
+        }
+
         /// <summary>设备连接/断开回调（来自后台线程，需切到 UI 线程刷新）</summary>
         private void OnDeviceConnectionChanged(DeviceClient device)
         {
@@ -401,6 +431,7 @@ namespace FingerprintLockManager
 
                 // SD 数据状态：就绪 / 降级模式 / 未连接
                 UpdateRootDataStatus();
+                UpdatePendingSyncStatus();
             }
             catch
             {
@@ -410,6 +441,35 @@ namespace FingerprintLockManager
 
             // 当前时间
             CurrentTimeText.Text = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+        }
+
+        private void UpdatePendingSyncStatus()
+        {
+            try
+            {
+                int open = App.CabinetSyncQueueService.CountOpen();
+                int failed = App.CabinetSyncQueueService.CountFailed();
+                PendingSyncText.Text = open == 0 ? "待同步 0" : $"待同步 {open}";
+                PendingSyncDot.Fill = FindResource(
+                    open == 0 ? "SuccessBrush" : failed > 0 ? "DangerBrush" : "WarningBrush")
+                    as System.Windows.Media.Brush;
+                PendingSyncButton.ToolTip = open == 0
+                    ? "无待同步任务。用户可多指纹入库，每柜每用户只占一枚槽位。"
+                    : failed > 0
+                        ? $"有 {open} 项待处理（含 {failed} 项失败），点击查看并重试"
+                        : $"有 {open} 项待下发到柜机，点击查看队列";
+            }
+            catch
+            {
+                PendingSyncText.Text = "待同步 —";
+            }
+        }
+
+        private void PendingSyncButton_Click(object sender, RoutedEventArgs e)
+        {
+            var window = new SyncQueueWindow { Owner = this };
+            window.ShowDialog();
+            UpdatePendingSyncStatus();
         }
 
         /// <summary>

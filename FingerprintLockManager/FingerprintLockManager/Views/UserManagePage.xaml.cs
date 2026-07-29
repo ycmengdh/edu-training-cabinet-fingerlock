@@ -12,6 +12,8 @@ namespace FingerprintLockManager
     {
         private readonly string? _classId;
         private readonly string? _className;
+        private readonly ListPager _pager = new(50);
+        private List<User> _filteredUsers = new();
 
         public UserManagePage()
             : this(null, null)
@@ -40,37 +42,58 @@ namespace FingerprintLockManager
 
         private Window? OwnerWindow => Window.GetWindow(this);
 
-        /// <summary>加载用户列表（按筛选条件）</summary>
-        private async Task LoadUsersAsync()
+        /// <summary>加载用户列表（按筛选条件 + 分页）</summary>
+        private async Task LoadUsersAsync(bool resetPage = true)
         {
+            if (resetPage) _pager.Reset();
             string? role = GetSelectedRole();
+            string keyword = UserSearchBox?.Text?.Trim() ?? "";
             SetBusy(true, "正在读取根节点用户数据");
             try
             {
-                List<User> users = await Task.Run(() =>
+                _filteredUsers = await Task.Run(() =>
                 {
                     var visible = App.UserService.GetVisibleUsers();
+                    IEnumerable<User> query = visible;
                     if (_classId != null)
                     {
-                        return visible.Where(u => u.Role == "student" &&
-                            string.Equals(u.ClassId, _classId, StringComparison.OrdinalIgnoreCase)).ToList();
+                        query = query.Where(u => u.Role == "student" &&
+                            string.Equals(u.ClassId, _classId, StringComparison.OrdinalIgnoreCase));
                     }
-                    return string.IsNullOrEmpty(role)
-                        ? visible
-                        : visible.Where(u => u.Role == role).ToList();
+                    else if (!string.IsNullOrEmpty(role))
+                    {
+                        query = query.Where(u => u.Role == role);
+                    }
+                    if (!string.IsNullOrWhiteSpace(keyword))
+                    {
+                        query = query.Where(u =>
+                            (u.Name?.Contains(keyword, StringComparison.OrdinalIgnoreCase) ?? false) ||
+                            (u.UserId?.Contains(keyword, StringComparison.OrdinalIgnoreCase) ?? false) ||
+                            (u.ClassId?.Contains(keyword, StringComparison.OrdinalIgnoreCase) ?? false));
+                    }
+                    return query.OrderBy(u => u.Role).ThenBy(u => u.UserId).ToList();
                 });
-                UserDataGrid.ItemsSource = users;
-                PageStatusText.Text = $"共 {users.Count} 个用户";
+                ApplyUserPage();
             }
             catch (RootDataUnavailableException ex)
             {
+                _filteredUsers.Clear();
                 UserDataGrid.ItemsSource = null;
                 PageStatusText.Text = ex.Message;
+                _pager.BindChrome(PrevPageButton, NextPageButton, PageInfoText);
             }
             finally
             {
                 SetBusy(false);
             }
+        }
+
+        private void ApplyUserPage()
+        {
+            var page = _pager.Slice(_filteredUsers);
+            UserDataGrid.ItemsSource = page;
+            _pager.BindChrome(PrevPageButton, NextPageButton, PageInfoText);
+            PageStatusText.Text = _pager.StatusText(page.Count);
         }
 
         private string? GetSelectedRole()
@@ -83,11 +106,27 @@ namespace FingerprintLockManager
         private async void RoleFilterBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
             if (!IsLoaded) return;
-            await LoadUsersAsync();
+            await LoadUsersAsync(resetPage: true);
+        }
+
+        private async void UserSearchBox_TextChanged(object sender, TextChangedEventArgs e)
+        {
+            if (!IsLoaded) return;
+            await LoadUsersAsync(resetPage: true);
         }
 
         private async void RefreshButton_Click(object sender, RoutedEventArgs e) =>
-            await LoadUsersAsync();
+            await LoadUsersAsync(resetPage: false);
+
+        private void PrevPageButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_pager.Prev()) ApplyUserPage();
+        }
+
+        private void NextPageButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_pager.Next()) ApplyUserPage();
+        }
 
         // ===== 基础账号维护（留在列表页） =====
 

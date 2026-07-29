@@ -72,14 +72,16 @@ namespace FingerprintLockManager
                     Name = name.Trim(),
                     CreateTime = DateTime.Now
                 }));
-                MessageBox.Show(ok ? "班级已添加" : "添加失败，班级 ID 可能已存在",
-                    ok ? "完成" : "错误", MessageBoxButton.OK,
-                    ok ? MessageBoxImage.Information : MessageBoxImage.Error);
-                if (ok) await LoadAsync();
+                if (ok)
+                {
+                    AppToast.Success("班级已添加");
+                    await LoadAsync();
+                }
+                else AppToast.Error("添加失败，班级 ID 可能已存在");
             }
             catch (RootDataUnavailableException ex)
             {
-                MessageBox.Show(ex.Message, "根节点不可用", MessageBoxButton.OK, MessageBoxImage.Error);
+                AppToast.Error(ex.Message);
             }
             finally
             {
@@ -91,7 +93,7 @@ namespace FingerprintLockManager
         {
             if (ClassDataGrid.SelectedItem is not ClassInfo selected)
             {
-                MessageBox.Show("请先选择班级", "提示");
+                AppToast.Info("请先选择班级");
                 return;
             }
             if (!ShowClassDialog(selected, out _, out string name)) return;
@@ -100,13 +102,16 @@ namespace FingerprintLockManager
             try
             {
                 bool ok = await Task.Run(() => App.ClassService.Update(selected));
-                MessageBox.Show(ok ? "班级已更新" : "更新失败", ok ? "完成" : "错误",
-                    MessageBoxButton.OK, ok ? MessageBoxImage.Information : MessageBoxImage.Error);
-                if (ok) await LoadAsync();
+                if (ok)
+                {
+                    AppToast.Success("班级已更新");
+                    await LoadAsync();
+                }
+                else AppToast.Error("更新失败");
             }
             catch (RootDataUnavailableException ex)
             {
-                MessageBox.Show(ex.Message, "根节点不可用", MessageBoxButton.OK, MessageBoxImage.Error);
+                AppToast.Error(ex.Message);
             }
             finally
             {
@@ -227,14 +232,16 @@ namespace FingerprintLockManager
             try
             {
                 bool ok = await Task.Run(() => App.ClassService.Delete(selected.ClassId));
-                MessageBox.Show(ok ? "班级已删除" : "删除失败，可能仍有用户绑定该班级",
-                    ok ? "完成" : "错误", MessageBoxButton.OK,
-                    ok ? MessageBoxImage.Information : MessageBoxImage.Error);
-                if (ok) await LoadAsync();
+                if (ok)
+                {
+                    AppToast.Success("班级已删除");
+                    await LoadAsync();
+                }
+                else AppToast.Error("删除失败，可能仍有用户绑定该班级");
             }
             catch (RootDataUnavailableException ex)
             {
-                MessageBox.Show(ex.Message, "根节点不可用", MessageBoxButton.OK, MessageBoxImage.Error);
+                AppToast.Error(ex.Message);
             }
             finally
             {

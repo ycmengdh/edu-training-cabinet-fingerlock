@@ -147,108 +147,140 @@
                     <Button x:Name="EnrollFingerprintButton" Style="{StaticResource SecondaryButton}"
                             Content="录入用户指纹" Margin="0,0,8,0" Click="EnrollFingerprintButton_Click"/>
                     <Button x:Name="EnrollBackupFpButton" Style="{StaticResource SecondaryButton}"
-                            Content="旧版本柜指纹" Margin="0,0,8,0" Visibility="Collapsed"
+                            Content="录入本机副指纹" Margin="0,0,8,0"
+                            ToolTip="仅本柜生效，不占其他柜槽位；每人每柜主指纹仍只一枚"
                             Click="EnrollBackupFpButton_Click"/>
-                    <Button x:Name="DeleteBackupFpButton" Style="{StaticResource DangerButton}"
-                            Content="删除旧版本柜指纹" Visibility="Collapsed"
-                            Click="DeleteBackupFpButton_Click" IsEnabled="False"/>
                 </WrapPanel>
             </Grid>
         </Border>
 
-        <Border Grid.Row="3" Style="{StaticResource Panel}">
-            <Grid>
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="62"/>
-                    <RowDefinition Height="*"/>
-                </Grid.RowDefinitions>
+        <Border Grid.Row="3" Style="{StaticResource Panel}" Padding="0">
+            <TabControl BorderThickness="0" Background="Transparent" Padding="0">
+                <TabItem Header="授权用户（主指纹）">
+                    <Grid Margin="0,4,0,0">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="54"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+                        <Grid Grid.Row="0" Margin="16,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <StackPanel VerticalAlignment="Center">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="每用户一枚主指纹" Style="{StaticResource SectionTitleText}"/>
+                                    <TextBlock x:Name="VisibleFingerprintCountText" Text="0 人" Margin="10,1,0,0"
+                                               Foreground="{StaticResource SubTextBrush}"/>
+                                </StackPanel>
+                                <TextBlock x:Name="FpListStatusText" Text="正在读取绑定用户"
+                                           Foreground="{StaticResource SubTextBrush}" FontSize="11" Margin="0,3,0,0"/>
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                <TextBlock Text="搜索" Style="{StaticResource LabelText}" Margin="0,0,7,0"/>
+                                <TextBox x:Name="FingerprintSearchBox" Width="160" Height="34"
+                                         ToolTip="按姓名、用户 ID 或指纹 ID 搜索"
+                                         TextChanged="FingerprintFilter_Changed"/>
+                                <Button x:Name="RefreshFpListButton" Style="{StaticResource IconButton}"
+                                        Content="&#xE72C;" ToolTip="刷新" Margin="8,0,0,0"
+                                        Click="RefreshFpListButton_Click"/>
+                                <Button x:Name="DeleteSelectedFpButton" Style="{StaticResource DangerButton}"
+                                        Content="删除主指纹" Margin="8,0,0,0" IsEnabled="False"
+                                        Click="DeleteSelectedFpButton_Click"/>
+                            </StackPanel>
+                        </Grid>
+                        <Grid Grid.Row="1">
+                            <DataGrid x:Name="DeviceFpListGrid" BorderThickness="0" IsReadOnly="True"
+                                      SelectionMode="Single" SelectionChanged="DeviceFpListGrid_SelectionChanged"
+                                      EnableRowVirtualization="True">
+                                <DataGrid.Resources>
+                                    <Style TargetType="TextBlock" BasedOn="{StaticResource DataGridTextBlockStyle}"/>
+                                </DataGrid.Resources>
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="指纹 ID" Binding="{Binding FingerprintId}" Width="78"
+                                                        ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                                    <DataGridTextColumn Header="用户 ID" Binding="{Binding UserId}" Width="1.1*" MinWidth="100"
+                                                        ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                                    <DataGridTextColumn Header="姓名" Binding="{Binding UserName}" Width="1*" MinWidth="90"
+                                                        ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                                    <DataGridTextColumn Header="角色" Binding="{Binding RoleText}" Width="72"
+                                                        ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                                    <DataGridTextColumn Header="绑定" Binding="{Binding BindingStatusText}" Width="72"
+                                                        ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                                    <DataGridTextColumn Header="系统锁" Binding="{Binding Lock0Text}" Width="64"
+                                                        ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                                    <DataGridTextColumn Header="门1" Binding="{Binding Lock1Text}" Width="52"
+                                                        ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                                    <DataGridTextColumn Header="门2" Binding="{Binding Lock2Text}" Width="52"
+                                                        ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                                    <DataGridTextColumn Header="门3" Binding="{Binding Lock3Text}" Width="52"
+                                                        ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                                    <DataGridTextColumn Header="权限" Binding="{Binding PermissionSummaryText}" Width="80"
+                                                        ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                            <StackPanel x:Name="FingerprintEmptyState" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                        Visibility="Collapsed" IsHitTestVisible="False">
+                                <TextBlock Text="&#xE928;" FontFamily="{StaticResource AppIconFont}" FontSize="28"
+                                           Foreground="{StaticResource SubTextBrush}" HorizontalAlignment="Center"/>
+                                <TextBlock x:Name="FingerprintEmptyText" Text="当前柜子暂无绑定用户" Margin="0,8,0,0"
+                                           Foreground="{StaticResource SubTextBrush}"/>
+                            </StackPanel>
+                        </Grid>
+                    </Grid>
+                </TabItem>
 
-                <Grid Grid.Row="0" Margin="16,0">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="Auto"/>
-                    </Grid.ColumnDefinitions>
-                    <StackPanel VerticalAlignment="Center">
-                        <StackPanel Orientation="Horizontal">
-                            <TextBlock Text="授权用户与权限" Style="{StaticResource SectionTitleText}"/>
-                            <TextBlock x:Name="VisibleFingerprintCountText" Text="0 人" Margin="10,1,0,0"
-                                       Foreground="{StaticResource SubTextBrush}"/>
-                        </StackPanel>
-                        <TextBlock x:Name="FpListStatusText" Text="正在读取绑定用户"
-                                   Foreground="{StaticResource SubTextBrush}" FontSize="11" Margin="0,3,0,0"/>
-                    </StackPanel>
-                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                        <TextBlock Text="搜索" Style="{StaticResource LabelText}" Margin="0,0,7,0"/>
-                        <TextBox x:Name="FingerprintSearchBox" Width="184" Height="34"
-                                 ToolTip="按姓名、用户 ID 或指纹 ID 搜索"
-                                 TextChanged="FingerprintFilter_Changed"/>
-                        <Button x:Name="RefreshFpListButton" Style="{StaticResource IconButton}"
-                                Content="&#xE72C;" ToolTip="刷新指纹用户列表" Margin="8,0,0,0"
-                                Click="RefreshFpListButton_Click"/>
-                        <Button x:Name="DeleteSelectedFpButton" Style="{StaticResource DangerButton}"
-                                Content="删除选中用户指纹" Margin="8,0,0,0" IsEnabled="False"
-                                Click="DeleteSelectedFpButton_Click"/>
-                    </StackPanel>
-                </Grid>
-
-                <Grid Grid.Row="1">
-                    <DataGrid x:Name="DeviceFpListGrid" BorderThickness="0" IsReadOnly="True"
-                              SelectionMode="Single" SelectionChanged="DeviceFpListGrid_SelectionChanged"
-                              EnableRowVirtualization="True">
-                        <DataGrid.Resources>
-                            <Style TargetType="TextBlock" BasedOn="{StaticResource DataGridTextBlockStyle}"/>
-                        </DataGrid.Resources>
-                        <DataGrid.Columns>
-                            <DataGridTextColumn Header="指纹 ID" Binding="{Binding FingerprintId}" Width="78"
-                                                ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                            <DataGridTextColumn Header="用户 ID" Binding="{Binding UserId}" Width="1.15*" MinWidth="120"
-                                                ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                            <DataGridTextColumn Header="姓名" Binding="{Binding UserName}" Width="1.05*" MinWidth="100"
-                                                ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                            <DataGridTextColumn Header="角色" Binding="{Binding RoleText}" Width="72"
-                                                ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                            <DataGridTemplateColumn Header="用户状态" Width="82">
-                                <DataGridTemplateColumn.CellTemplate>
-                                    <DataTemplate>
-                                        <TextBlock Text="{Binding UserStatusText}" HorizontalAlignment="Center" VerticalAlignment="Center">
-                                            <TextBlock.Style>
-                                                <Style TargetType="TextBlock" BasedOn="{StaticResource DataGridTextBlockStyle}">
-                                                    <Setter Property="Foreground" Value="{StaticResource SubTextBrush}"/>
-                                                    <Style.Triggers>
-                                                        <DataTrigger Binding="{Binding IsEnabled}" Value="True">
-                                                            <Setter Property="Foreground" Value="{StaticResource SuccessBrush}"/>
-                                                        </DataTrigger>
-                                                    </Style.Triggers>
-                                                </Style>
-                                            </TextBlock.Style>
-                                        </TextBlock>
-                                    </DataTemplate>
-                                </DataGridTemplateColumn.CellTemplate>
-                            </DataGridTemplateColumn>
-                            <DataGridTextColumn Header="绑定状态" Binding="{Binding BindingStatusText}" Width="82"
-                                                ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                            <DataGridTextColumn Header="系统锁" Binding="{Binding Lock0Text}" Width="74"
-                                                ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                            <DataGridTextColumn Header="柜门 1" Binding="{Binding Lock1Text}" Width="74"
-                                                ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                            <DataGridTextColumn Header="柜门 2" Binding="{Binding Lock2Text}" Width="74"
-                                                ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                            <DataGridTextColumn Header="柜门 3" Binding="{Binding Lock3Text}" Width="74"
-                                                ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                            <DataGridTextColumn Header="权限汇总" Binding="{Binding PermissionSummaryText}" Width="96"
-                                                ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                        </DataGrid.Columns>
-                    </DataGrid>
-
-                    <StackPanel x:Name="FingerprintEmptyState" HorizontalAlignment="Center" VerticalAlignment="Center"
-                                Visibility="Collapsed" IsHitTestVisible="False">
-                        <TextBlock Text="&#xE928;" FontFamily="{StaticResource AppIconFont}" FontSize="28"
-                                   Foreground="{StaticResource SubTextBrush}" HorizontalAlignment="Center"/>
-                        <TextBlock x:Name="FingerprintEmptyText" Text="当前柜子暂无绑定用户" Margin="0,8,0,0"
-                                   Foreground="{StaticResource SubTextBrush}"/>
-                    </StackPanel>
-                </Grid>
-            </Grid>
+                <TabItem Header="本机副指纹">
+                    <Grid Margin="0,4,0,0">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="54"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+                        <Grid Grid.Row="0" Margin="16,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <StackPanel VerticalAlignment="Center">
+                                <TextBlock Text="仅本柜生效的备用指纹" Style="{StaticResource SectionTitleText}"/>
+                                <TextBlock x:Name="BackupListStatusText"
+                                           Text="不覆盖其他柜主指纹；用于本机识别不灵敏时"
+                                           Foreground="{StaticResource SubTextBrush}" FontSize="11" Margin="0,3,0,0"/>
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                <Button x:Name="RefreshBackupListButton" Style="{StaticResource SecondaryButton}"
+                                        Content="刷新清单" Click="RefreshBackupListButton_Click"/>
+                                <Button x:Name="DeleteBackupFpButton" Style="{StaticResource DangerButton}"
+                                        Content="删除选中" Margin="8,0,0,0" IsEnabled="False"
+                                        Click="DeleteBackupFpButton_Click"/>
+                            </StackPanel>
+                        </Grid>
+                        <Grid Grid.Row="1">
+                            <DataGrid x:Name="BackupFpListGrid" BorderThickness="0" IsReadOnly="True"
+                                      SelectionMode="Single" SelectionChanged="BackupFpListGrid_SelectionChanged">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="用户" Binding="{Binding UserId}" Width="1.1*"
+                                                        ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                                    <DataGridTextColumn Header="姓名" Binding="{Binding UserName}" Width="1*"
+                                                        ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                                    <DataGridTextColumn Header="本机槽位" Binding="{Binding LocalFpId}" Width="90"
+                                                        ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                                    <DataGridTextColumn Header="说明" Binding="{Binding Note}" Width="1.4*"
+                                                        ElementStyle="{StaticResource DataGridLeftTextBlockStyle}"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                            <StackPanel x:Name="BackupEmptyState" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                        Visibility="Collapsed" IsHitTestVisible="False">
+                                <TextBlock Text="&#xE8B7;" FontFamily="{StaticResource AppIconFont}" FontSize="28"
+                                           Foreground="{StaticResource SubTextBrush}" HorizontalAlignment="Center"/>
+                                <TextBlock x:Name="BackupEmptyText" Text="本柜暂无副指纹" Margin="0,8,0,0"
+                                           Foreground="{StaticResource SubTextBrush}"/>
+                            </StackPanel>
+                        </Grid>
+                    </Grid>
+                </TabItem>
+            </TabControl>
         </Border>
     </Grid>
 </Page>
+

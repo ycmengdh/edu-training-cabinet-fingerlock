@@ -37,8 +37,18 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- WPF 资源：窗口 Icon / 关于页 / 侧栏品牌图 -->
+    <!-- WPF 资源：窗口 Icon / 关于页 / 侧栏品牌图（pack URI） -->
     <Resource Include="Resources\logo.ico" />
   </ItemGroup>
+  <!-- 同步一份到输出目录，供 Win32 任务栏图标 LoadImage 使用 -->
+  <Target Name="CopyLogoIcoToOutput" AfterTargets="Build">
+    <PropertyGroup>
+      <_LogoOutDir>$([System.IO.Path]::Combine('$(OutputPath)', 'Resources'))</_LogoOutDir>
+    </PropertyGroup>
+    <MakeDir Directories="$(_LogoOutDir)" />
+    <Copy SourceFiles="Resources\logo.ico"
+          DestinationFiles="$(_LogoOutDir)\logo.ico"
+          SkipUnchangedFiles="true" />
+  </Target>
 
 </Project>

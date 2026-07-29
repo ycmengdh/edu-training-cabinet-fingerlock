@@ -6,6 +6,49 @@ namespace FingerprintLockManager.Tests;
 public sealed class MultiFingerprintBindingTests
 {
     [Fact]
+    public void SetActiveFingerprint_KeepsOnlyOneFingerprintPerCabinet()
+    {
+        string originalPath = BusinessDatabase.ActiveDbPath;
+        User? originalUser = App.CurrentUser;
+        string tempPath = Path.Combine(Path.GetTempPath(), $"fingerlock-{Guid.NewGuid():N}.db");
+        try
+        {
+            BusinessDatabase.SetActivePath(tempPath);
+            BusinessDatabase.Initialize();
+            BusinessDatabase.ReplaceTable("users", JArray.Parse("""
+            [{
+              "user_id":"S001","name":"测试学生","role":"student","class_id":"C01",
+              "assigned_device_ids":["CAB_01"],
+              "cabinet_assignments":[
+                {"device_id":"CAB_01","active_fingerprint_id":11,"update_time":"2026-07-28T08:00:00+08:00"}
+              ],
+              "fingerprint_id":11,"enabled":true,"create_time":"2026-07-28T08:00:00+08:00"
+            }]
+            """), 1);
+            BusinessDatabase.ReplaceTable("devices", JArray.Parse("""
+              [{"device_id":"CAB_01","device_name":"一号柜","is_root":false}]
+            """), 1);
+            SaveTemplate(11, 2, "左手食指");
+            SaveTemplate(12, 7, "右手食指");
+            App.CurrentUser = new User { UserId = "admin", Role = "admin" };
+
+            var service = new CabinetBindingService();
+            Assert.True(service.SetActiveFingerprint("S001", "CAB_01", 12));
+
+            User stored = BusinessDatabase.ReadArray("users").Single().ToObject<User>()!;
+            Assert.Single(stored.CabinetAssignments!);
+            Assert.Equal(12, stored.CabinetAssignments![0].ActiveFingerprintId);
+            Assert.Equal(12, service.GetActiveFingerprintId(stored, "CAB_01"));
+        }
+        finally
+        {
+            App.CurrentUser = originalUser;
+            BusinessDatabase.SetActivePath(originalPath);
+            DeleteDatabaseFiles(tempPath);
+        }
+    }
+
+    [Fact]
     public void Student_CanUseDifferentFingerprintOnEachCabinet()
     {
         string originalPath = BusinessDatabase.ActiveDbPath;

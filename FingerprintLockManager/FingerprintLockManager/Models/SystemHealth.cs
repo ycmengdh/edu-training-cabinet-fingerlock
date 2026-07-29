@@ -14,12 +14,17 @@ namespace FingerprintLockManager
         public string Message { get; init; } = "";
         public string ActionHint { get; init; } = "";
 
+        /// <summary>关联柜机 device_id；空表示系统级告警（Mesh/SD 等）。</summary>
+        public string DeviceId { get; init; } = "";
+
         public string SeverityText => Severity switch
         {
             SystemAlertSeverity.Critical => "异常",
             SystemAlertSeverity.Warning => "注意",
             _ => "提示"
         };
+
+        public bool CanOpenCabinet => !string.IsNullOrWhiteSpace(DeviceId);
     }
 
     public sealed class SystemHealthSnapshot
