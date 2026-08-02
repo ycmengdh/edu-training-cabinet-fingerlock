@@ -1,0 +1,431 @@
+<Page x:Class="CabinetLock.SystemLogPage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:controls="clr-namespace:CabinetLock.Controls"
+      Title="系统日志" Background="{StaticResource BackgroundBrush}">
+    <Page.Resources>
+        <Style x:Key="SystemLogTabControl" TargetType="TabControl">
+            <Setter Property="Background" Value="{StaticResource CardBrush}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="TabControl">
+                        <Grid KeyboardNavigation.TabNavigation="Local">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <TabPanel Grid.Row="0" IsItemsHost="True" Panel.ZIndex="2"
+                                      Margin="2,0,0,-1"/>
+                            <Border Grid.Row="1" Background="{TemplateBinding Background}"
+                                    BorderBrush="{TemplateBinding BorderBrush}"
+                                    BorderThickness="{TemplateBinding BorderThickness}"
+                                    CornerRadius="0,8,8,8" Padding="14">
+                                <ContentPresenter x:Name="PART_SelectedContentHost"
+                                                  ContentSource="SelectedContent"
+                                                  HorizontalAlignment="Stretch"
+                                                  VerticalAlignment="Stretch"/>
+                            </Border>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="SystemLogTabItem" TargetType="TabItem">
+            <Setter Property="MinWidth" Value="106"/>
+            <Setter Property="Height" Value="42"/>
+            <Setter Property="Margin" Value="0,0,6,0"/>
+            <Setter Property="Padding" Value="18,0"/>
+            <Setter Property="Foreground" Value="{StaticResource SubTextBrush}"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="TabItem">
+                        <Border x:Name="TabSurface" Background="{StaticResource SurfaceAltBrush}"
+                                BorderBrush="Transparent" BorderThickness="1,1,1,0"
+                                CornerRadius="7,7,0,0" Padding="{TemplateBinding Padding}">
+                            <Grid>
+                                <Border x:Name="SelectionBar" Height="3" CornerRadius="2"
+                                        Background="{StaticResource PrimaryBrush}"
+                                        VerticalAlignment="Top" Visibility="Collapsed"/>
+                                <ContentPresenter ContentSource="Header" HorizontalAlignment="Center"
+                                                  VerticalAlignment="Center"
+                                                  TextElement.Foreground="{TemplateBinding Foreground}"
+                                                  TextElement.FontWeight="{TemplateBinding FontWeight}"/>
+                            </Grid>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="TabSurface" Property="Background" Value="{StaticResource SurfaceHoverBrush}"/>
+                                <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="TabSurface" Property="Background" Value="{StaticResource CardBrush}"/>
+                                <Setter TargetName="TabSurface" Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+                                <Setter TargetName="SelectionBar" Property="Visibility" Value="Visible"/>
+                                <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+                                <Setter Property="FontWeight" Value="SemiBold"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="SystemLogFilterPanel" TargetType="Border">
+            <Setter Property="Background" Value="{StaticResource SurfaceAltBrush}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="7"/>
+            <Setter Property="Padding" Value="14,12"/>
+        </Style>
+
+        <Style x:Key="SystemLogDataPanel" TargetType="Border">
+            <Setter Property="Background" Value="{StaticResource CardBrush}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="7"/>
+        </Style>
+
+        <Style x:Key="SystemLogDatePicker" TargetType="DatePicker">
+            <Setter Property="Width" Value="156"/>
+            <Setter Property="Height" Value="38"/>
+            <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+            <Setter Property="Background" Value="{StaticResource InputBrush}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="FontFamily" Value="{StaticResource AppFont}"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="DatePicker">
+                        <Grid>
+                            <Border x:Name="PickerBorder" Background="{TemplateBinding Background}"
+                                    BorderBrush="{TemplateBinding BorderBrush}"
+                                    BorderThickness="{TemplateBinding BorderThickness}"
+                                    CornerRadius="7">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="42"/>
+                                    </Grid.ColumnDefinitions>
+                                    <DatePickerTextBox x:Name="PART_TextBox" Grid.Column="0"
+                                                       Background="Transparent" BorderThickness="0"
+                                                       Padding="10,0,4,0" VerticalContentAlignment="Center"
+                                                       Foreground="{TemplateBinding Foreground}"
+                                                       FontFamily="{TemplateBinding FontFamily}"
+                                                       FontSize="{TemplateBinding FontSize}"/>
+                                    <Border Grid.Column="1" Background="{StaticResource SurfaceAltBrush}"
+                                            BorderBrush="{TemplateBinding BorderBrush}"
+                                            BorderThickness="1,0,0,0" CornerRadius="0,6,6,0">
+                                        <Button x:Name="PART_Button" Style="{x:Null}"
+                                                MinWidth="0" MinHeight="0" Margin="0"
+                                                HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                                                HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"
+                                                Focusable="False" Padding="0" Cursor="Hand"
+                                                Background="Transparent" Foreground="{StaticResource PrimaryBrush}"
+                                                BorderThickness="0" ToolTip="选择日期"
+                                                AutomationProperties.Name="选择日期">
+                                            <Button.Template>
+                                                <ControlTemplate TargetType="Button">
+                                                    <Border x:Name="CalendarButtonSurface"
+                                                            Background="{TemplateBinding Background}"
+                                                            CornerRadius="0,6,6,0" SnapsToDevicePixels="True">
+                                                        <TextBlock x:Name="CalendarIcon" Text="&#xE787;"
+                                                                   FontFamily="{StaticResource AppIconFont}"
+                                                                   FontSize="16" Foreground="{TemplateBinding Foreground}"
+                                                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                    </Border>
+                                                    <ControlTemplate.Triggers>
+                                                        <Trigger Property="IsMouseOver" Value="True">
+                                                            <Setter TargetName="CalendarButtonSurface" Property="Background" Value="{StaticResource PrimaryLightBrush}"/>
+                                                        </Trigger>
+                                                        <Trigger Property="IsPressed" Value="True">
+                                                            <Setter TargetName="CalendarButtonSurface" Property="Background" Value="{StaticResource SurfacePressedBrush}"/>
+                                                            <Setter TargetName="CalendarIcon" Property="Foreground" Value="{StaticResource PrimaryDarkBrush}"/>
+                                                        </Trigger>
+                                                        <Trigger Property="IsEnabled" Value="False">
+                                                            <Setter TargetName="CalendarButtonSurface" Property="Opacity" Value="0.45"/>
+                                                        </Trigger>
+                                                    </ControlTemplate.Triggers>
+                                                </ControlTemplate>
+                                            </Button.Template>
+                                        </Button>
+                                    </Border>
+                                </Grid>
+                            </Border>
+                            <Popup x:Name="PART_Popup" AllowsTransparency="True" Placement="Bottom"
+                                   PlacementTarget="{Binding ElementName=PickerBorder}"
+                                   StaysOpen="False" Focusable="False" PopupAnimation="Fade">
+                                <Border Margin="0,5,0,0" Background="{StaticResource CardBrush}"
+                                        BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
+                                        CornerRadius="8" Padding="6" Effect="{StaticResource CardShadow}">
+                                    <Calendar x:Name="PART_Calendar" BorderThickness="0"
+                                              Background="{StaticResource CardBrush}"
+                                              Foreground="{StaticResource TextBrush}"/>
+                                </Border>
+                            </Popup>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsKeyboardFocusWithin" Value="True">
+                                <Setter TargetName="PickerBorder" Property="BorderBrush" Value="{StaticResource PrimaryBrush}"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="PickerBorder" Property="Opacity" Value="0.5"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Page.Resources>
+    <Grid Margin="24,20,24,20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <Grid Grid.Row="0" Margin="0,0,0,12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <StackPanel>
+                <TextBlock Text="系统日志" Style="{StaticResource TitleText}"/>
+                <TextBlock x:Name="PageStatusText" Text="操作 / 通讯 / 开锁日志统一查看"
+                           Style="{StaticResource PageStatusText}"/>
+            </StackPanel>
+            <Button x:Name="RefreshButton" Grid.Column="1" Style="{StaticResource IconButton}"
+                    Content="&#xE72C;" ToolTip="刷新当前页签" Click="RefreshButton_Click"
+                    VerticalAlignment="Bottom"/>
+        </Grid>
+
+        <TabControl x:Name="LogTabs" Grid.Row="1" SelectionChanged="LogTabs_SelectionChanged"
+                    Style="{StaticResource SystemLogTabControl}">
+            <!-- 操作日志 -->
+            <TabItem Header="操作日志" Style="{StaticResource SystemLogTabItem}">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <Border Style="{StaticResource SystemLogFilterPanel}" Margin="0,0,0,12">
+                        <WrapPanel>
+                            <StackPanel Margin="0,0,12,0">
+                                <TextBlock Text="关键词" Style="{StaticResource LabelText}" Margin="0,0,0,5"/>
+                                <TextBox x:Name="OpKeywordBox" Width="180"/>
+                            </StackPanel>
+                            <StackPanel Margin="0,0,12,0">
+                                <TextBlock Text="开始日期" Style="{StaticResource LabelText}" Margin="0,0,0,5"/>
+                                <DatePicker x:Name="OpStartDatePicker" Style="{StaticResource SystemLogDatePicker}"/>
+                            </StackPanel>
+                            <StackPanel Margin="0,0,12,0">
+                                <TextBlock Text="结束日期" Style="{StaticResource LabelText}" Margin="0,0,0,5"/>
+                                <DatePicker x:Name="OpEndDatePicker" Style="{StaticResource SystemLogDatePicker}"/>
+                            </StackPanel>
+                            <Button x:Name="OpQueryButton" Content="查询" Width="82" VerticalAlignment="Bottom"
+                                    Click="OpQueryButton_Click"/>
+                            <Button x:Name="OpExportButton" Style="{StaticResource SecondaryButton}" Content="导出 XLS"
+                                    Width="100" Margin="8,0,0,0" VerticalAlignment="Bottom"
+                                    Click="OpExportButton_Click"/>
+                        </WrapPanel>
+                    </Border>
+
+                    <Border Grid.Row="1" Style="{StaticResource SystemLogDataPanel}">
+                        <DataGrid EnableRowVirtualization="True" VirtualizingPanel.IsVirtualizing="True" x:Name="OpDataGrid" BorderThickness="0" IsReadOnly="True" SelectionMode="Single"
+                                  AutoGenerateColumns="False">
+                            <DataGrid.Resources>
+                                <Style TargetType="TextBlock" BasedOn="{StaticResource DataGridTextBlockStyle}"/>
+                            </DataGrid.Resources>
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="时间" Binding="{Binding TimeText}" Width="150"
+                                                    ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                                <DataGridTextColumn Header="操作者" Binding="{Binding OperatorId}" Width="100"
+                                                    ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                                <DataGridTextColumn Header="姓名" Binding="{Binding OperatorName}" Width="100"
+                                                    ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                                <DataGridTextColumn Header="模块" Binding="{Binding Module}" Width="90"
+                                                    ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                                <DataGridTextColumn Header="动作" Binding="{Binding Action}" Width="120"
+                                                    ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                                <DataGridTextColumn Header="目标" Binding="{Binding Target}" Width="120"
+                                                    ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                                <DataGridTextColumn Header="结果" Binding="{Binding Result}" Width="70"
+                                                    ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                                <DataGridTextColumn Header="详情" Binding="{Binding Detail}" Width="*"
+                                                    ElementStyle="{StaticResource DataGridLeftTextBlockStyle}"/>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </Border>
+
+                    <Grid Grid.Row="2" Margin="0,10,0,0">
+                        <TextBlock x:Name="OpStatusText" Visibility="Collapsed"/>
+                        <controls:PaginationControl x:Name="OpPager" PageRequested="OpPager_PageRequested"/>
+                    </Grid>
+                </Grid>
+            </TabItem>
+
+            <!-- 通讯日志 -->
+            <TabItem Header="通讯日志" Style="{StaticResource SystemLogTabItem}">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <Border Style="{StaticResource SystemLogFilterPanel}" Margin="0,0,0,12">
+                        <WrapPanel>
+                            <StackPanel Margin="0,0,12,0">
+                                <TextBlock Text="关键词" Style="{StaticResource LabelText}" Margin="0,0,0,5"/>
+                                <TextBox x:Name="CommKeywordBox" Width="180"/>
+                            </StackPanel>
+                            <StackPanel Margin="0,0,12,0">
+                                <TextBlock Text="开始日期" Style="{StaticResource LabelText}" Margin="0,0,0,5"/>
+                                <DatePicker x:Name="CommStartDatePicker" Style="{StaticResource SystemLogDatePicker}"/>
+                            </StackPanel>
+                            <StackPanel Margin="0,0,12,0">
+                                <TextBlock Text="结束日期" Style="{StaticResource LabelText}" Margin="0,0,0,5"/>
+                                <DatePicker x:Name="CommEndDatePicker" Style="{StaticResource SystemLogDatePicker}"/>
+                            </StackPanel>
+                            <StackPanel Margin="0,0,12,0">
+                                <TextBlock Text="方向" Style="{StaticResource LabelText}" Margin="0,0,0,5"/>
+                                <ComboBox x:Name="CommDirectionBox" Width="100">
+                                    <ComboBoxItem Content="全部" Tag="" IsSelected="True"/>
+                                    <ComboBoxItem Content="发送" Tag="Transmit"/>
+                                    <ComboBoxItem Content="接收" Tag="Receive"/>
+                                    <ComboBoxItem Content="状态" Tag="System"/>
+                                </ComboBox>
+                            </StackPanel>
+                            <Button x:Name="CommQueryButton" Content="查询" Width="82" VerticalAlignment="Bottom"
+                                    Click="CommQueryButton_Click"/>
+                            <Button x:Name="CommExportButton" Style="{StaticResource SecondaryButton}" Content="导出 XLS"
+                                    Width="100" Margin="8,0,0,0" VerticalAlignment="Bottom"
+                                    Click="CommExportButton_Click"/>
+                            <Button x:Name="CommClearButton" Style="{StaticResource SecondaryButton}" Content="清空缓存"
+                                    Width="90" Margin="8,0,0,0" VerticalAlignment="Bottom"
+                                    Click="CommClearButton_Click"/>
+                        </WrapPanel>
+                    </Border>
+
+                    <Border Grid.Row="1" Style="{StaticResource SystemLogDataPanel}">
+                        <DataGrid EnableRowVirtualization="True" VirtualizingPanel.IsVirtualizing="True" x:Name="CommDataGrid" BorderThickness="0" IsReadOnly="True" SelectionMode="Single"
+                                  AutoGenerateColumns="False" SelectionChanged="CommDataGrid_SelectionChanged">
+                            <DataGrid.Resources>
+                                <Style TargetType="TextBlock" BasedOn="{StaticResource DataGridTextBlockStyle}"/>
+                            </DataGrid.Resources>
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="时间" Binding="{Binding Timestamp, StringFormat=yyyy-MM-dd HH:mm:ss.fff}" Width="170"
+                                                    ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                                <DataGridTextColumn Header="方向" Binding="{Binding DirectionText}" Width="70"
+                                                    ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                                <DataGridTextColumn Header="类别" Binding="{Binding Category}" Width="100"
+                                                    ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                                <DataGridTextColumn Header="内容" Binding="{Binding Content}" Width="*"
+                                                    ElementStyle="{StaticResource DataGridLeftTextBlockStyle}"/>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </Border>
+
+                    <Border Grid.Row="2" Style="{StaticResource SystemLogDataPanel}" Margin="0,8,0,0" Padding="12,8" MinHeight="64"
+                            Background="{StaticResource GridAlternateBrush}">
+                        <TextBox x:Name="CommDetailBox" IsReadOnly="True" BorderThickness="0" Background="Transparent"
+                                 TextWrapping="Wrap" FontFamily="Cascadia Mono, Consolas, Microsoft YaHei UI" FontSize="11"
+                                 Foreground="{StaticResource TextBrush}"
+                                 VerticalScrollBarVisibility="Auto"/>
+                    </Border>
+
+                    <Grid Grid.Row="3" Margin="0,10,0,0">
+                        <TextBlock x:Name="CommStatusText" Visibility="Collapsed"/>
+                        <controls:PaginationControl x:Name="CommPager" PageRequested="CommPager_PageRequested"/>
+                    </Grid>
+                </Grid>
+            </TabItem>
+
+            <!-- 开锁日志 -->
+            <TabItem Header="开锁日志" Style="{StaticResource SystemLogTabItem}">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <Border Style="{StaticResource SystemLogFilterPanel}" Margin="0,0,0,12">
+                        <WrapPanel>
+                            <StackPanel Margin="0,0,12,0">
+                                <TextBlock Text="关键词" Style="{StaticResource LabelText}" Margin="0,0,0,5"/>
+                                <TextBox x:Name="UnlockKeywordBox" Width="150"/>
+                            </StackPanel>
+                            <StackPanel Margin="0,0,12,0">
+                                <TextBlock Text="设备 ID" Style="{StaticResource LabelText}" Margin="0,0,0,5"/>
+                                <TextBox x:Name="UnlockDeviceIdBox" Width="120"/>
+                            </StackPanel>
+                            <StackPanel Margin="0,0,12,0">
+                                <TextBlock Text="用户 ID" Style="{StaticResource LabelText}" Margin="0,0,0,5"/>
+                                <TextBox x:Name="UnlockUserIdBox" Width="120"/>
+                            </StackPanel>
+                            <StackPanel Margin="0,0,12,0">
+                                <TextBlock Text="结果" Style="{StaticResource LabelText}" Margin="0,0,0,5"/>
+                                <ComboBox x:Name="UnlockResultBox" Width="100">
+                                    <ComboBoxItem Content="全部" Tag="" IsSelected="True"/>
+                                    <ComboBoxItem Content="成功" Tag="success"/>
+                                    <ComboBoxItem Content="失败" Tag="fail"/>
+                                </ComboBox>
+                            </StackPanel>
+                            <StackPanel Margin="0,0,12,0">
+                                <TextBlock Text="开始日期" Style="{StaticResource LabelText}" Margin="0,0,0,5"/>
+                                <DatePicker x:Name="UnlockStartDatePicker" Style="{StaticResource SystemLogDatePicker}"/>
+                            </StackPanel>
+                            <StackPanel Margin="0,0,12,0">
+                                <TextBlock Text="结束日期" Style="{StaticResource LabelText}" Margin="0,0,0,5"/>
+                                <DatePicker x:Name="UnlockEndDatePicker" Style="{StaticResource SystemLogDatePicker}"/>
+                            </StackPanel>
+                            <Button x:Name="UnlockQueryButton" Content="查询" Width="82" VerticalAlignment="Bottom"
+                                    Click="UnlockQueryButton_Click"/>
+                            <Button x:Name="UnlockExportButton" Style="{StaticResource SecondaryButton}" Content="导出 XLS"
+                                    Width="100" Margin="8,0,0,0" VerticalAlignment="Bottom"
+                                    Click="UnlockExportButton_Click"/>
+                        </WrapPanel>
+                    </Border>
+
+                    <Border Grid.Row="1" Style="{StaticResource SystemLogDataPanel}">
+                        <DataGrid EnableRowVirtualization="True" VirtualizingPanel.IsVirtualizing="True" x:Name="UnlockDataGrid" BorderThickness="0" IsReadOnly="True" SelectionMode="Single"
+                                  AutoGenerateColumns="False">
+                            <DataGrid.Resources>
+                                <Style TargetType="TextBlock" BasedOn="{StaticResource DataGridTextBlockStyle}"/>
+                            </DataGrid.Resources>
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="时间" Binding="{Binding CreateTime, StringFormat=yyyy-MM-dd HH:mm:ss}" Width="150"
+                                                    ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                                <DataGridTextColumn Header="设备 ID" Binding="{Binding DeviceId}" Width="120"
+                                                    ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                                <DataGridTextColumn Header="账号/学号" Binding="{Binding DisplayUserId}" Width="110"
+                                                    ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                                <DataGridTextColumn Header="锁号" Binding="{Binding LockDisplay}" Width="74"
+                                                    ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                                <DataGridTextColumn Header="操作" Binding="{Binding Action}" Width="90"
+                                                    ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                                <DataGridTextColumn Header="结果" Binding="{Binding Result}" Width="70"
+                                                    ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                                <DataGridTextColumn Header="原因" Binding="{Binding Reason}" Width="*"
+                                                    ElementStyle="{StaticResource DataGridLeftTextBlockStyle}"/>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </Border>
+
+                    <Grid Grid.Row="2" Margin="0,10,0,0">
+                        <TextBlock x:Name="UnlockStatusText" Visibility="Collapsed"/>
+                        <controls:PaginationControl x:Name="UnlockPager" PageRequested="UnlockPager_PageRequested"/>
+                    </Grid>
+                </Grid>
+            </TabItem>
+        </TabControl>
+    </Grid>
+</Page>

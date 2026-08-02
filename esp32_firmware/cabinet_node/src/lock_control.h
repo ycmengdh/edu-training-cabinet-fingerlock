@@ -1,6 +1,6 @@
 /**
  * lock_control.h - 4 路锁控制 via 74HC595 移位寄存器
- * 595 Q0-Q3: 锁状态 LED，Q4-Q7: 继电器（均高电平有效）
+ * 595 Q0-Q3: 锁1-4 状态 LED；锁1-4继电器分别为 Q4/Q5/Q6/Q7（均高电平有效）
  *
  * LED 三种用途：
  *   - 开锁时常亮（跟随继电器）
@@ -18,7 +18,8 @@ public:
     // 初始化 595 控制引脚，默认所有锁关闭
     static void init();
 
-    // 开锁（非阻塞）：继电器 HIGH 持续 LOCK_OPEN_DURATION_MS 后自动关闭
+    // 开锁（非阻塞）：继电器 HIGH 持续 LOCK_OPEN_DURATION_MS 后自动关闭；
+    // LOCK_FORCE_OFF_MS 是硬保护上限，重复开锁不会刷新该保护计时。
     // lockId: 0~3，返回 true 表示已触发，false 表示参数无效
     static bool openLock(int lockId);
 
@@ -45,6 +46,7 @@ public:
 private:
     static bool lockActive[LOCK_COUNT];         // 是否处于开锁激活状态
     static unsigned long lockOpenTime[LOCK_COUNT]; // 开锁触发时刻
+    static unsigned long lockActiveStartTime[LOCK_COUNT]; // 本次连续开锁开始时刻
     static bool ledHint[LOCK_COUNT];            // 验证窗口权限提示
     static bool blinkPhaseOn;                   // 慢闪当前相位（亮/灭）
     static unsigned long lastBlinkToggleMs;     // 上次慢闪切换时刻

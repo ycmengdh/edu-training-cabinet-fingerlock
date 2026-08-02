@@ -4,7 +4,7 @@
  *
  * V2.7 流程反转：先验证指纹 -> 10 秒操作窗口 -> 按键开锁
  *   - STATE_WAIT_FINGER: 常态轮询 AS608，匹配成功则载入权限进入窗口态
- *   - STATE_VERIFIED_WINDOW: 指纹头绿灯常亮 + 有权限锁 LED 慢闪；
+ *   - STATE_VERIFIED_WINDOW: 有权限锁 LED 慢闪；
  *     10s 内按对应键开锁 / K5 取消 / 超时回 WAIT_FINGER
  *   - STATE_ENROLLING: 主/副指纹录入
  *

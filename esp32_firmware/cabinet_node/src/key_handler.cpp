@@ -1,6 +1,6 @@
 /**
  * key_handler.cpp - 5 路按键处理实现
- * K1-K4 开锁: GPIO 47/48/45/39, K5 取消: GPIO 40
+ * K1-K4 开锁: GPIO 47/48/45/38, K5 取消: GPIO 39
  * 上拉输入，按下为 LOW，含消抖和长按检测
  */
 #include "key_handler.h"
@@ -62,7 +62,7 @@ void KeyHandler::update() {
                 (now - pressStartTime[i] >= KEY_LONGPRESS_MS)) {
                 longPressFired[i] = true;
                 longPressKey      = i;
-                Debug::printf("[KEY] Long press detected: Key%d (duration %lu ms)\n", i, now - pressStartTime[i]);
+                Debug::printf("[KEY] Long press detected: K%d (duration %lu ms)\n", i + 1, now - pressStartTime[i]);
             }
         }
     }
@@ -75,9 +75,9 @@ int KeyHandler::getKeyPressed() {
             if ((now - pressStartTime[i]) < KEY_LONGPRESS_MS) {
                 pressedReported[i] = true;
                 if (i == KEY_CANCEL_INDEX) {
-                    Debug::printf("[KEY] Cancel key pressed: Key%d\n", i);
+                    Debug::printf("[KEY] Cancel key pressed: K%d\n", i + 1);
                 } else {
-                    Debug::printf("[KEY] Lock key pressed: Key%d\n", i);
+                    Debug::printf("[KEY] Lock key pressed: K%d -> Lock%d\n", i + 1, i + 1);
                 }
                 return i;
             }
@@ -88,7 +88,7 @@ int KeyHandler::getKeyPressed() {
 
 bool KeyHandler::isLongPressDetected() {
     if (longPressKey >= 0) {
-        Debug::printf("[KEY] Long press event triggered, switch mode (Key%d)\n", longPressKey);
+        Debug::printf("[KEY] Long press event triggered, switch mode (K%d)\n", longPressKey + 1);
         longPressFired[longPressKey] = true;
         int fired = longPressKey;
         longPressKey = -1;

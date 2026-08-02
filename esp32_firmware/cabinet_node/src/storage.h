@@ -41,7 +41,7 @@ public:
     static bool isPermissionLost();
     // 全量替换权限数据（从 SYNC_PERMISSIONS 调用）
     // users: 权限数组，count: 数量
-    // 注意：全量替换只清除主指纹(is_backup=false)记录，保留本机副指纹(is_backup=true)记录。
+    // 全量快照是完整授权集合，不保留快照之外的旧记录。
     static bool replaceAllPermissions(const UserPermission *users, int count, uint32_t version);
 
     // ====== 设备专属副指纹（V2.7） ======

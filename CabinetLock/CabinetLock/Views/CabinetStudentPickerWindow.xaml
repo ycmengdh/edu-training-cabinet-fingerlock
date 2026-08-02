@@ -1,0 +1,70 @@
+<local:BorderlessWindow x:Class="CabinetLock.CabinetStudentPickerWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:CabinetLock"
+        Title="选择分配学生" Height="570" Width="620"
+        WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
+        Background="{StaticResource BackgroundBrush}">
+    <Grid Margin="24,20,24,22">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <StackPanel>
+            <TextBlock Text="选择分配学生" Style="{StaticResource TitleText}"/>
+            <TextBlock x:Name="CabinetText" Style="{StaticResource PageStatusText}"
+                       Margin="0,5,0,0" TextWrapping="Wrap"/>
+        </StackPanel>
+
+        <Grid Grid.Row="1" Margin="0,14,0,10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBox x:Name="SearchBox" Height="34" ToolTip="按姓名或学号筛选"
+                     TextChanged="SearchBox_TextChanged"/>
+            <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="10,0,0,0">
+                <Button Content="选择未分配" Style="{StaticResource CompactSecondaryButton}"
+                        Height="30" Padding="10,0" Click="SelectUnassignedButton_Click"/>
+                <Button Content="清空" Style="{StaticResource CompactSecondaryButton}"
+                        Height="30" Padding="10,0" Margin="6,0,0,0" Click="ClearButton_Click"/>
+            </StackPanel>
+        </Grid>
+
+        <Border Grid.Row="2" Style="{StaticResource Panel}" Padding="8">
+            <ListBox x:Name="StudentList" BorderThickness="0" Background="Transparent"
+                     ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                <ListBox.ItemTemplate>
+                    <DataTemplate>
+                        <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}" Margin="7,6">
+                            <Grid Width="510">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="1.1*"/>
+                                    <ColumnDefinition Width="1.1*"/>
+                                    <ColumnDefinition Width="1.4*"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="{Binding Name}"/>
+                                <TextBlock Grid.Column="1" Text="{Binding StudentNo}"
+                                           Foreground="{StaticResource SubTextBrush}"/>
+                                <TextBlock Grid.Column="2" Text="{Binding AssignmentText}"
+                                           Foreground="{Binding AssignmentBrush}"/>
+                            </Grid>
+                        </CheckBox>
+                    </DataTemplate>
+                </ListBox.ItemTemplate>
+            </ListBox>
+        </Border>
+
+        <Grid Grid.Row="3" Margin="0,14,0,0">
+            <TextBlock x:Name="SelectionText" VerticalAlignment="Center"
+                       Foreground="{StaticResource SubTextBrush}"/>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button Content="取消" Style="{StaticResource SecondaryButton}" Click="CancelButton_Click"/>
+                <Button Content="下一步" Margin="8,0,0,0" Click="ConfirmButton_Click"/>
+            </StackPanel>
+        </Grid>
+    </Grid>
+</local:BorderlessWindow>

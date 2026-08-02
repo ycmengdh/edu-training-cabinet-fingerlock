@@ -1,0 +1,227 @@
+<Page x:Class="CabinetLock.CabinetManagePage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:controls="clr-namespace:CabinetLock.Controls"
+      Title="实训柜管理" Background="{StaticResource BackgroundBrush}">
+    <Grid Style="{StaticResource PageRoot}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <Grid Grid.Row="0" Style="{StaticResource PageHeader}">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <StackPanel>
+                <TextBlock Text="实训柜管理" Style="{StaticResource TitleText}"/>
+                <TextBlock x:Name="PageStatusText" Text="正在读取柜子状态" Style="{StaticResource PageStatusText}"/>
+            </StackPanel>
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Bottom">
+                <Button x:Name="ResyncButton" Style="{StaticResource SecondaryButton}"
+                        Content="同步全部柜子" Click="ResyncButton_Click"/>
+                <Button x:Name="RefreshButton" Style="{StaticResource IconButton}"
+                        Content="&#xE72C;" ToolTip="刷新柜子列表" Margin="8,0,0,0"
+                        Click="RefreshButton_Click"/>
+            </StackPanel>
+        </Grid>
+
+        <Border Grid.Row="1" Style="{StaticResource ToolbarPanel}" Padding="0" Margin="0,0,0,14">
+            <Grid Height="72">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="1"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="1"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="1"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0" HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <TextBlock x:Name="TotalCabinetText" Text="0" FontSize="20" FontWeight="SemiBold"
+                               HorizontalAlignment="Center"/>
+                    <TextBlock Text="柜子总数" Style="{StaticResource LabelText}"/>
+                </StackPanel>
+                <Border Grid.Column="1" Width="1" Height="36" Background="{StaticResource BorderBrush}"/>
+                <StackPanel Grid.Column="2" HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <TextBlock x:Name="OnlineCabinetText" Text="0" FontSize="20" FontWeight="SemiBold"
+                               Foreground="{StaticResource SuccessBrush}" HorizontalAlignment="Center"/>
+                    <TextBlock Text="当前在线" Style="{StaticResource LabelText}"/>
+                </StackPanel>
+                <Border Grid.Column="3" Width="1" Height="36" Background="{StaticResource BorderBrush}"/>
+                <StackPanel Grid.Column="4" HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <TextBlock x:Name="SyncedCabinetText" Text="0" FontSize="20" FontWeight="SemiBold"
+                               HorizontalAlignment="Center"/>
+                    <TextBlock Text="权限已同步" Style="{StaticResource LabelText}"/>
+                </StackPanel>
+                <Border Grid.Column="5" Width="1" Height="36" Background="{StaticResource BorderBrush}"/>
+                <StackPanel Grid.Column="6" HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <TextBlock x:Name="AttentionCabinetText" Text="0" FontSize="20" FontWeight="SemiBold"
+                               Foreground="{StaticResource WarningBrush}" HorizontalAlignment="Center"/>
+                    <TextBlock Text="需要处理" Style="{StaticResource LabelText}"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <Border Grid.Row="2" Style="{StaticResource Panel}">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="58"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <Grid Grid.Row="0" Margin="16,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                        <TextBlock Text="柜子列表" Style="{StaticResource SectionTitleText}"
+                                   VerticalAlignment="Center" Margin="0,0,12,0"/>
+                        <TextBlock x:Name="VisibleCountText" Text="0 台"
+                                   Foreground="{StaticResource SubTextBrush}" VerticalAlignment="Center"/>
+                    </StackPanel>
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                        <TextBlock Text="搜索" Style="{StaticResource LabelText}" Margin="0,0,7,0"/>
+                        <TextBox x:Name="CabinetSearchBox" Width="210" Height="34"
+                                 ToolTip="按设备编号、名称、MAC 或通讯 ID 搜索" TextChanged="CabinetFilter_Changed"/>
+                        <ComboBox x:Name="CabinetStatusFilter" Width="132" Height="34" Margin="10,0,0,0"
+                                  SelectionChanged="CabinetFilter_Changed">
+                            <ComboBoxItem Content="全部状态" Tag="all" IsSelected="True"/>
+                            <ComboBoxItem Content="在线" Tag="online"/>
+                            <ComboBoxItem Content="离线" Tag="offline"/>
+                            <ComboBoxItem Content="权限落后" Tag="lagging"/>
+                            <ComboBoxItem Content="需要处理" Tag="attention"/>
+                        </ComboBox>
+                    </StackPanel>
+                </Grid>
+
+                <Grid Grid.Row="1">
+                    <DataGrid x:Name="CabinetDataGrid" BorderThickness="0" IsReadOnly="True"
+                              SelectionMode="Single" MouseDoubleClick="CabinetDataGrid_MouseDoubleClick"
+                              KeyDown="CabinetDataGrid_KeyDown" EnableRowVirtualization="True">
+                        <DataGrid.Resources>
+                            <Style TargetType="TextBlock" BasedOn="{StaticResource DataGridTextBlockStyle}"/>
+                            <Style TargetType="DataGridRow" BasedOn="{StaticResource {x:Type DataGridRow}}">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding AttentionKind}" Value="offline">
+                                        <Setter Property="Opacity" Value="0.78"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </DataGrid.Resources>
+                        <DataGrid.Columns>
+                            <DataGridTemplateColumn Header="状态" Width="86">
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
+                                            <Ellipse Width="8" Height="8" Margin="0,0,7,0">
+                                                <Ellipse.Style>
+                                                    <Style TargetType="Ellipse">
+                                                        <Setter Property="Fill" Value="{StaticResource DangerBrush}"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsOnline}" Value="True">
+                                                                <Setter Property="Fill" Value="{StaticResource SuccessBrush}"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </Ellipse.Style>
+                                            </Ellipse>
+                                            <TextBlock Text="{Binding OnlineStatusText}">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock" BasedOn="{StaticResource DataGridTextBlockStyle}">
+                                                        <Setter Property="Foreground" Value="{StaticResource DangerBrush}"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsOnline}" Value="True">
+                                                                <Setter Property="Foreground" Value="{StaticResource SuccessBrush}"/>
+                                                                <Setter Property="FontWeight" Value="SemiBold"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                            </DataGridTemplateColumn>
+                            <DataGridTextColumn Header="设备编号" Binding="{Binding DeviceNumber}" Width="92"
+                                                ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                            <DataGridTextColumn Header="柜子名称" Binding="{Binding DeviceName}" Width="1.1*" MinWidth="110"
+                                                ElementStyle="{StaticResource DataGridLeftTextBlockStyle}"/>
+                            <DataGridTextColumn Header="通讯 ID" Binding="{Binding DeviceId}" Width="1.15*" MinWidth="120"
+                                                ElementStyle="{StaticResource DataGridLeftTextBlockStyle}"/>
+                            <DataGridTextColumn Header="指纹槽" Binding="{Binding FingerprintSlotHint}" Width="70"
+                                                ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                            <DataGridTextColumn Header="权限数" Binding="{Binding Status.PermissionCount}" Width="70"
+                                                ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                            <DataGridTemplateColumn Header="权限同步" Width="88">
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding PermissionSyncText}" HorizontalAlignment="Center" VerticalAlignment="Center">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock" BasedOn="{StaticResource DataGridTextBlockStyle}">
+                                                    <Setter Property="Foreground" Value="{StaticResource SubTextBrush}"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding PermissionSyncText}" Value="已同步">
+                                                            <Setter Property="Foreground" Value="{StaticResource SuccessBrush}"/>
+                                                            <Setter Property="FontWeight" Value="SemiBold"/>
+                                                        </DataTrigger>
+                                                        <DataTrigger Binding="{Binding PermissionSyncText}" Value="落后">
+                                                            <Setter Property="Foreground" Value="{StaticResource WarningBrush}"/>
+                                                            <Setter Property="FontWeight" Value="SemiBold"/>
+                                                        </DataTrigger>
+                                                        <DataTrigger Binding="{Binding PermissionSyncText}" Value="离线">
+                                                            <Setter Property="Foreground" Value="{StaticResource DangerBrush}"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                            </DataGridTemplateColumn>
+                            <DataGridTextColumn Header="版本" Binding="{Binding Status.PermissionVersion}" Width="72"
+                                                ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                            <DataGridTextColumn Header="最后在线" Binding="{Binding LastSeenTime, StringFormat={}{0:MM-dd HH:mm}}" Width="100"
+                                                ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                            <DataGridTemplateColumn Header="操作" Width="168">
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                            <Button Tag="{Binding}" Click="SyncOneButton_Click"
+                                                    Style="{StaticResource IconButton}" Content="&#xE895;"
+                                                    ToolTip="同步本柜指纹与权限（每用户一槽）" Width="30" MinWidth="30"
+                                                    Height="30" MinHeight="30" Margin="0,0,4,0"/>
+                                            <Button Tag="{Binding}" Click="EditDeviceButton_Click"
+                                                    Style="{StaticResource IconButton}" Content="&#xE70F;"
+                                                    ToolTip="修改柜子名称和编号" Width="30" MinWidth="30"
+                                                    Height="30" MinHeight="30" Margin="0,0,4,0"/>
+                                            <Button Tag="{Binding}" Click="OpenDetailButton_Click"
+                                                    Style="{StaticResource IconButton}" Content="&#xE76C;"
+                                                    ToolTip="打开柜子详情" Width="30" MinWidth="30"
+                                                    Height="30" MinHeight="30"/>
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                            </DataGridTemplateColumn>
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <StackPanel x:Name="EmptyStatePanel" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                Visibility="Collapsed" IsHitTestVisible="False">
+                        <TextBlock Text="&#xE968;" FontFamily="{StaticResource AppIconFont}" FontSize="28"
+                                   Foreground="{StaticResource SubTextBrush}" HorizontalAlignment="Center"/>
+                        <TextBlock x:Name="EmptyStateText" Text="暂无柜子" Margin="0,8,0,0"
+                                   Foreground="{StaticResource SubTextBrush}"/>
+                    </StackPanel>
+                </Grid>
+            </Grid>
+        </Border>
+
+        <controls:PaginationControl x:Name="Pager" Grid.Row="3" Margin="0,10,0,0"
+                                    PageRequested="Pager_PageRequested"/>
+    </Grid>
+</Page>

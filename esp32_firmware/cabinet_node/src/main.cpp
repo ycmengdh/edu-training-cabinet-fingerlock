@@ -28,14 +28,11 @@
 #include "mesh_comm.h"
 #include "message_handler.h"
 #include "logger.h"
-#include "led_indicator.h"
 #include "app_protocol.h"
 
 // ====== 全局变量 ======
 DeviceConfig deviceConfig;          // 设备配置
 unsigned long lastStatusReport = 0; // 上次状态上报时刻
-unsigned long lastLedToggle    = 0; // 上次 LED 切换时刻
-bool ledState                  = false;
 unsigned long bootTime         = 0;
 
 // NTP 配置（Root STA 上行模式时自动同步）
@@ -87,27 +84,6 @@ void onMeshMessage(const uint8_t *fromMac, const String &json) {
                   MeshComm::macToString(fromMac).c_str(), json.c_str());
 }
 
-// ====== LED 指示函数 ======
-// 中速闪=Mesh连接中，慢闪=Mesh已连接；UART0 状态不改变 Mesh 指示。
-void updateLED() {
-    unsigned long now = millis();
-    if (MeshComm::isMeshConnected()) {
-        // Mesh 已连接慢闪
-        if (now - lastLedToggle >= LED_BLINK_SLOW_MS) {
-            lastLedToggle = now;
-            ledState = !ledState;
-            digitalWrite(LED_PIN, ledState ? HIGH : LOW);
-        }
-    } else {
-        // Mesh 连接中中速闪
-        if (now - lastLedToggle >= LED_BLINK_MEDIUM_MS) {
-            lastLedToggle = now;
-            ledState = !ledState;
-            digitalWrite(LED_PIN, ledState ? HIGH : LOW);
-        }
-    }
-}
-
 // ====== NTP 时间同步（Root STA 上行模式） ======
 void initNTP() {
     // 仅 Root 节点且 STA 上行模式才有外网，可走 NTP
@@ -155,9 +131,6 @@ void setup() {
     Debug::println(F("  ESP32 Cabinet Node Firmware v2.5"));
     Debug::println(F("  Fingerprint Lock + Mesh / UART0 Host"));
     Debug::println(F("========================================"));
-
-    pinMode(LED_PIN, OUTPUT);
-    digitalWrite(LED_PIN, HIGH);
 
     Storage::begin();
     Storage::loadDeviceConfig(deviceConfig);
@@ -210,7 +183,6 @@ void setup() {
         Debug::printf("[MAIN] Fingerprint init failed (round %d/3), retry in 1s\n", i + 1);
         delay(1000);
     }
-    FpLed::init();
     Logger::init();
     MessageHandler::init();
 
@@ -223,7 +195,6 @@ void setup() {
 
     bootTime = millis();
     lastStatusReport = millis();
-    lastLedToggle    = millis();
 
     Serial.printf("\r\n[CABINET_BOOT] PROTOCOL READY; baud=%d; frame=A5 5A; mode=MESH+UART0\r\n",
                   DEBUG_UART_BAUD);
@@ -291,25 +262,19 @@ void loop() {
     // 6. 锁控制非阻塞计时（自动关锁）
     LockControl::update();
 
-    // 7. 指纹状态 LED 驱动（V2.7：识别中闪烁/成功常亮/失败闪烁）
-    FpLed::update();
-
-    // 8. 日志上报维护（网络可用时批量上报）
+    // 7. 日志上报维护（网络可用时批量上报）
     Logger::update();
 
-    // 9. 维护网络就绪状态（连接状态变化时更新日志上报标志）
+    // 8. 维护网络就绪状态（连接状态变化时更新日志上报标志）
     Logger::setNetworkReady(MeshComm::isConnected());
 
-    // 10. 定期状态上报（每 STATUS_REPORT_INTERVAL 一次）
+    // 9. 定期状态上报（每 STATUS_REPORT_INTERVAL 一次）
     unsigned long now = millis();
     if (MeshComm::isConnected() &&
         (now - lastStatusReport >= STATUS_REPORT_INTERVAL || lastStatusReport == 0)) {
         lastStatusReport = now;
         reportStatus();
     }
-
-    // 11. LED 指示灯更新（Mesh/调试状态）
-    updateLED();
 
     // 短暂让出 CPU
     delay(5);

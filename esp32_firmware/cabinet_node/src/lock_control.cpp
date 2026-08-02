@@ -1,8 +1,8 @@
 /**
  * lock_control.cpp - 4 路锁控制 via 74HC595 移位寄存器
  * 接线: DS=GPIO4, STCP=GPIO15, SHCP=GPIO16
- * 595 Q0-Q3: 锁1-4 状态 LED(高电平亮, LOW=灭)
- * 595 Q4-Q7: 锁1-4 继电器(高电平开锁, LOW=关锁)
+ * 595 继电器: Lock1-4 分别使用 OUT5/OUT6/OUT7/OUT8（Q4/Q5/Q6/Q7）
+ * 595 状态灯: Lock1-4 分别使用 OUT4/OUT3/OUT2/OUT1（Q3/Q2/Q1/Q0）
  * 每次 openLock/closeLock 后更新整个 595 输出
  *
  * 硬件实测极性（与早期“低电平开锁”注释相反）：
@@ -15,36 +15,41 @@
 
 bool LockControl::lockActive[LOCK_COUNT]            = {false, false, false, false};
 unsigned long LockControl::lockOpenTime[LOCK_COUNT]  = {0, 0, 0, 0};
+unsigned long LockControl::lockActiveStartTime[LOCK_COUNT] = {0, 0, 0, 0};
 bool LockControl::ledHint[LOCK_COUNT]               = {false, false, false, false};
 bool LockControl::blinkPhaseOn                      = false;
 unsigned long LockControl::lastBlinkToggleMs        = 0;
+static const uint8_t RELAY_BIT_BY_LOCK_ID[LOCK_COUNT] = {4, 5, 6, 7};
+static const uint8_t LED_BIT_BY_LOCK_ID[LOCK_COUNT]   = {3, 2, 1, 0};
 
 // ====== 74HC595 位移写入 ======
 void LockControl::shiftOut595(uint8_t data) {
     digitalWrite(SHIFT_STCP_PIN, LOW);
     // MSB first: Q7 先出
     for (int i = 7; i >= 0; i--) {
-        digitalWrite(SHIFT_SHCP_PIN, LOW);
+        digitalWrite(SHIFT_SHCP_PIN, LOW); 
         digitalWrite(SHIFT_DS_PIN, (data >> i) & 0x01);
-        digitalWrite(SHIFT_SHCP_PIN, HIGH);
-    }
+        digitalWrite(SHIFT_SHCP_PIN, HIGH); 
+    } 
     digitalWrite(SHIFT_STCP_PIN, HIGH);
 }
 
 // ====== 根据锁状态 + 提示灯相位计算 8 位输出并刷新 595 ======
-// Bit 0-3: Lock1-4 LED   (1=亮 HIGH, 0=灭 LOW)
-// Bit 4-7: Lock1-4 继电器 (1=开锁 HIGH, 0=关闭 LOW)
+// Lock1-4 继电器位: Q4/Q5/Q6/Q7 (OUT5/OUT6/OUT7/OUT8)
+// Lock1-4 LED 位: Q3/Q2/Q1/Q0 (OUT4/OUT3/OUT2/OUT1)
 // 优先级：开锁常亮 > 权限提示慢闪 > 熄灭
 void LockControl::updateShiftRegister() {
     uint8_t data = 0;
     for (int i = 0; i < LOCK_COUNT; i++) {
+        int relayBit = RELAY_BIT_BY_LOCK_ID[i];
+        int ledBit = LED_BIT_BY_LOCK_ID[i];
         if (lockActive[i]) {
             // 开锁: 继电器 HIGH(1), LED 常亮
-            data |= (1 << (LOCK_RELAY_BIT_BASE + i));
-            data |= (1 << (LOCK_LED_BIT_BASE + i));
+            data |= (1 << relayBit);
+            data |= (1 << ledBit);
         } else if (ledHint[i] && blinkPhaseOn) {
             // 验证窗口提示: 仅 LED 慢闪，继电器保持关
-            data |= (1 << (LOCK_LED_BIT_BASE + i));
+            data |= (1 << ledBit);
         }
     }
     shiftOut595(data);
@@ -69,13 +74,14 @@ void LockControl::init() {
     for (int i = 0; i < LOCK_COUNT; i++) {
         lockActive[i]   = false;
         lockOpenTime[i] = 0;
+        lockActiveStartTime[i] = 0;
         ledHint[i]      = false;
     }
     blinkPhaseOn = false;
     lastBlinkToggleMs = millis();
     // 初始状态: 所有锁关闭
     updateShiftRegister();
-    Debug::println(F("[LOCK] 4-channel lock control init via 74HC595"));
+    Debug::println(F("[LOCK] Mapping: Lock1-4 relay OUT4/OUT3/OUT2/OUT1, LED OUT5/OUT6/OUT7/OUT8"));
 }
 
 bool LockControl::openLock(int lockId) {
@@ -85,29 +91,36 @@ bool LockControl::openLock(int lockId) {
     }
     if (lockActive[lockId]) {
         lockOpenTime[lockId] = millis();
-        Debug::printf("[LOCK] Lock %d already open, refreshing timer\n", lockId);
+        Debug::printf("[LOCK] Lock%d already open, refreshing timer\n", lockId + 1);
         return true;
     }
     lockActive[lockId]   = true;
     lockOpenTime[lockId] = millis();
+    lockActiveStartTime[lockId] = lockOpenTime[lockId];
     // 开锁后该路 LED 改常亮；其它提示位由 clearPermissionHint 清理
     updateShiftRegister();
-    Debug::printf("[LOCK] Open lock %d (relay HIGH, LED on)\n", lockId);
+    Debug::printf("[LOCK] Open Lock%d (relay OUT%d HIGH, LED OUT%d on)\n",
+                  lockId + 1, 5 + lockId, 4 - lockId);
     return true;
 }
 
 void LockControl::closeLock(int lockId) {
     if (lockId < 0 || lockId >= LOCK_COUNT) return;
     if (lockActive[lockId]) {
-        Debug::printf("[LOCK] Close lock %d (relay LOW, LED off)\n", lockId);
+        Debug::printf("[LOCK] Close Lock%d (relay OUT%d LOW, LED OUT%d off)\n",
+                      lockId + 1, 5 + lockId, 4 - lockId);
     }
     lockActive[lockId] = false;
+    lockOpenTime[lockId] = 0;
+    lockActiveStartTime[lockId] = 0;
     updateShiftRegister();
 }
 
 void LockControl::closeAllLocks() {
     for (int i = 0; i < LOCK_COUNT; i++) {
         lockActive[i] = false;
+        lockOpenTime[i] = 0;
+        lockActiveStartTime[i] = 0;
     }
     updateShiftRegister();
 }
@@ -159,7 +172,13 @@ void LockControl::clearPermissionHint() {
 void LockControl::update() {
     unsigned long now = millis();
     for (int i = 0; i < LOCK_COUNT; i++) {
-        if (lockActive[i] && (now - lockOpenTime[i] >= LOCK_OPEN_DURATION_MS)) {
+        if (!lockActive[i]) continue;
+
+        unsigned long activeMs = now - lockActiveStartTime[i];
+        if (activeMs >= LOCK_FORCE_OFF_MS) {
+            Debug::printf("[LOCK][PROTECT] Force close Lock%d after %lu ms\n", i + 1, activeMs);
+            closeLock(i);
+        } else if (now - lockOpenTime[i] >= LOCK_OPEN_DURATION_MS) {
             closeLock(i);
         }
     }

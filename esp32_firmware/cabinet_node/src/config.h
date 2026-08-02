@@ -40,59 +40,30 @@
 #define FINGER_RETRY_DELAY_MS       200
 
 // ===================== 74HC595 移位寄存器 =====================
-// 实板映射：Q0-Q3 为锁状态 LED，Q4-Q7 为继电器。
+// 实板映射：OUT1-OUT4(Q0-Q3) 为锁状态 LED，OUT5-OUT8(Q4-Q7) 为锁继电器。
+// Lock1-4 继电器分别为 OUT5/OUT6/OUT7/OUT8；LED 分别为 OUT4/OUT3/OUT2/OUT1。
 // 两组均高电平有效；权限提示只能写 LED 位，禁止改动继电器位。
 // 待机默认 595 输出 0x00（锁全关、LED 全灭）
 #define SHIFT_DS_PIN            4
 #define SHIFT_STCP_PIN          15
 #define SHIFT_SHCP_PIN          16
-#define LOCK_LED_BIT_BASE       0
-#define LOCK_RELAY_BIT_BASE     4
 
 // ===================== 按键: K1-K4 开锁, K5 取消 =====================
-// K1=47, K2=48, K3=45, K4=39, K5=40
+// K1=47, K2=48, K3=45, K4=38, K5=39
 #define KEY0_PIN                47
 #define KEY1_PIN                48
 #define KEY2_PIN                45
-#define KEY3_PIN                39
-#define KEY4_PIN                40
+#define KEY3_PIN                38
+#define KEY4_PIN                39
 #define KEY_COUNT               5
 #define KEY_CANCEL_INDEX        4
 
-// LED 状态指示（Mesh/调试，非锁 LED）
-#define LED_PIN                 2
-
-// ===================== 指纹状态 LED（V2.7） =====================
-// 双色 LED 指示指纹验证状态：
-//   识别中：绿灯慢闪（500ms 周期）
-//   成功：  绿灯常亮（持续至 10s 操作窗口结束）
-//   失败：  红灯闪烁 3 次
-// 验证窗口内，有权限的锁 LED（595 Q0~Q3）另由 LockControl 慢闪提示。
-// 若硬件为单 GPIO 双色（共阳/共阴），可通过 FP_LED_COMMON_ANODE 切换极性。
-#define FP_LED_GREEN_PIN        41
-#define FP_LED_RED_PIN          38
-// 共阳极 LED：HIGH=灭, LOW=亮。共阴极 LED：HIGH=亮, LOW=灭。
-// 默认共阴极（多数开发板板载 LED 为共阴）。
-#define FP_LED_COMMON_ANODE     0
-
 // 锁控制参数
-#define LOCK_OPEN_DURATION_MS   3000
+#define LOCK_OPEN_DURATION_MS   500
+#define LOCK_FORCE_OFF_MS       2000
 
 // 按键参数
 #define KEY_DEBOUNCE_MS         20
 #define KEY_LONGPRESS_MS        10000
-
-// WiFi 调试模式配置（保留 AP 可选；主调试链路为 UART0）
-#define AP_DEFAULT_PASSWORD     "12345678"
-#define AP_IP_ADDR              "192.168.4.1"
-#define AP_GATEWAY              "192.168.4.1"
-#define AP_SUBNET               "255.255.255.0"
-#define DEBUG_TCP_PORT          8888
-#define DEBUG_TCP_RX_BUF_SIZE   1024
-
-// LED 闪烁参数
-#define LED_BLINK_FAST_MS       200
-#define LED_BLINK_SLOW_MS       1000
-#define LED_BLINK_MEDIUM_MS     500
 
 #endif

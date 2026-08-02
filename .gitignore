@@ -46,9 +46,11 @@ tmp/
 temp/
 *.tmp
 *.log
+build_errors.txt
 app_config.json
 __pycache__/
 .artifacts/
+.build-check/
 .zcode/
 debug/output/
 通讯日志_*.xls

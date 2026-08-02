@@ -22,10 +22,12 @@
 #include "sd_storage.h"
 static void syncPermissionsToCabinet(const uint8_t *mac, const char *deviceId);
 static uint32_t composePermissionVersion(uint32_t usersVersion,
-                                         uint32_t permissionsVersion) {
+                                         uint32_t permissionsVersion,
+                                         uint32_t fingerprintsVersion = 0) {
     uint32_t value = 2166136261U;
     value = (value ^ usersVersion) * 16777619U;
     value = (value ^ permissionsVersion) * 16777619U;
+    value = (value ^ fingerprintsVersion) * 16777619U;
     return value == 0 ? 1U : value;
 }
 #endif
@@ -274,12 +276,15 @@ static uint8_t s_permQCount = 0;
 static DynamicJsonDocument *s_usersDoc = nullptr;
 static DynamicJsonDocument *s_rolesDoc = nullptr;
 static DynamicJsonDocument *s_overridesDoc = nullptr;
+static DynamicJsonDocument *s_fingerprintsDoc = nullptr;
 static uint8_t s_syncMac[6];
 static char s_syncDeviceId[APP_DEVICE_ID_MAX + 1];
 static uint32_t s_syncVersion = 0;
 static int s_syncTotal = 0;
 static int s_syncSequence = 0;
 static int s_syncUserIndex = 0;
+static int s_syncFingerprintIndex = 0;
+static bool s_syncUserHasFingerprint = false;
 static uint8_t s_syncPhase = 0; // 0 idle, 1 begin, 2 rows, 3 commit
 static unsigned long s_syncNextMs = 0;
 static unsigned long s_syncNotBeforeMs = 0;
@@ -318,7 +323,7 @@ static bool queuePermissionSync(const uint8_t *mac, const char *deviceId) {
 
 static void schedulePermissionSyncAfterDataChange(const String &table) {
     if (table != "users" && table != "permissions" &&
-        table != "role_permissions") return;
+        table != "role_permissions" && table != "fingerprints") return;
     s_permissionDataDirty = true;
     s_permissionDataChangedAt = millis();
 }
@@ -353,6 +358,64 @@ static void freeSyncDocs() {
     if (s_usersDoc) { delete s_usersDoc; s_usersDoc = nullptr; }
     if (s_rolesDoc) { delete s_rolesDoc; s_rolesDoc = nullptr; }
     if (s_overridesDoc) { delete s_overridesDoc; s_overridesDoc = nullptr; }
+    if (s_fingerprintsDoc) { delete s_fingerprintsDoc; s_fingerprintsDoc = nullptr; }
+}
+
+static JsonObject findCabinetAssignment(JsonObject user, const char *deviceId) {
+    JsonArray assignments = user["cabinet_assignments"].as<JsonArray>();
+    for (JsonObject assignment : assignments) {
+        const char *assignedDevice = assignment["device_id"] | "";
+        if (strcasecmp(assignedDevice, deviceId) == 0) return assignment;
+    }
+    return JsonObject();
+}
+
+static bool isUserAssignedToCabinet(JsonObject user, const char *deviceId) {
+    const char *role = user["role"] | "student";
+    if (strcmp(role, "student") != 0) return true;
+    JsonArray assignments = user["cabinet_assignments"].as<JsonArray>();
+    if (!assignments.isNull()) return !findCabinetAssignment(user, deviceId).isNull();
+    JsonArray assignedIds = user["assigned_device_ids"].as<JsonArray>();
+    if (!assignedIds.isNull()) {
+        for (JsonVariant value : assignedIds) {
+            if (strcasecmp(value.as<const char *>(), deviceId) == 0) return true;
+        }
+        return false;
+    }
+    return true;
+}
+
+static int defaultFingerprintId(JsonObject user, JsonArray fingerprints) {
+    String userId = user["user_id"] | "";
+    int bestId = -1;
+    int bestIndex = 999;
+    for (JsonObject fingerprint : fingerprints) {
+        if (String((const char *)(fingerprint["user_id"] | "")) != userId ||
+            !(fingerprint["enabled"] | true)) continue;
+        int id = fingerprint["fingerprint_id"] | -1;
+        int index = fingerprint["finger_index"] | 999;
+        if (id >= 0 && (index < bestIndex || (index == bestIndex && id < bestId))) {
+            bestId = id;
+            bestIndex = index;
+        }
+    }
+    return bestId;
+}
+
+static bool isFingerprintSelected(JsonObject user, const char *deviceId,
+                                  int fingerprintId, int defaultId) {
+    if (!isUserAssignedToCabinet(user, deviceId)) return false;
+    JsonObject assignment = findCabinetAssignment(user, deviceId);
+    if (!assignment.isNull()) {
+        JsonArray selectedIds = assignment["fingerprint_ids"].as<JsonArray>();
+        if (!selectedIds.isNull()) {
+            for (JsonVariant value : selectedIds) {
+                if ((value.as<int>()) == fingerprintId) return true;
+            }
+            return false;
+        }
+    }
+    return fingerprintId == defaultId;
 }
 
 static bool startNextPermissionSync() {
@@ -374,7 +437,8 @@ static bool startNextPermissionSync() {
     s_usersDoc = new DynamicJsonDocument(24576);
     s_rolesDoc = new DynamicJsonDocument(4096);
     s_overridesDoc = new DynamicJsonDocument(12288);
-    if (!s_usersDoc || !s_rolesDoc || !s_overridesDoc) {
+    s_fingerprintsDoc = new DynamicJsonDocument(24576);
+    if (!s_usersDoc || !s_rolesDoc || !s_overridesDoc || !s_fingerprintsDoc) {
         freeSyncDocs();
         Debug::printf("[MSG] permission sync to %s aborted: OOM\n", s_syncDeviceId);
         return false;
@@ -386,13 +450,15 @@ static bool startNextPermissionSync() {
                             permissionsVersion, devicesVersion,
                             fingerprintVersion, logsVersion);
 
-    String usersJson, roleJson, permissionsJson;
+    String usersJson, roleJson, permissionsJson, fingerprintsJson;
     if (!SdStorage::readTable("users", usersJson) ||
         !SdStorage::readTable("role_permissions", roleJson) ||
         !SdStorage::readTable("permissions", permissionsJson) ||
+        !SdStorage::readTable("fingerprints", fingerprintsJson) ||
         deserializeJson(*s_usersDoc, usersJson) || !s_usersDoc->is<JsonArray>() ||
         deserializeJson(*s_rolesDoc, roleJson) || !s_rolesDoc->is<JsonArray>() ||
-        deserializeJson(*s_overridesDoc, permissionsJson) || !s_overridesDoc->is<JsonArray>()) {
+        deserializeJson(*s_overridesDoc, permissionsJson) || !s_overridesDoc->is<JsonArray>() ||
+        deserializeJson(*s_fingerprintsDoc, fingerprintsJson) || !s_fingerprintsDoc->is<JsonArray>()) {
         freeSyncDocs();
         Debug::printf("[MSG] permission sync to %s aborted: root data unavailable\n",
                       s_syncDeviceId);
@@ -400,11 +466,24 @@ static bool startNextPermissionSync() {
     }
 
     int total = 0;
+    JsonArray fingerprints = s_fingerprintsDoc->as<JsonArray>();
     for (JsonObject user : s_usersDoc->as<JsonArray>()) {
-        int fingerprintId = user["fingerprint_id"] | -1;
         const char *userId = user["user_id"] | "";
         bool enabled = user["enabled"] | true;
-        if (enabled && fingerprintId >= 0 && strlen(userId) > 0) total++;
+        if (!enabled || strlen(userId) == 0 ||
+            !isUserAssignedToCabinet(user, s_syncDeviceId)) continue;
+        int defaultId = defaultFingerprintId(user, fingerprints);
+        bool hasMetadata = false;
+        for (JsonObject fingerprint : fingerprints) {
+            if (String((const char *)(fingerprint["user_id"] | "")) != userId ||
+                !(fingerprint["enabled"] | true)) continue;
+            hasMetadata = true;
+            int fingerprintId = fingerprint["fingerprint_id"] | -1;
+            if (fingerprintId >= 0 && isFingerprintSelected(
+                    user, s_syncDeviceId, fingerprintId, defaultId)) total++;
+        }
+        if (!hasMetadata && defaultId >= 0 && isFingerprintSelected(
+                user, s_syncDeviceId, defaultId, defaultId)) total++;
     }
     if (total > PERM_MAX_USERS) {
         freeSyncDocs();
@@ -413,10 +492,13 @@ static bool startNextPermissionSync() {
         return false;
     }
 
-    s_syncVersion = composePermissionVersion(usersVersion, permissionsVersion);
+    s_syncVersion = composePermissionVersion(
+        usersVersion, permissionsVersion, fingerprintVersion);
     s_syncTotal = total;
     s_syncSequence = 0;
     s_syncUserIndex = 0;
+    s_syncFingerprintIndex = 0;
+    s_syncUserHasFingerprint = false;
     s_syncAllSent = true;
     s_syncPhase = 1;
     s_syncNextMs = millis();
@@ -447,21 +529,53 @@ static void processPermissionSyncStep() {
     }
 
     if (s_syncPhase == 2) {
-        if (!s_usersDoc || !s_rolesDoc || !s_overridesDoc) {
+        if (!s_usersDoc || !s_rolesDoc || !s_overridesDoc || !s_fingerprintsDoc) {
             s_syncPhase = 0;
             return;
         }
         JsonArray users = s_usersDoc->as<JsonArray>();
         JsonArray roles = s_rolesDoc->as<JsonArray>();
         JsonArray overrides = s_overridesDoc->as<JsonArray>();
+        JsonArray fingerprints = s_fingerprintsDoc->as<JsonArray>();
         int userCount = (int)users.size();
+        int fingerprintCount = (int)fingerprints.size();
 
         while (s_syncUserIndex < userCount) {
-            JsonObject user = users[s_syncUserIndex++];
-            int fingerprintId = user["fingerprint_id"] | -1;
+            JsonObject user = users[s_syncUserIndex];
             String userId = user["user_id"] | "";
             bool enabled = user["enabled"] | true;
-            if (!enabled || fingerprintId < 0 || userId.length() == 0) continue;
+            if (!enabled || userId.length() == 0 ||
+                !isUserAssignedToCabinet(user, s_syncDeviceId)) {
+                s_syncUserIndex++;
+                s_syncFingerprintIndex = 0;
+                s_syncUserHasFingerprint = false;
+                continue;
+            }
+
+            int defaultId = defaultFingerprintId(user, fingerprints);
+            int fingerprintId = -1;
+            while (s_syncFingerprintIndex < fingerprintCount) {
+                JsonObject fingerprint = fingerprints[s_syncFingerprintIndex++];
+                if (String((const char *)(fingerprint["user_id"] | "")) != userId ||
+                    !(fingerprint["enabled"] | true)) continue;
+                s_syncUserHasFingerprint = true;
+                int candidateId = fingerprint["fingerprint_id"] | -1;
+                if (candidateId >= 0 && isFingerprintSelected(
+                        user, s_syncDeviceId, candidateId, defaultId)) {
+                    fingerprintId = candidateId;
+                    break;
+                }
+            }
+            if (fingerprintId < 0 && s_syncFingerprintIndex >= fingerprintCount) {
+                if (!s_syncUserHasFingerprint && defaultId >= 0 &&
+                    isFingerprintSelected(user, s_syncDeviceId, defaultId, defaultId)) {
+                    fingerprintId = defaultId;
+                }
+                s_syncUserIndex++;
+                s_syncFingerprintIndex = 0;
+                s_syncUserHasFingerprint = false;
+            }
+            if (fingerprintId < 0) continue;
 
             const char *role = user["role"] | "student";
             bool lockPermissions[4] = {false, false, false, false};

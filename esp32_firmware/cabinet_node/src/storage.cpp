@@ -699,20 +699,16 @@ bool Storage::replaceAllPermissions(const UserPermission *users, int count, uint
     if (!initialized) begin();
     if (count < 0 || count > PERM_MAX_USERS || (count > 0 && users == nullptr)) return false;
 
-    // V2.7：全量替换只清除主指纹(is_backup=false)记录，保留本机副指纹(is_backup=true)记录。
-    // 副指纹是设备专属本地数据，不应被全局权限同步覆盖。
-    int backupCount = 0;
-    for (int i = 0; i < permCacheCount; i++) {
-        if (permCache[i].is_backup) backupCount++;
-    }
-    int totalCount = count + backupCount;
+    // 统一多指纹模型：全量权限快照就是柜机的完整授权集合，
+    // 不再保留快照之外的设备专属“副指纹”权限记录。
+    int totalCount = count;
 
     UserPermission *newCache = nullptr;
     if (totalCount > 0) {
         newCache = new UserPermission[totalCount];
         if (newCache == nullptr) return false;
         int idx = 0;
-        // 先放入主指纹（来自上位机下发）
+        // 每条记录以 user_id + fingerprint_id 表示一枚可验证指纹。
         for (int i = 0; i < count; i++) {
             newCache[idx] = users[i];
             newCache[idx].is_backup = false;
@@ -722,12 +718,6 @@ bool Storage::replaceAllPermissions(const UserPermission *users, int count, uint
             }
             newCache[idx].valid = true;
             idx++;
-        }
-        // 再放入保留的副指纹
-        for (int i = 0; i < permCacheCount; i++) {
-            if (permCache[i].is_backup) {
-                newCache[idx++] = permCache[i];
-            }
         }
     }
 
@@ -760,8 +750,8 @@ bool Storage::replaceAllPermissions(const UserPermission *users, int count, uint
     // 更新配置中的版本号
     prefs.putUInt("perm_ver", version);
 
-    Debug::printf("[STORAGE] Full permission replace: %d primary + %d backup = %d records, version=%u\n",
-                  count, backupCount, totalCount, version);
+    Debug::printf("[STORAGE] Full permission replace: %d fingerprint records, version=%u\n",
+                  totalCount, version);
     return ok;
 }
 

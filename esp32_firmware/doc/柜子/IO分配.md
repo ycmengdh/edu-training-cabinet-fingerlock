@@ -27,8 +27,8 @@
 | 按键 K1 | 开锁 1 | GPIO47 | 输入（内部上拉） | 按下 = LOW |
 | 按键 K2 | 开锁 2 | GPIO48 | 输入（内部上拉） | 按下 = LOW |
 | 按键 K3 | 开锁 3 | GPIO45 | 输入（内部上拉） | 按下 = LOW；strapping 脚，见风险 |
-| 按键 K4 | 开锁 4 | GPIO39 | 输入（内部上拉） | 按下 = LOW |
-| 按键 K5 | 取消 | GPIO40 | 输入（内部上拉） | 按下 = LOW |
+| 按键 K4 | 开锁 4 | GPIO38 | 输入（内部上拉） | 按下 = LOW |
+| 按键 K5 | 取消 | GPIO39 | 输入（内部上拉） | 按下 = LOW |
 | 指纹通讯 TX | UART2 | GPIO17 | 输出 | ESP32 TX → AS608 RX |
 | 指纹通讯 RX | UART2 | GPIO18 | 输入 | ESP32 RX ← AS608 TX |
 | 指纹上电控制 | 电源开关 | GPIO42 | 输出 | 控制指纹模块供电 |
@@ -37,8 +37,6 @@
 | 595 锁存 | STCP | GPIO15 | 输出 | 74HC595 RCLK |
 | 595 时钟 | SHCP | GPIO16 | 输出 | 74HC595 SRCLK |
 | 状态 LED | 板载指示 | GPIO2 | 输出 | Mesh/调试指示，非锁 LED |
-| 指纹状态 LED 绿 | 双色指示 | GPIO41 | 输出 | V2.7 指纹验证成功/识别中（绿灯） |
-| 指纹状态 LED 红 | 双色指示 | GPIO38 | 输出 | V2.7 指纹验证失败（红灯闪烁 3 次） |
 
 ---
 
@@ -76,13 +74,15 @@
 
 ## 3. 按键
 
-| 逻辑名 | 硬件丝印 | GPIO | 功能 | 固件宏 |
-| --- | --- | --- | --- | --- |
-| Key0 | K1 | 47 | 开锁 0（Lock0） | `KEY0_PIN` |
-| Key1 | K2 | 48 | 开锁 1（Lock1） | `KEY1_PIN` |
-| Key2 | K3 | 45 | 开锁 2（Lock2） | `KEY2_PIN` |
-| Key3 | K4 | 39 | 开锁 3（Lock3） | `KEY3_PIN` |
-| Key4 | K5 | 40 | 取消当前指纹流程 | `KEY4_PIN` / `KEY_CANCEL_INDEX=4` |
+| 内部索引 | 硬件丝印 | GPIO | 界面名称 | 锁输出 | LED 输出 | 固件宏 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0 | K1 | 47 | Lock1（系统锁） | OUT4 | OUT5 | `KEY0_PIN` |
+| 1 | K2 | 48 | Lock2（实训柜1） | OUT3 | OUT6 | `KEY1_PIN` |
+| 2 | K3 | 45 | Lock3（实训柜2） | OUT2 | OUT7 | `KEY2_PIN` |
+| 3 | K4 | 38 | Lock4（实训柜3） | OUT1 | OUT8 | `KEY3_PIN` |
+| 4 | K5 | 39 | 取消当前指纹流程 | - | - | `KEY4_PIN` / `KEY_CANCEL_INDEX=4` |
+
+上位机数据库、权限数组和通信协议继续使用内部索引 `0..3`；只有用户可见名称使用 Lock1..Lock4。
 
 电气约定：
 
@@ -140,60 +140,47 @@
 
 固件按 **MSB first** 移出 1 字节：bit0 → Q0 … bit7 → Q7。
 
-| 595 输出 | 功能 | 逻辑 |
-| --- | --- | --- |
-| Q0 | 锁 1 状态 LED | **高电平亮**（1=亮，0=灭） |
-| Q1 | 锁 2 状态 LED | 同上 |
-| Q2 | 锁 3 状态 LED | 同上 |
-| Q3 | 锁 4 状态 LED | 同上 |
-| Q4 | 锁 1 / Lock0 继电器 | **高电平开锁**（1=开，0=关） |
-| Q5 | 锁 2 / Lock1 继电器 | 同上 |
-| Q6 | 锁 3 / Lock2 继电器 | 同上 |
-| Q7 | 锁 4 / Lock3 继电器 | 同上 |
+| 595 输出 | 板卡输出 | 功能 | 逻辑 |
+| --- | --- | --- | --- |
+| Q0 | OUT1 | Lock4 继电器 | **高电平开锁**（1=开，0=关） |
+| Q1 | OUT2 | Lock3 继电器 | 同上 |
+| Q2 | OUT3 | Lock2 继电器 | 同上 |
+| Q3 | OUT4 | Lock1 继电器 | 同上 |
+| Q4 | OUT5 | Lock1 状态 LED | **高电平亮**（1=亮，0=灭） |
+| Q5 | OUT6 | Lock2 状态 LED | 同上 |
+| Q6 | OUT7 | Lock3 状态 LED | 同上 |
+| Q7 | OUT8 | Lock4 状态 LED | 同上 |
 
 对应关系：
 
 - 开锁时：对应继电器 bit=1，对应 LED bit=1
 - 关锁时：对应继电器 bit=0，对应 LED bit=0
-- 开锁保持时间：`LOCK_OPEN_DURATION_MS` = 3000 ms，超时自动关锁
+- 开锁保持时间：`LOCK_OPEN_DURATION_MS` = 1000 ms，超时自动关锁
+- 锁芯保护上限：`LOCK_FORCE_OFF_MS` = 2000 ms；若检测到任一锁连续开锁超过 2s，强制断开继电器
 
 默认上电字节：`0x00`
-（Q0~Q3=0 全灭 LED，Q4~Q7=0 全关锁）
+（Q0~Q3=0 全关锁，Q4~Q7=0 全灭 LED）
 
 ---
 
 ## 6. 指纹验证窗口指示（V2.7）
 
-### 6.1 指纹头双色 LED
-
-双色 LED（绿 GPIO41 / 红 GPIO38）指示指纹验证流程状态，由 `led_indicator.cpp` 非阻塞驱动：
-
-| 状态 | 表现 | 触发 |
-| --- | --- | --- |
-| 识别中 | 绿灯慢闪（500ms 周期） | 常态轮询指纹（`STATE_WAIT_FINGER`） |
-| 验证成功 | 绿灯常亮 | 指纹匹配成功，进入 10s 操作窗口 |
-| 验证失败 | 红灯闪烁 3 次（约 1.5s）后熄灭 | 指纹未匹配或权限未同步 |
-| 窗口超时/取消 | 全部熄灭 | 10s 窗口超时或按下取消键 K5 |
-| 开锁完成 | 全部熄灭 | 窗口期内按键开锁后 |
-
-极性：默认共阴极（`FP_LED_COMMON_ANODE=0`，HIGH=亮）。若硬件为共阳极，在 `config.h` 改 `FP_LED_COMMON_ANODE 1`。
-
-### 6.2 锁状态 LED（595 Q0~Q3）
+### 6.1 锁状态 LED（595 Q4~Q7 / OUT5~OUT8）
 
 验证成功进入 10s 窗口后，**有权限的锁**对应 LED 慢闪（800ms 周期），提示用户可按：
 
 | 状态 | 锁 LED 表现 | 触发 |
 | --- | --- | --- |
 | 验证成功窗口 | 有权限的锁慢闪，无权限的锁灭 | `setPermissionHint(lock_perm)` |
-| 按键开锁 | 该路常亮约 3s（跟随继电器），其它提示熄灭 | `openLock` + `clearPermissionHint` |
-| 按无权限键 | 慢闪不停，指纹头红灯短闪一次 | 窗口继续 |
+| 按键开锁 | 该路常亮约 1s（跟随继电器），其它提示熄灭 | `openLock` + `clearPermissionHint` |
+| 按无权限键 | 慢闪不停 | 窗口继续 |
 | 取消 / 超时 | 全部熄灭 | `clearPermissionHint` |
 
 交互流程：
 
-1. 常态：指纹头绿灯慢闪，锁 LED 全灭
-2. 指纹匹配 + 本地权限有效 → 指纹头绿灯常亮，有权限锁 LED 慢闪
-3. 10s 内按对应键 → 开锁 3s；按 K5 取消 / 超时 → 回常态
+1. 常态：锁 LED 全灭
+2. 指纹匹配 + 本地权限有效 → 有权限锁 LED 慢闪
+3. 10s 内按对应键 → 开锁 1s；按 K5 取消 / 超时 → 回常态
 4. 按了无权限的键：提示失败，窗口不结束，可继续按其它有权限的锁
 
 ---
@@ -203,15 +190,14 @@
 1. UART0 接 USB-TTL，921600，看是否有：  
    `[CABINET_BOOT] UART0 ALIVE` / `PROTOCOL READY`
 2. Debug 模式：上位机按根节点串口方式收 `REGISTER`，可下发本机 `device_id` 的命令  
-3. 指纹：`[FINGER] power ...` -> `init success`；观察指纹头绿灯开始慢闪（识别中）
-4. 按压已录入指纹：指纹头绿灯常亮 + **有权限的锁 LED 慢闪**（进入 10s 窗口）；10s 内按 K1~K4 对应键则开锁约 3 s
-5. 按压未录入指纹或无权限用户：指纹头红灯闪烁 3 次，锁 LED 仍灭
-6. K5 取消：在窗口期内按下立即灭指纹头灯和锁提示灯，回识别态；长按 10 s 切 Mesh/Debug
+3. 指纹：`[FINGER] power ...` -> `init success`
+4. 按压已录入指纹：**有权限的锁 LED 慢闪**（进入 10s 窗口）；10s 内按 K1~K4 对应键则开锁约 1 s
+5. 按压未录入指纹或无权限用户：锁 LED 仍灭
+6. K5 取消：在窗口期内按下立即灭锁提示灯，回识别态；长按 10 s 切 Mesh/Debug
 
 若指纹 init 失败：查 17/18 交叉、GPIO42 上电、GPIO21、共地、波特率。  
-若按键无日志：查 47/48/45/39/40 与 active-LOW。  
-若锁不动：查 595 的 4/15/16 与 Q0~Q3 极性。  
-若指纹状态 LED 不亮：查 GPIO41/GPIO38 接线与共阴/共阳极性设置。  
+若按键无日志：查 47/48/45/38/39 与 active-LOW。
+若锁不动：查 595 的 4/15/16、OUT1~OUT4 接线与高电平有效极性。
 若上位机无帧：确认 **UART0 不是 USB 口**、交叉线、波特率、是否在 Debug 模式。
 
 ---
@@ -224,7 +210,6 @@
 | `cabinet_node/src/config.h` | 全部 GPIO 宏 |
 | `cabinet_node/src/key_handler.*` | 5 路按键 |
 | `cabinet_node/src/fingerprint.*` | 指纹供电 + UART2 |
-| `cabinet_node/src/led_indicator.*` | V2.7 指纹状态 LED（绿/红双色） |
 | `cabinet_node/src/lock_control.*` | 74HC595 锁与 LED |
 | `common/mesh_comm.*` | Mesh + Debug(UART0 协议) |
 | `cabinet_node/src/main.cpp` | 初始化顺序与主循环 |

@@ -2,10 +2,11 @@
  * display.cpp - Root 节点 TFT 状态台
  *
  * 0.96" ST7735 横屏 160x80：
- *   顶栏  ROOT | 运行时长 | Host 链路
- *   中区  三页轮播：总览(CAB/SD/Mesh) / 资源(heap/SD%/层) / 身份(FW/ID)
+ *   顶栏  运行时长 HH:MM:SS | Host 链路徽章
+ *   中区  常驻总览(CAB/SD/Mesh)
  *   底区  4 行事件；WARNING 优先置顶，高频 CMD 过滤+限频
  *
+ * 身份/资源信息(FW/CH/ID/Heap/SD%/Layer/RSSI/上行) 仅在开机自检页显示 3 秒。
  * 显示故障不得 reboot；无屏板可 ROOT_DISABLE_TFT=1。
  */
 #include "display.h"
@@ -34,12 +35,10 @@
 
 bool Display::initialized = false;
 unsigned long Display::lastUpdate = 0;
-unsigned long Display::pageSinceMs = 0;
-uint8_t Display::pageIndex = 0;
-bool Display::forceOverview = false;
+unsigned long Display::bootPageEndMs = 0;
 bool Display::frameDirty = true;
 bool Display::eventsDirty = true;
-bool Display::summaryDirty = true;
+bool Display::overviewDirty = true;
 uint8_t Display::nextEventSequence = 0;
 String Display::eventLines[Display::kEventSlots];
 Display::EventLevel Display::eventLevels[Display::kEventSlots] = {
@@ -54,7 +53,7 @@ static TFT_eSPI tft = TFT_eSPI();
 #endif
 
 #define DISPLAY_UPDATE_MS        400
-#define DISPLAY_PAGE_MS          7000
+#define DISPLAY_BOOT_PAGE_MS     3000
 #define DISPLAY_CMD_THROTTLE_MS  900
 
 #define COLOR_BG      0x0000
@@ -66,7 +65,6 @@ static TFT_eSPI tft = TFT_eSPI();
 #define COLOR_TEXT    0xFFFF  /* white */
 #define COLOR_HEADER  0x000F  /* navy */
 #define COLOR_DIVIDER 0x7BEF  /* dark grey */
-#define COLOR_PAGE    0x03EF  /* dark cyan */
 #define COLOR_BADGE_OK_BG   0x0320
 #define COLOR_BADGE_ERR_BG  0x8000
 #define COLOR_WARN_ROW_BG   0x2000
@@ -94,13 +92,31 @@ String compactId(String value) {
     return value;
 }
 
+String shortVersion(const char *version) {
+    String value(version ? version : "?");
+    int suffix = value.indexOf('-');
+    if (suffix > 0) value = value.substring(0, suffix);
+    return value;
+}
+
+String idSuffix(String value) {
+    const int suffixLength = 4;
+    if (value.length() <= suffixLength) return value;
+    return value.substring(value.length() - suffixLength);
+}
+
 String formatRuntime(unsigned long seconds) {
     unsigned long days = seconds / 86400UL;
     unsigned long hours = (seconds / 3600UL) % 24UL;
     unsigned long minutes = (seconds / 60UL) % 60UL;
+    unsigned long secs = seconds % 60UL;
     char text[16];
-    if (days > 0) snprintf(text, sizeof(text), "%lud%02lu", days, hours);
-    else snprintf(text, sizeof(text), "%02lu:%02lu", hours, minutes);
+    if (days > 0)
+        snprintf(text, sizeof(text), "%lud %02lu:%02lu:%02lu",
+                 days, hours, minutes, secs);
+    else
+        snprintf(text, sizeof(text), "%02lu:%02lu:%02lu",
+                 hours, minutes, secs);
     return String(text);
 }
 
@@ -226,7 +242,6 @@ void Display::postEvent(const String &text, EventLevel level) {
         }
         eventLines[0] = compact;
         eventLevels[0] = level;
-        forceOverview = true;
     } else {
         int insertAt = 0;
         while (insertAt < kEventSlots && eventLevels[insertAt] == EVENT_WARNING &&
@@ -283,28 +298,36 @@ void Display::drawChrome() {
     tft.fillScreen(COLOR_BG);
     tft.fillRect(0, 0, W, HEADER_H, COLOR_HEADER);
     tft.setTextSize(1);
-    tft.setTextColor(COLOR_TITLE, COLOR_HEADER);
-    tft.setCursor(3, 3);
-    tft.print("ROOT");
     tft.drawFastHLine(0, HEADER_H, W, COLOR_DIVIDER);
     tft.drawFastHLine(0, EVENT_TOP - 2, W, COLOR_DIVIDER);
     frameDirty = false;
-    summaryDirty = true;
+    overviewDirty = true;
     eventsDirty = true;
 }
 
 void Display::paintHeaderRuntime() {
-    drawValue(36, 3, formatRuntime(millis() / 1000UL), COLOR_TITLE, COLOR_HEADER, 88);
+    drawValue(3, 3, formatRuntime(millis() / 1000UL), COLOR_TITLE, COLOR_HEADER, 88);
 }
 
 void Display::paintHostBadge() {
-    UplinkMode mode = MeshBridge::getUplinkMode();
+    // 上位机链路状态徽章：HOST OK / HOST NG，右对齐紧贴屏幕右边缘。
+    // 不再显示 USB/AP/STA 模式前缀（模式信息保留在开机自检页 UL:xxx 行），
+    // 现场维护只关心"上位机在不在线"。
+    constexpr int16_t kBadgeX = 108;
+    constexpr int16_t kBadgeW = 50;
     bool up = MeshBridge::isUplinkConnected();
-    char label[12];
-    snprintf(label, sizeof(label), "%s%s", uplinkLabel(mode), up ? "" : "!");
-    drawBadge(92, 2, 64, label,
-              up ? COLOR_OK : COLOR_FAIL,
-              up ? COLOR_BADGE_OK_BG : COLOR_BADGE_ERR_BG);
+    const char *label = up ? "HOST OK" : "HOST NG";
+    uint16_t fg = up ? COLOR_OK : COLOR_FAIL;
+    uint16_t bg = up ? COLOR_BADGE_OK_BG : COLOR_BADGE_ERR_BG;
+
+    tft.fillRect(kBadgeX, 2, kBadgeW, 10, bg);
+    tft.setTextColor(fg, bg);
+    // 右对齐：从右边沿倒推光标位置（GLCD 字体 6x8，每字符 6px，留 2px 右边距）
+    int16_t textW = (int16_t)strlen(label) * 6;
+    int16_t cursorX = kBadgeX + kBadgeW - 2 - textW;
+    if (cursorX < kBadgeX + 2) cursorX = kBadgeX + 2;
+    tft.setCursor(cursorX, 3);
+    tft.print(label);
 }
 
 void Display::paintOverview() {
@@ -335,77 +358,6 @@ void Display::paintOverview() {
     drawBadge(106, BODY_Y + 3, 50, mesh,
               meshOk ? COLOR_OK : COLOR_FAIL,
               meshOk ? COLOR_BADGE_OK_BG : COLOR_BADGE_ERR_BG);
-
-    tft.setTextColor(COLOR_PAGE, COLOR_BG);
-    tft.setCursor(152, BODY_Y + 4);
-    tft.print("1");
-}
-
-void Display::paintResources() {
-    tft.fillRect(0, BODY_Y, W, BODY_H, COLOR_BG);
-
-    uint32_t heapKb = MemPool::freeInternalHeap() / 1024UL;
-    char line[32];
-    snprintf(line, sizeof(line), "H%luk", (unsigned long)heapKb);
-
-#ifdef ENABLE_SD_CARD
-    if (SdStorage::isReady()) {
-        uint64_t total = SdStorage::getTotalBytes();
-        uint64_t used = SdStorage::getUsedBytes();
-        int pct = 0;
-        if (total > 0) pct = (int)((used * 100ULL) / total);
-        if (pct > 99) pct = 99;
-        char sd[12];
-        snprintf(sd, sizeof(sd), " SD%d%%", pct);
-        size_t usedLen = strlen(line);
-        strncat(line, sd, sizeof(line) - usedLen - 1);
-    } else {
-        size_t usedLen = strlen(line);
-        strncat(line, " SD!", sizeof(line) - usedLen - 1);
-    }
-#endif
-
-    int layer = MeshComm::getMeshLayer();
-    int rssi = MeshComm::getLinkRssi();
-    char tail[16];
-    if (rssi < 0)
-        snprintf(tail, sizeof(tail), " L%d %d", layer, rssi);
-    else
-        snprintf(tail, sizeof(tail), " L%d", layer);
-    {
-        size_t usedLen = strlen(line);
-        strncat(line, tail, sizeof(line) - usedLen - 1);
-    }
-
-    drawValue(2, BODY_Y + 4, line, COLOR_TEXT, COLOR_BG, 150);
-    tft.setTextColor(COLOR_PAGE, COLOR_BG);
-    tft.setCursor(152, BODY_Y + 4);
-    tft.print("2");
-}
-
-void Display::paintIdentity() {
-    tft.fillRect(0, BODY_Y, W, BODY_H, COLOR_BG);
-
-    DeviceConfig cfg;
-    if (!Storage::loadDeviceConfig(cfg)) {
-        cfg.device_id = "ROOT";
-        cfg.mesh_channel = MESH_CHANNEL;
-    }
-
-    String left = String("FW") + FIRMWARE_VERSION;
-    drawValue(2, BODY_Y + 4, left, COLOR_TITLE, COLOR_BG, 96);
-
-    bool timeOk = Storage::isTimeSynced();
-    char right[20];
-    snprintf(right, sizeof(right), "c%d %s%s",
-             (int)cfg.mesh_channel,
-             compactId(cfg.device_id).c_str(),
-             timeOk ? "" : "!");
-    drawValue(98, BODY_Y + 4, right, timeOk ? COLOR_OK : COLOR_WARN, COLOR_BG, 150);
-
-    tft.setTextColor(COLOR_PAGE, COLOR_BG);
-    tft.setCursor(152, BODY_Y + 4);
-    tft.print("3");
 }
 
 void Display::paintEvents() {
@@ -429,8 +381,6 @@ void Display::drawChrome() {}
 void Display::paintHeaderRuntime() {}
 void Display::paintHostBadge() {}
 void Display::paintOverview() {}
-void Display::paintResources() {}
-void Display::paintIdentity() {}
 void Display::paintEvents() {}
 #endif
 
@@ -457,47 +407,155 @@ void Display::init() {
     tft.setRotation(ROOT_TFT_ROTATION);
     tft.setTextSize(1);
 
-    // 开机自检页
+    // 阶段1：画 BOOTING 简页。让屏幕在 SD/Mesh 初始化期间已经亮起，
+    // 消除上电黑屏期。此页内容精简，仅展示身份信息 + "Initializing..."。
+    // 此时 initialized 仍为 false，update() 不会工作。
     tft.fillScreen(COLOR_BG);
-    tft.setTextColor(COLOR_TITLE, COLOR_BG);
-    tft.setCursor(4, 8);
-    tft.print("ROOT BOOT");
-    tft.setTextColor(COLOR_TEXT, COLOR_BG);
-    tft.setCursor(4, 24);
-    tft.print(fitText(String("FW ") + FIRMWARE_VERSION, 152));
-    tft.setCursor(4, 36);
-#ifdef ENABLE_SD_CARD
-    tft.setTextColor(SdStorage::isReady() ? COLOR_OK : COLOR_FAIL, COLOR_BG);
-    tft.print(SdStorage::isReady() ? "SD  READY" : "SD  FAIL");
-#else
-    tft.setTextColor(COLOR_LABEL, COLOR_BG);
-    tft.print("SD  N/A");
-#endif
-    tft.setCursor(4, 48);
-    tft.setTextColor(COLOR_TEXT, COLOR_BG);
-    {
-        char ul[24];
-        snprintf(ul, sizeof(ul), "UL  %s", uplinkLabel(MeshBridge::getUplinkMode()));
-        tft.print(ul);
-    }
-    tft.setCursor(4, 60);
-    tft.print("MESH start...");
-    delay(500);
 
+    // Line 1: 标题
+    tft.setTextColor(COLOR_TITLE, COLOR_BG);
+    tft.setCursor(4, 4);
+    tft.print("ROOT BOOT");
+
+    // Line 2: 身份 FW + CH + ID
+    {
+        DeviceConfig cfg;
+        if (!Storage::loadDeviceConfig(cfg)) {
+            cfg.device_id = "ROOT";
+            cfg.mesh_channel = MESH_CHANNEL;
+        }
+        char line2[40];
+        snprintf(line2, sizeof(line2), "V%s CH%02d ID:%s",
+                 shortVersion(FIRMWARE_VERSION).c_str(),
+                 (int)cfg.mesh_channel,
+                 idSuffix(cfg.device_id).c_str());
+        tft.setTextColor(COLOR_TEXT, COLOR_BG);
+        tft.setCursor(4, 18);
+        tft.print(fitText(line2, 152));
+    }
+
+    // Line 6: Initializing...（先占位，等 SD/Mesh 就绪后由 showBootPage 重绘）
+    tft.setTextColor(COLOR_LABEL, COLOR_BG);
+    tft.setCursor(4, 66);
+    tft.print("Initializing...");
+
+    Debug::printf("[DISP] TFT early init ok %dx%d rot=%d, BOOTING page shown\n",
+                  tft.width(), tft.height(), ROOT_TFT_ROTATION);
+#endif
+}
+
+void Display::showBootPage() {
+#if ROOT_DISABLE_TFT
+    return;
+#else
+    if (initialized) return;  // 已经切到主界面，忽略
+
+    // 阶段2：重画为完整自检页（FW/CH/ID/SD/UL/Heap/SD%/Layer/RSSI/MESH start）
+    // 此时 SD/Mesh 均已完成初始化，可读取真实状态。
+    tft.fillScreen(COLOR_BG);
+    {
+        // Line 1: 标题
+        tft.setTextColor(COLOR_TITLE, COLOR_BG);
+        tft.setCursor(4, 4);
+        tft.print("ROOT BOOT");
+
+        // Line 2: 身份 FW + CH + ID
+        DeviceConfig cfg;
+        if (!Storage::loadDeviceConfig(cfg)) {
+            cfg.device_id = "ROOT";
+            cfg.mesh_channel = MESH_CHANNEL;
+        }
+        char line2[40];
+        snprintf(line2, sizeof(line2), "V%s CH%02d ID:%s",
+                 shortVersion(FIRMWARE_VERSION).c_str(),
+                 (int)cfg.mesh_channel,
+                 idSuffix(cfg.device_id).c_str());
+        tft.setTextColor(COLOR_TEXT, COLOR_BG);
+        tft.setCursor(4, 18);
+        tft.print(fitText(line2, 152));
+
+        // Line 3: SD + 上行
+        {
+            char line3[32];
+#ifdef ENABLE_SD_CARD
+            bool sdOk = SdStorage::isReady();
+            snprintf(line3, sizeof(line3), "%s  UL:%s",
+                     sdOk ? "SD:OK" : "SD:FAIL",
+                     uplinkLabel(MeshBridge::getUplinkMode()));
+            tft.setTextColor(sdOk ? COLOR_OK : COLOR_FAIL, COLOR_BG);
+#else
+            snprintf(line3, sizeof(line3), "SD:N/A  UL:%s",
+                     uplinkLabel(MeshBridge::getUplinkMode()));
+            tft.setTextColor(COLOR_LABEL, COLOR_BG);
+#endif
+            tft.setCursor(4, 30);
+            tft.print(fitText(line3, 152));
+        }
+
+        // Line 4: Heap + SD%
+        {
+            uint32_t heapKb = MemPool::freeInternalHeap() / 1024UL;
+            char line4[32];
+            snprintf(line4, sizeof(line4), "H:%luk", (unsigned long)heapKb);
+#ifdef ENABLE_SD_CARD
+            if (SdStorage::isReady()) {
+                uint64_t total = SdStorage::getTotalBytes();
+                uint64_t used = SdStorage::getUsedBytes();
+                int pct = 0;
+                if (total > 0) pct = (int)((used * 100ULL) / total);
+                if (pct > 99) pct = 99;
+                char sdPct[12];
+                snprintf(sdPct, sizeof(sdPct), "  SD:%d%%", pct);
+                strncat(line4, sdPct, sizeof(line4) - strlen(line4) - 1);
+            }
+#endif
+            tft.setTextColor(COLOR_TEXT, COLOR_BG);
+            tft.setCursor(4, 42);
+            tft.print(fitText(line4, 152));
+        }
+
+        // Line 5: Layer + RSSI
+        {
+            int layer = MeshComm::getMeshLayer();
+            int rssi = MeshComm::getLinkRssi();
+            char line5[24];
+            if (rssi < 0)
+                snprintf(line5, sizeof(line5), "L:%d  RSSI:%d", layer, rssi);
+            else
+                snprintf(line5, sizeof(line5), "L:%d", layer);
+            tft.setTextColor(COLOR_TEXT, COLOR_BG);
+            tft.setCursor(4, 54);
+            tft.print(fitText(line5, 152));
+        }
+
+        // Line 6: MESH start
+        tft.setTextColor(COLOR_LABEL, COLOR_BG);
+        tft.setCursor(4, 66);
+        tft.print("MESH start...");
+    }
+
+    // 记录自检页结束时刻，由 main.cpp 在 setup() 末尾用 mesh update 填满这 3 秒
+    bootPageEndMs = millis() + DISPLAY_BOOT_PAGE_MS;
+    Debug::printf("[DISP] boot page shown, main screen at %lu ms\n",
+                  (unsigned long)bootPageEndMs);
+#endif
+}
+
+void Display::activateMainScreen() {
+#if ROOT_DISABLE_TFT
+    return;
+#else
+    // 阶段3：切换到主界面（顶栏+总览+事件区）
     drawChrome();
     initialized = true;
-    pageIndex = 0;
-    pageSinceMs = millis();
     lastUpdate = millis() - DISPLAY_UPDATE_MS;
-    forceOverview = true;
-    summaryDirty = true;
+    overviewDirty = true;
     eventsDirty = true;
 
     postEvent("SYSTEM START", EVENT_INFO);
     postEvent(String("FW ") + FIRMWARE_VERSION, EVENT_OK);
 
-    Debug::printf("[DISP] TFT ready %dx%d rot=%d (status console v2)\n",
-                  tft.width(), tft.height(), ROOT_TFT_ROTATION);
+    Debug::println(F("[DISP] main screen activated (single-page console v3)"));
 #endif
 }
 
@@ -511,23 +569,9 @@ void Display::update() {
     if (now - lastUpdate < DISPLAY_UPDATE_MS) return;
     lastUpdate = now;
 
-    // 新告警出现时立刻切回总览一页周期，之后仍可轮播资源/身份页；
-    // 告警行本身一直钉在事件区顶部，不会被普通 CMD 挤掉。
-    if (forceOverview) {
-        if (pageIndex != 0) {
-            pageIndex = 0;
-            summaryDirty = true;
-        }
-        forceOverview = false;
-        pageSinceMs = now;
-    } else if (now - pageSinceMs >= DISPLAY_PAGE_MS) {
-        pageSinceMs = now;
-        pageIndex = (uint8_t)((pageIndex + 1) % 3);
-        summaryDirty = true;
-    }
-
     if (frameDirty) drawChrome();
 
+    // 顶栏：运行时长（每秒变化）+ Host 徽章（状态变化时重绘）
     static String lastRuntime;
     String runtime = formatRuntime(now / 1000UL);
     if (runtime != lastRuntime) {
@@ -536,19 +580,19 @@ void Display::update() {
     }
 
     static int lastHostState = -1;
-    int hostState = (MeshBridge::isUplinkConnected() ? 2 : 0) +
-                    (int)MeshBridge::getUplinkMode();
+    int hostState = ((int)MeshBridge::getUplinkMode() * 2) +
+                    (MeshBridge::isUplinkConnected() ? 1 : 0);
     if (hostState != lastHostState) {
         lastHostState = hostState;
         paintHostBadge();
     }
 
+    // 中区：单页总览，差分刷新
     static int lastOnline = -1;
     static int lastKnown = -1;
     static int lastSd = -1;
     static int lastMesh = -1;
     static int lastChild = -1;
-    static uint32_t lastHeapBucket = 0;
 
     int online = MeshBridge::getRouteCount();
     int known = MeshBridge::getRouteKnownCount();
@@ -559,25 +603,20 @@ void Display::update() {
 #endif
     int meshState = MeshComm::isMeshConnected() ? 1 : 0;
     int child = MeshComm::getChildCount();
-    uint32_t heapBucket = MemPool::freeInternalHeap() / 8192UL;
 
     if (online != lastOnline || known != lastKnown || sdState != lastSd ||
-        meshState != lastMesh || child != lastChild ||
-        heapBucket != lastHeapBucket) {
+        meshState != lastMesh || child != lastChild) {
         lastOnline = online;
         lastKnown = known;
         lastSd = sdState;
         lastMesh = meshState;
         lastChild = child;
-        lastHeapBucket = heapBucket;
-        summaryDirty = true;
+        overviewDirty = true;
     }
 
-    if (summaryDirty) {
-        if (pageIndex == 0) paintOverview();
-        else if (pageIndex == 1) paintResources();
-        else paintIdentity();
-        summaryDirty = false;
+    if (overviewDirty) {
+        paintOverview();
+        overviewDirty = false;
     }
 
     if (eventsDirty) paintEvents();

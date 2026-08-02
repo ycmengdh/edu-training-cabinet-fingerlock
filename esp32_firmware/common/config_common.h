@@ -232,14 +232,12 @@ struct DeviceConfig {
 };
 
 // ===================== 用户权限结构体 =====================
-// V2.7：新增 local_fp_id 与 is_backup，支持设备专属副指纹。
-//   - 主指纹：fingerprint_id 由上位机全局分配，下发时 local_fp_id = fingerprint_id
-//   - 副指纹：本机录入，AS608 槽位由 allocLocalFpId() 分配，is_backup=true
-// 验证时按 AS608 物理槽位(local_fp_id)查找权限记录，主/副共用同一权限表。
+// local_fp_id 保留用于兼容旧固件数据；统一模型下每条权限对应 user_id + fingerprint_id。
+// 验证时按 AS608 物理槽位(local_fp_id)查找权限记录。
 struct UserPermission {
     int fingerprint_id;       // 全局逻辑ID（上位机下发，主指纹用；副指纹时为本机分配的 local_fp_id 副本）
     int local_fp_id;          // AS608 物理槽位（柜子本地实际存储位置，主/副共用）
-    bool is_backup;           // false=主指纹（全局下发），true=本机副指纹
+    bool is_backup;           // 兼容旧数据；新同步记录固定为 false
     uint32_t user_id_num;
     String user_id;
     String name;

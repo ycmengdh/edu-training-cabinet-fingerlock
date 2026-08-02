@@ -138,11 +138,13 @@ void setup() {
     Serial.setRxBufferSize(8192);
     Serial.setTxBufferSize(8192);
     Serial.begin(UPLINK_USB_BAUD);
+    // USB-Serial-JTAG CDC 不依赖主机打开串口即可工作；
+    // 500ms 足够让 USB 枚举稳定，不再死等 3s（避免首屏亮屏被这段拖累）。
     unsigned long serialWait = millis();
-    while (!Serial && millis() - serialWait < 3000) {
+    while (!Serial && millis() - serialWait < 500) {
         delay(10);
     }
-    delay(200);
+    delay(50);
     esp_reset_reason_t resetReason = esp_reset_reason();
     Serial.print("\r\n[ROOT_BOOT] USB-SERIAL-JTAG ALIVE (GPIO19/20)\r\n");
     Serial.printf("[ROOT_BOOT] RESET_REASON=%d(%s)\r\n",
@@ -204,7 +206,17 @@ void setup() {
                   deviceConfig.uplink_mode == UPLINK_USB ? "USB" :
                   deviceConfig.uplink_mode == UPLINK_AP  ? "WiFi AP" : "WiFi STA");
 
-    // 3. Bring up the critical communication path before optional peripherals.
+    // 3. Early display init: 立刻点亮屏幕画 BOOTING 简页，让用户看到"已开机"。
+    // 此时 SD/Mesh 尚未初始化，屏幕显示 "ROOT BOOT / Vxx CHxx ID:xxxx / Initializing..."。
+    // 这样把上电到首屏亮屏的时间从 5~10s 压到 < 0.5s。
+    // Display 故障不影响后续 Mesh/SD/USB 主路径（init 内部不抛异常）。
+    if (deviceConfig.uplink_mode == UPLINK_USB) {
+        Serial.print("\r\n[ROOT_BOOT] DISPLAY EARLY INIT\r\n");
+        Serial.flush();
+    }
+    Display::init();
+
+    // 4. Bring up the critical communication path before optional peripherals.
     // SD/TFT faults must never prevent REGISTER or host command handling.
     MessageHandler::init();
     MeshComm::setMessageCallback(onMessageReceived);
@@ -218,7 +230,7 @@ void setup() {
         Serial.flush();
     }
 
-    // 4. Initialize SD card (optional). Missing card must not reboot the node.
+    // 5. Initialize SD card (optional). Missing card must not reboot the node.
 #ifdef ENABLE_SD_CARD
     if (!SdStorage::init()) {
         Debug::println(F("[MAIN] WARNING: SD unavailable — data APIs will fail until a card is mounted"));
@@ -242,24 +254,22 @@ void setup() {
     // now so the host receives the final storage state.
     MeshBridge::announceRootStatus();
 
-    // 5. Initialize display last. The preceding marker pinpoints a panel/SPI
-    // fault without hiding the fact that the protocol bridge already started.
-    if (deviceConfig.uplink_mode == UPLINK_USB) {
-        Serial.print("\r\n[ROOT_BOOT] DISPLAY INIT\r\n");
-        Serial.flush();
-    }
-    Display::init();
+    // 6. 切换到完整自检页（含 SD/Heap/RSSI 等真实状态），开始 3s 非阻塞计时。
+    // 3s 由 setup() 末尾的 mesh update 循环填满，不再用 delay 阻塞。
+    Display::showBootPage();
 #ifdef ENABLE_SD_CARD
     Display::postEvent(SdStorage::isReady() ? "SD READY" : "SD UNAVAILABLE",
                        SdStorage::isReady() ? Display::EVENT_OK : Display::EVENT_WARNING);
 #endif
     if (deviceConfig.uplink_mode == UPLINK_USB) {
-        Serial.printf("\r\n[ROOT_BOOT] DISPLAY=%s; entering main loop\r\n",
-                      Display::isActive() ? "READY" : "OFF");
+        long remainMs = (long)(Display::getBootPageEndMs() - millis());
+        if (remainMs < 0) remainMs = 0;
+        Serial.printf("\r\n[ROOT_BOOT] BOOT PAGE shown; main screen in %ldms\r\n",
+                      remainMs);
         Serial.flush();
     }
 
-    // 6. NTP time sync (only for STA uplink mode)
+    // 7. NTP time sync (only for STA uplink mode)
     initNTP();
 
     bootTime = millis();
@@ -277,6 +287,24 @@ void setup() {
 #endif
                   Display::isActive() ? "ok" : "off");
     Debug::println(F("----------------------------------------"));
+
+    // 8. 非阻塞等自检页显示完成：期间持续跑 Mesh update，让 mesh_rx 任务
+    // 收到的 REGISTER/HEARTBEAT 能被消费，首次进入 loop() 时已有数据。
+    // 相比 delay(3000) 纯阻塞，这 3s 不再是"白等"。
+    while (millis() < Display::getBootPageEndMs()) {
+        MeshBridge::update();
+        MeshComm::update();
+        MeshComm::drainEventLog();
+        delay(5);
+    }
+
+    // 9. 切换到主界面（顶栏+总览+事件区），此后 update() 开始刷新
+    Display::activateMainScreen();
+    if (deviceConfig.uplink_mode == UPLINK_USB) {
+        Serial.printf("\r\n[ROOT_BOOT] DISPLAY=%s; entering main loop\r\n",
+                      Display::isActive() ? "READY" : "OFF");
+        Serial.flush();
+    }
 }
 
 // ====== Main loop ======

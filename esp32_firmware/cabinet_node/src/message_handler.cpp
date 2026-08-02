@@ -11,7 +11,6 @@
 #include "lock_control.h"
 #include "mesh_comm.h"
 #include "logger.h"
-#include "led_indicator.h"
 #include "message_hmac.h"
 #include "protocol_frame.h"
 #include "app_protocol.h"
@@ -147,7 +146,6 @@ void MessageHandler::init() {
         Debug::println(F("[MSG] permission data lost, pending PERM_LOST report"));
     }
 
-    FpLed::setOff();
     if (Fingerprint::isReady() && Fingerprint::templateExists(FP_TEMP_SLOT)) {
         Fingerprint::deleteFingerprint(FP_TEMP_SLOT);
         Debug::println(F("[MSG] cleaned temp slot 0 at startup"));
@@ -189,10 +187,7 @@ void MessageHandler::onKeyPressed(int lockId) {
 
 void MessageHandler::onCancel() {
     if (state == STATE_IDLE || state == STATE_WAIT_FINGER) {
-        // 空闲或等待指纹时取消无意义，但允许灭灯复位
-        if (state == STATE_WAIT_FINGER) {
-            FpLed::setOff();
-        }
+        // 空闲或等待指纹时取消无意义
         return;
     }
     Debug::printf("[MSG] Cancel: state %d -> WAIT_FINGER\n", (int)state);
@@ -222,7 +217,6 @@ void MessageHandler::onCancel() {
         enrollRequestMsgId = "";
         enrollLastPhaseCode = "";
         enrollIsBackup = false;
-        FpLed::setOff();
         setState(STATE_WAIT_FINGER);
     }
 }
@@ -316,7 +310,6 @@ void MessageHandler::endVerifiedWindow(const char *event, int lockId) {
     }
     verifiedPermsValid = false;
     LockControl::clearPermissionHint();
-    FpLed::setOff();
     setState(STATE_WAIT_FINGER);
 }
 
@@ -332,8 +325,9 @@ bool MessageHandler::openIfPermitted(int lockId) {
         Debug::printf("[MSG] windowed unlock success: user=%s lock=%d backup=%d\n",
                       verifiedPerms.user_id.c_str(), lockId,
                       verifiedPerms.is_backup ? 1 : 0);
-        // 开锁后结束窗口（该路 LED 已由 openLock 改常亮）
-        endVerifiedWindow("unlocked", lockId);
+        // 开锁后不结束窗口，允许继续开其他门；
+        // 窗口仅由超时或 K5 取消退出（该路 LED 已由 openLock 改常亮）
+        sendVerifyWindowEvent("unlocked", lockId);
         return true;
     } else {
         // 本地权限不足（窗口未结束，可继续按其他有权限的锁）
@@ -341,8 +335,6 @@ bool MessageHandler::openIfPermitted(int lockId) {
                     "open", "fail", "no_permission_in_window");
         Debug::printf("[MSG] no permission for lock %d in window (user=%s)\n",
                       lockId, verifiedPerms.user_id.c_str());
-        // 红灯短闪一次提示无权限（不结束窗口，有权限的锁继续慢闪）
-        FpLed::setFail();
         return false;
     }
 }
@@ -376,8 +368,6 @@ void MessageHandler::checkTimeout() {
     // WAIT_FINGER 异常恢复（30 秒无任何事件，复位 LED）
     if (state == STATE_WAIT_FINGER &&
         (now - stateEnterTime > WAIT_FINGER_TIMEOUT_MS)) {
-        // 不退出 WAIT_FINGER（常态轮询），仅复位 LED 到识别中
-        FpLed::setIdentifying();
         stateEnterTime = now;  // 重置计时
     }
 }
@@ -440,7 +430,6 @@ void MessageHandler::finishFingerprintTest(const char *event) {
     fingerprintTestLastPoll = 0;
     fingerprintTestLastActivityReport = 0;
     fingerprintTestFingerDown = false;
-    FpLed::setOff();
     setState(STATE_WAIT_FINGER);
 }
 
@@ -511,7 +500,6 @@ void MessageHandler::finishEnrollWithVerify(bool verifyOk) {
     enrollRequestMsgId = "";
     enrollLastPhaseCode = "";
     enrollIsBackup = false;
-    FpLed::setOff();
     setState(STATE_WAIT_FINGER);
 }
 
@@ -538,11 +526,6 @@ void MessageHandler::update() {
             checkTimeout();
 
             // V2.7：常态轮询指纹模块（不再由按键触发）
-            // 识别中：绿灯慢闪
-            if (FpLed::getState() != FpLed::STATE_IDENTIFYING &&
-                FpLed::getState() != FpLed::STATE_FAIL) {
-                FpLed::setIdentifying();
-            }
 
             // AS608 commands can consume three consecutive 1s UART timeouts.
             // The background task owns idle scanning so Mesh/UART stays responsive.
@@ -557,8 +540,7 @@ void MessageHandler::update() {
                 // it must never be part of the unlock critical path.
                 if (loadVerifiedPermission(as608Id)) {
                     // 权限载入成功：进入 10s 操作窗口
-                    // 指纹头绿灯常亮 + 有权限的锁 LED 慢闪提示可按
-                    FpLed::setSuccess();
+                    // 有权限的锁 LED 慢闪提示可按
                     LockControl::setPermissionHint(verifiedPerms.lock_perm);
                     setState(STATE_VERIFIED_WINDOW);
                     sendVerifyWindowEvent("enter");
@@ -570,12 +552,10 @@ void MessageHandler::update() {
                                   verifiedPerms.lock_perm[2] ? 1 : 0,
                                   verifiedPerms.lock_perm[3] ? 1 : 0);
                 } else {
-                    // 模板存在但权限缓存未同步或已过期：红灯闪烁
+                    // 模板存在但权限缓存未同步或已过期
                     Logger::log("", as608Id, -1,
                                 "open", "fail", "permission_not_synced");
                     Debug::printf("[MSG] no local permission cache for as608_id=%d\n", as608Id);
-                    FpLed::setFail();
-                    // setFail 完成后会自动回 OFF，update() 下一轮会重新 setIdentifying
                 }
             }
             break;
@@ -583,13 +563,8 @@ void MessageHandler::update() {
 
         case STATE_VERIFIED_WINDOW: {
             checkTimeout();
-            // 窗口期内：指纹头保持成功绿灯；若刚提示过无权限（红闪），闪完后恢复常亮
             // 有权限的锁 LED 慢闪由 LockControl::update 维护
             // 按键事件由 onKeyPressed 处理
-            if (FpLed::getState() != FpLed::STATE_SUCCESS &&
-                FpLed::getState() != FpLed::STATE_FAIL) {
-                FpLed::setSuccess();
-            }
             break;
         }
 
@@ -715,7 +690,6 @@ void MessageHandler::update() {
             if (!fingerDetected) {
                 if (fingerprintTestFingerDown) {
                     fingerprintTestFingerDown = false;
-                    FpLed::setIdentifying();
                 }
                 break;
             }
@@ -732,13 +706,10 @@ void MessageHandler::update() {
             fingerprintTestFingerDown = true;
             fingerprintTestLastActivityReport = now;
             if (result == 1) {
-                FpLed::setSuccess();
                 sendFingerprintTestEvent("matched", confidence);
             } else if (result == 0) {
-                FpLed::setFail();
                 sendFingerprintTestEvent("not_matched");
             } else {
-                FpLed::setFail();
                 sendFingerprintTestEvent("read_error");
             }
             break;
@@ -1043,14 +1014,6 @@ void MessageHandler::cmdSyncPermission(const JsonObject &data, const String &msg
     }
 
     // Legacy incremental updates remain supported when no transaction exists.
-    UserPermission existing;
-    if (Storage::findPrimaryPermission(perm.user_id, existing) &&
-        existing.local_fp_id != perm.local_fp_id) {
-        Fingerprint::deleteFingerprint(existing.local_fp_id);
-        Storage::deletePermission(existing.local_fp_id);
-        Debug::printf("[MSG] replaced stale primary fingerprint user=%s old=%d new=%d\n",
-                      perm.user_id.c_str(), existing.local_fp_id, perm.local_fp_id);
-    }
     bool ok = Storage::savePermission(perm, version);
     sendAck(msgId, ok ? "permission_synced" : "permission_sync_failed");
 }
@@ -1159,7 +1122,6 @@ void MessageHandler::cmdStartFingerprintTest(const JsonObject &data,
     fingerprintTestLastPoll = 0;
     fingerprintTestLastActivityReport = 0;
     fingerprintTestFingerDown = false;
-    FpLed::setIdentifying();
     setState(STATE_FINGERPRINT_TEST);
     sendAck(msgId, "fingerprint_test_started");
     sendFingerprintTestEvent("started");
@@ -1250,7 +1212,9 @@ void MessageHandler::cmdDeleteFingerprint(const JsonObject &data, const String &
     int fpId = data["fingerprint_id"] | -1;
     bool ok = false;
     if (fpId >= 0) {
-        ok = Fingerprint::deleteFingerprint(fpId);
+        // 删除命令必须幂等：上位机在 ACK 丢失或中途失败后会安全重试。
+        // 模板已经不存在等价于删除成功，仍需继续清理残留权限记录。
+        ok = !Fingerprint::templateExists(fpId) || Fingerprint::deleteFingerprint(fpId);
         Storage::deletePermission(fpId);
     }
     String result = ok ? "success" : "fail";
@@ -1525,8 +1489,14 @@ void MessageHandler::cmdReadStatus(const String &msgId) {
 
 void MessageHandler::cmdReadPermissions(const JsonObject &data, const String &msgId) {
     String userId = data["user_id"] | "";
+    int fingerprintId = data["fingerprint_id"] | -1;
     UserPermission perm;
-    bool found = userId.length() > 0 && Storage::findPrimaryPermission(userId, perm);
+    bool found = false;
+    if (fingerprintId >= 0) {
+        found = Storage::loadPermission(fingerprintId, perm) && perm.user_id == userId;
+    } else {
+        found = userId.length() > 0 && Storage::findPrimaryPermission(userId, perm);
+    }
     String response = "{\"count\":" + String(Storage::getPermissionCount()) +
                       ",\"version\":" + String(Storage::getPermissionVersion()) +
                       ",\"user_id\":\"" + userId + "\"" +
