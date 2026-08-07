@@ -32,7 +32,7 @@ namespace CabinetLock
             UpdateCabinetSummary(device);
         }
 
-        private async void DevicePage_Loaded(object sender, RoutedEventArgs e)
+        private void DevicePage_Loaded(object sender, RoutedEventArgs e)
         {
             if (string.IsNullOrWhiteSpace(_detailDeviceId))
             {
@@ -44,19 +44,23 @@ namespace CabinetLock
             App.MeshBridge.DeviceDisconnected += OnDevicePresenceChanged;
             LockSelectBox.SelectedIndex = 1;
 
-            await LoadCabinetAsync();
-            if (_selectedDevice != null)
-            {
-                await LoadDeviceFpListAsync(_selectedDevice.DeviceId);
-                await LoadBackupFingerprintListAsync(quiet: true);
-            }
-
+            PageStatusText.Text = "正在读取柜子状态";
             _refreshTimer = new System.Windows.Threading.DispatcherTimer
             {
                 Interval = TimeSpan.FromSeconds(3)
             };
             _refreshTimer.Tick += RefreshTimer_Tick;
             _refreshTimer.Start();
+
+            _ = InitializePageDataAsync();
+        }
+
+        private async Task InitializePageDataAsync()
+        {
+            await LoadCabinetAsync(quiet: true);
+            if (!IsLoaded || _selectedDevice == null) return;
+
+            await LoadDeviceFpListAsync(_selectedDevice.DeviceId, queryRuntimeStatus: false);
         }
 
         private void DevicePage_Unloaded(object sender, RoutedEventArgs e)
@@ -143,14 +147,16 @@ namespace CabinetLock
                 : $"当前离线 · {identity} · 最后在线 {lastSeen}";
         }
 
-        private async Task LoadDeviceFpListAsync(string deviceId)
+        private async Task LoadDeviceFpListAsync(
+            string deviceId, bool queryRuntimeStatus = true)
         {
             int version = Interlocked.Increment(ref _fpListLoadVersion);
-            FpListStatusText.Text = "正在读取绑定用户与下位机状态";
+            FpListStatusText.Text = "正在读取柜机真实槽位与绑定信息";
             try
             {
                 var result = await App.FingerprintTemplateService
-                    .GetDeviceFingerprintListAsync(deviceId)
+                    .GetDeviceFingerprintListAsync(
+                        deviceId, queryRuntimeStatus: queryRuntimeStatus)
                     .ConfigureAwait(true);
                 if (version != _fpListLoadVersion) return;
 
@@ -186,10 +192,13 @@ namespace CabinetLock
             string keyword = FingerprintSearchBox?.Text?.Trim() ?? "";
             var visible = _fingerprints.Where(item =>
                 string.IsNullOrWhiteSpace(keyword) ||
+                item.SlotId.ToString().Contains(keyword, StringComparison.OrdinalIgnoreCase) ||
                 item.FingerprintId.ToString().Contains(keyword, StringComparison.OrdinalIgnoreCase) ||
+                item.FingerNameText.Contains(keyword, StringComparison.OrdinalIgnoreCase) ||
                 (item.UserCode?.Contains(keyword, StringComparison.OrdinalIgnoreCase) ?? false) ||
                 (item.UserName?.Contains(keyword, StringComparison.OrdinalIgnoreCase) ?? false) ||
-                item.RoleText.Contains(keyword, StringComparison.OrdinalIgnoreCase)).ToList();
+                item.RoleText.Contains(keyword, StringComparison.OrdinalIgnoreCase) ||
+                item.BindingStatusText.Contains(keyword, StringComparison.OrdinalIgnoreCase)).ToList();
 
             DeviceFpListGrid.ItemsSource = visible;
             VisibleFingerprintCountText.Text = _reportedFingerprintCount.HasValue
@@ -197,17 +206,18 @@ namespace CabinetLock
                 : $"{visible.Count} 条";
             FingerprintEmptyState.Visibility = visible.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             FingerprintEmptyText.Text = _fingerprints.Count == 0
-                ? "当前柜子暂无绑定用户"
-                : "没有符合条件的用户";
+                ? "柜机传感器内暂无指纹"
+                : "没有符合条件的槽位";
             UpdateSelectionActions();
         }
 
         private void UpdateFingerprintStatus()
         {
-            int enabled = _fingerprints.Count(item => item.IsEnabled);
+            int bound = _fingerprints.Count(item => item.IsBound);
+            int unbound = _fingerprints.Count - bound;
             FpListStatusText.Text = _reportedFingerprintCount.HasValue
-                ? $"授权 {_fingerprints.Count} 人，启用 {enabled} 人 · 传感器内 {_reportedFingerprintCount.Value} 枚指纹模板"
-                : $"授权 {_fingerprints.Count} 人，启用 {enabled} 人 · 柜机当前未响应";
+                ? $"传感器 {_reportedFingerprintCount.Value} 枚 · 已绑定 {bound} 槽 · 未绑定 {unbound} 槽"
+                : $"已读取 {_fingerprints.Count} 个槽位 · 实时计数待刷新";
         }
 
         private async void RefreshButton_Click(object sender, RoutedEventArgs e)
@@ -283,6 +293,7 @@ namespace CabinetLock
             SetBusy(true, $"正在开启 {lockName}");
             try
             {
+                PageStatusText.Text = $"正在开启 {lockName}";
                 var message = Message.Create(Protocol.CmdControlLock, _selectedDevice.DeviceId,
                     new Dictionary<string, object>
                     {
@@ -291,7 +302,11 @@ namespace CabinetLock
                         ["operator"] = App.CurrentUser?.UserId ?? "system"
                     });
                 var result = await App.CommandService.SendAsync(_selectedDevice.DeviceId, message);
-                if (result.Success) AppToast.Success($"{lockName} 已开锁");
+                if (result.Success)
+                {
+                    PageStatusText.Text = $"{lockName} 已开锁";
+                    AppToast.Success($"{lockName} 已开锁");
+                }
                 else AppToast.Error(string.IsNullOrWhiteSpace(result.ErrorMessage)
                     ? "开锁失败" : result.ErrorMessage);
             }
@@ -312,7 +327,22 @@ namespace CabinetLock
             };
             window.ShowDialog();
             if (window.EnrolledFingerprintId > 0)
-                _ = LoadDeviceFpListAsync(_selectedDevice.DeviceId);
+                AppToast.Info("用户模板已保存，请点击“绑定用户”下发到柜机");
+        }
+
+        private async void BindFingerprintButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_selectedDevice == null) return;
+            if (!EnsureDeviceOnline("绑定用户指纹")) return;
+            var window = new CabinetFingerprintBindingWindow(_selectedDevice)
+            {
+                Owner = Window.GetWindow(this)
+            };
+            if (window.ShowDialog() == true && window.BindingCompleted)
+            {
+                await LoadDeviceFpListAsync(_selectedDevice.DeviceId);
+                await LoadCabinetAsync(quiet: true);
+            }
         }
 
         private async void RefreshFpListButton_Click(object sender, RoutedEventArgs e)
@@ -333,10 +363,16 @@ namespace CabinetLock
         {
             if (!TryGetSelectedFingerprint(out var selected) || _selectedDevice == null) return;
             if (!EnsureDeviceOnline("删除指纹")) return;
+            string owner = selected.IsBound
+                ? $"{selected.UserNameText}（{selected.UserCodeText}）"
+                : "未绑定用户";
+            string template = selected.FingerprintId > 0
+                ? $"模板 #{selected.FingerprintId}" : "无业务模板 ID";
             if (MessageBox.Show(
-                    $"确认删除「{selected.UserName}（{selected.UserCode}）· 指纹 #{selected.FingerprintId}」在当前柜子的指纹和权限数据？\n\n" +
-                    "用户主档及其在其他柜子的绑定不会受影响。",
-                    "删除柜子用户指纹", MessageBoxButton.YesNo,
+                    $"确认删除柜机传感器槽 {selected.SlotId}？\n\n" +
+                    $"当前记录：{owner} · {template} · {selected.BindingStatusText}\n" +
+                    "只影响当前柜机；用户模板库和其他柜机不会受影响。",
+                    "删除柜机指纹槽位", MessageBoxButton.YesNo,
                     MessageBoxImage.Warning) != MessageBoxResult.Yes)
                 return;
 
@@ -346,7 +382,7 @@ namespace CabinetLock
                 var deleteResult = await App.CommandService.SendAsync(
                     _selectedDevice.DeviceId,
                     Message.Create(Protocol.CmdDeleteFingerprint, _selectedDevice.DeviceId,
-                        new { fingerprint_id = selected.FingerprintId }));
+                        new { fingerprint_id = selected.SlotId }));
                 if (!deleteResult.Success)
                 {
                     MessageBox.Show(string.IsNullOrWhiteSpace(deleteResult.ErrorMessage)
@@ -356,9 +392,12 @@ namespace CabinetLock
                     return;
                 }
 
-                bool bindingSaved = await Task.Run(() =>
+                bool removeMainBinding = selected.IsBound && !selected.IsBackup &&
+                    selected.FingerprintId > 0 && !string.IsNullOrWhiteSpace(selected.UserId);
+                bool bindingSaved = !removeMainBinding || await Task.Run(() =>
                     App.CabinetBindingService.RemoveFingerprintFromCabinet(
-                        selected.UserId!, _selectedDevice.DeviceId, selected.FingerprintId));
+                        selected.UserId!, _selectedDevice.DeviceId, selected.FingerprintId,
+                        enqueueSync: false));
                 if (!bindingSaved)
                 {
                     MessageBox.Show(
@@ -367,17 +406,24 @@ namespace CabinetLock
                     return;
                 }
 
-                PageStatusText.Text = "指纹已删除，正在清理当前柜子的权限数据";
-                var syncResult = await Task.Run(() =>
-                    App.CabinetSyncService.SyncCabinetPermissions(_selectedDevice.DeviceId));
+                PageStatusText.Text = removeMainBinding
+                    ? "槽位已删除，正在清理当前柜子的权限数据"
+                    : "柜机指纹槽位已删除";
+                BroadcastCommandResult? syncResult = removeMainBinding
+                    ? await Task.Run(() => App.CabinetSyncService
+                        .SyncCabinetPermissions(_selectedDevice.DeviceId))
+                    : null;
                 await LoadDeviceFpListAsync(_selectedDevice.DeviceId);
                 await LoadCabinetAsync(quiet: true);
 
-                MessageBox.Show(syncResult.Success
-                        ? "已删除下位机指纹、用户绑定和对应权限数据"
-                        : "指纹与绑定已删除，但柜子未确认权限同步。请点击“同步当前柜权限”重试。",
-                    syncResult.Success ? "删除完成" : "权限待同步", MessageBoxButton.OK,
-                    syncResult.Success ? MessageBoxImage.Information : MessageBoxImage.Warning);
+                bool completed = syncResult?.Success != false;
+                MessageBox.Show(completed
+                        ? removeMainBinding
+                            ? "已删除柜机槽位、当前柜绑定和对应权限数据"
+                            : "柜机指纹槽位已删除"
+                        : "槽位与绑定已删除，但柜机未确认权限同步。请点击“同步柜机数据”重试。",
+                    completed ? "删除完成" : "权限待同步", MessageBoxButton.OK,
+                    completed ? MessageBoxImage.Information : MessageBoxImage.Warning);
             }
             catch (Exception ex)
             {
@@ -544,14 +590,13 @@ namespace CabinetLock
 
         private bool TryGetSelectedFingerprint(out DeviceFingerprintInfo selected)
         {
-            if (DeviceFpListGrid.SelectedItem is DeviceFingerprintInfo item &&
-                item.FingerprintId > 0 && !string.IsNullOrWhiteSpace(item.UserId))
+            if (DeviceFpListGrid.SelectedItem is DeviceFingerprintInfo item && item.SlotId >= 0)
             {
                 selected = item;
                 return true;
             }
             selected = null!;
-            MessageBox.Show("请先选择一名已绑定的指纹用户", "提示");
+            MessageBox.Show("请先选择一个柜机指纹槽位", "提示");
             return false;
         }
 
@@ -576,7 +621,7 @@ namespace CabinetLock
         {
             bool hasMain = !_busy &&
                 DeviceFpListGrid?.SelectedItem is DeviceFingerprintInfo item &&
-                item.FingerprintId > 0 && !string.IsNullOrWhiteSpace(item.UserId);
+                item.SlotId >= 0;
             bool hasBackup = !_busy &&
                 BackupFpListGrid?.SelectedItem is BackupFingerprintRow;
             if (DeleteSelectedFpButton != null) DeleteSelectedFpButton.IsEnabled = hasMain;
@@ -591,6 +636,7 @@ namespace CabinetLock
             RemoteUnlockButton.IsEnabled = !busy;
             ReadStatusButton.IsEnabled = !busy;
             EnrollFingerprintButton.IsEnabled = !busy;
+            BindFingerprintButton.IsEnabled = !busy;
             EnrollBackupFpButton.IsEnabled = !busy;
             RefreshFpListButton.IsEnabled = !busy;
             RefreshBackupListButton.IsEnabled = !busy;

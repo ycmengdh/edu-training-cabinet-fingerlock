@@ -126,6 +126,15 @@ namespace CabinetLock
         /// <summary>查询 SD 卡版本号响应（根节点 -> 上位机）</summary>
         public const string CmdSdVersionResponse = "SD_VERSION_RESPONSE";
 
+        public const string CmdSdSnapshotManifest = "SD_SNAPSHOT_MANIFEST";
+        public const string CmdSdSnapshotManifestResponse = "SD_SNAPSHOT_MANIFEST_RESPONSE";
+        public const string CmdSdSnapshotBegin = "SD_SNAPSHOT_BEGIN";
+        public const string CmdSdSnapshotChunk = "SD_SNAPSHOT_CHUNK";
+        public const string CmdSdSnapshotCommit = "SD_SNAPSHOT_COMMIT";
+        public const string CmdSdSnapshotResponse = "SD_SNAPSHOT_RESPONSE";
+        public const string CmdSdSnapshotDownload = "SD_SNAPSHOT_DOWNLOAD";
+        public const string CmdSdSnapshotDownloadPart = "SD_SNAPSHOT_DOWNLOAD_PART";
+
         /// <summary>上传指纹模板到 SD 卡（上位机 -> 根节点）</summary>
         public const string CmdUploadFpTemplate = "UPLOAD_FP_TEMPLATE";
 
@@ -175,8 +184,21 @@ namespace CabinetLock
 
         public const string CmdReadPermissions = "READ_PERMISSIONS";
         public const string CmdPermissionsResponse = "PERMISSIONS_RESPONSE";
+        public const string CmdDeleteUserPermission = "DELETE_USER_PERMISSION";
         public const string CmdCheckFingerprint = "CHECK_FINGERPRINT";
         public const string CmdFingerprintCheckResponse = "FINGERPRINT_CHECK_RESPONSE";
+        public const string CmdFingerprintListRequest = "FINGERPRINT_LIST_REQUEST";
+        public const string CmdFingerprintListResponse = "FINGERPRINT_LIST_RESPONSE";
+
+        public const string CmdCabinetOtaBegin = "CABINET_OTA_BEGIN";
+        public const string CmdCabinetOtaChunk = "CABINET_OTA_CHUNK";
+        public const string CmdCabinetOtaCommit = "CABINET_OTA_COMMIT";
+        public const string CmdCabinetOtaStart = "CABINET_OTA_START";
+        public const string CmdCabinetOtaStatus = "CABINET_OTA_STATUS";
+        public const string CmdCabinetOtaResponse = "CABINET_OTA_RESPONSE";
+        public const string CmdCabinetOtaProgress = "CABINET_OTA_PROGRESS";
+        public const string CmdCabinetOtaNodes = "CABINET_OTA_NODES";
+        public const string CmdCabinetOtaNodesResponse = "CABINET_OTA_NODES_RESPONSE";
 
         // ===== 错误码常量（ACK 中 result 字段使用） =====
 
@@ -206,6 +228,9 @@ namespace CabinetLock
 
         /// <summary>超时</summary>
         public const string ErrTimeout = "ERR_TIMEOUT";
+
+        public const string ErrDeviceNotRegistered = "1001";
+        public const string ErrMeshForwardFailed = "9301";
 
         /// <summary>
         /// CommandType 枚举转换为命令字符串
@@ -251,6 +276,14 @@ namespace CabinetLock
                 case CommandType.SdSaveResponse: return CmdSdSaveResponse;
                 case CommandType.SdQueryVersion: return CmdSdQueryVersion;
                 case CommandType.SdVersionResponse: return CmdSdVersionResponse;
+                case CommandType.SdSnapshotManifest: return CmdSdSnapshotManifest;
+                case CommandType.SdSnapshotManifestResponse: return CmdSdSnapshotManifestResponse;
+                case CommandType.SdSnapshotBegin: return CmdSdSnapshotBegin;
+                case CommandType.SdSnapshotChunk: return CmdSdSnapshotChunk;
+                case CommandType.SdSnapshotCommit: return CmdSdSnapshotCommit;
+                case CommandType.SdSnapshotResponse: return CmdSdSnapshotResponse;
+                case CommandType.SdSnapshotDownload: return CmdSdSnapshotDownload;
+                case CommandType.SdSnapshotDownloadPart: return CmdSdSnapshotDownloadPart;
                 case CommandType.UploadFpTemplate: return CmdUploadFpTemplate;
                 case CommandType.FpTemplateUploadResponse: return CmdFpTemplateUploadResponse;
                 case CommandType.DownloadFpTemplate: return CmdDownloadFpTemplate;
@@ -268,8 +301,20 @@ namespace CabinetLock
                 case CommandType.FingerprintTestEvent: return CmdFingerprintTestEvent;
                 case CommandType.ReadPermissions: return CmdReadPermissions;
                 case CommandType.PermissionsResponse: return CmdPermissionsResponse;
+                case CommandType.DeleteUserPermission: return CmdDeleteUserPermission;
                 case CommandType.CheckFingerprint: return CmdCheckFingerprint;
                 case CommandType.FingerprintCheckResponse: return CmdFingerprintCheckResponse;
+                case CommandType.FingerprintListRequest: return CmdFingerprintListRequest;
+                case CommandType.FingerprintListResponse: return CmdFingerprintListResponse;
+                case CommandType.CabinetOtaBegin: return CmdCabinetOtaBegin;
+                case CommandType.CabinetOtaChunk: return CmdCabinetOtaChunk;
+                case CommandType.CabinetOtaCommit: return CmdCabinetOtaCommit;
+                case CommandType.CabinetOtaStart: return CmdCabinetOtaStart;
+                case CommandType.CabinetOtaStatus: return CmdCabinetOtaStatus;
+                case CommandType.CabinetOtaResponse: return CmdCabinetOtaResponse;
+                case CommandType.CabinetOtaProgress: return CmdCabinetOtaProgress;
+                case CommandType.CabinetOtaNodes: return CmdCabinetOtaNodes;
+                case CommandType.CabinetOtaNodesResponse: return CmdCabinetOtaNodesResponse;
                 default: return null;
             }
         }
@@ -319,6 +364,14 @@ namespace CabinetLock
                 case CmdSdSaveResponse: return CommandType.SdSaveResponse;
                 case CmdSdQueryVersion: return CommandType.SdQueryVersion;
                 case CmdSdVersionResponse: return CommandType.SdVersionResponse;
+                case CmdSdSnapshotManifest: return CommandType.SdSnapshotManifest;
+                case CmdSdSnapshotManifestResponse: return CommandType.SdSnapshotManifestResponse;
+                case CmdSdSnapshotBegin: return CommandType.SdSnapshotBegin;
+                case CmdSdSnapshotChunk: return CommandType.SdSnapshotChunk;
+                case CmdSdSnapshotCommit: return CommandType.SdSnapshotCommit;
+                case CmdSdSnapshotResponse: return CommandType.SdSnapshotResponse;
+                case CmdSdSnapshotDownload: return CommandType.SdSnapshotDownload;
+                case CmdSdSnapshotDownloadPart: return CommandType.SdSnapshotDownloadPart;
                 case CmdUploadFpTemplate: return CommandType.UploadFpTemplate;
                 case CmdFpTemplateUploadResponse: return CommandType.FpTemplateUploadResponse;
                 case CmdDownloadFpTemplate: return CommandType.DownloadFpTemplate;
@@ -336,8 +389,20 @@ namespace CabinetLock
                 case CmdFingerprintTestEvent: return CommandType.FingerprintTestEvent;
                 case CmdReadPermissions: return CommandType.ReadPermissions;
                 case CmdPermissionsResponse: return CommandType.PermissionsResponse;
+                case CmdDeleteUserPermission: return CommandType.DeleteUserPermission;
                 case CmdCheckFingerprint: return CommandType.CheckFingerprint;
                 case CmdFingerprintCheckResponse: return CommandType.FingerprintCheckResponse;
+                case CmdFingerprintListRequest: return CommandType.FingerprintListRequest;
+                case CmdFingerprintListResponse: return CommandType.FingerprintListResponse;
+                case CmdCabinetOtaBegin: return CommandType.CabinetOtaBegin;
+                case CmdCabinetOtaChunk: return CommandType.CabinetOtaChunk;
+                case CmdCabinetOtaCommit: return CommandType.CabinetOtaCommit;
+                case CmdCabinetOtaStart: return CommandType.CabinetOtaStart;
+                case CmdCabinetOtaStatus: return CommandType.CabinetOtaStatus;
+                case CmdCabinetOtaResponse: return CommandType.CabinetOtaResponse;
+                case CmdCabinetOtaProgress: return CommandType.CabinetOtaProgress;
+                case CmdCabinetOtaNodes: return CommandType.CabinetOtaNodes;
+                case CmdCabinetOtaNodesResponse: return CommandType.CabinetOtaNodesResponse;
                 default: return null;
             }
         }

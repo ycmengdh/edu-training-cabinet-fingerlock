@@ -50,7 +50,6 @@
                         <ListBox.ItemTemplate>
                             <DataTemplate>
                                 <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}"
-                                          IsEnabled="{Binding IsOnline}"
                                           Content="{Binding DisplayText}"
                                           Margin="4,6,4,6"
                                           FontSize="12"/>

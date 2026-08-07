@@ -6,8 +6,9 @@ namespace CabinetLock
     /// </summary>
     public class DeviceService
     {
-        private const string DefaultCabinetName = "实训柜";
+        private const string LegacyDefaultCabinetName = "实训柜";
         private const string FirmwareDefaultCabinetName = "Cabinet Node";
+        private static readonly object DevicePersistenceLock = new();
         private readonly RootDataService _root = new RootDataService();
 
         /// <summary>
@@ -31,7 +32,9 @@ namespace CabinetLock
             {
                 devices = new List<Device>();
             }
-            return MergeOnlineDevices(devices);
+            List<Device> merged = MergeOnlineDevices(devices);
+            PersistNewlySeenDevices(merged);
+            return merged;
         }
 
         /// <summary>获取所有在线设备</summary>
@@ -57,7 +60,7 @@ namespace CabinetLock
                 {
                     DeviceId = string.IsNullOrWhiteSpace(client.DeviceId)
                         ? (client.MeshMac ?? "") : client.DeviceId,
-                    DeviceName = NormalizeCabinetName(client.DeviceName),
+                    DeviceName = client.DeviceName,
                     IpAddress = "",
                     IsOnline = client.IsOnline,
                     RegisterTime = client.ConnectTime == default ? lastSeen : client.ConnectTime,
@@ -65,8 +68,11 @@ namespace CabinetLock
                     LastSeenUnix = new DateTimeOffset(lastSeen).ToUnixTimeSeconds(),
                     MeshMac = client.MeshMac ?? "",
                     IsRoot = false,
+                    FirmwareVersion = client.FirmwareVersion,
+                    HardwareVersion = client.HardwareVersion,
                     Status = client.Status ?? new DeviceRuntimeStatus()
                 };
+                ApplyDefaultIdentity(device);
                 // DeviceId 为空时用 MAC 兜底，避免被丢弃导致列表空白
                 if (string.IsNullOrWhiteSpace(device.DeviceId))
                 {
@@ -95,8 +101,16 @@ namespace CabinetLock
                                 string.Equals(x.DeviceId, d.DeviceId, StringComparison.OrdinalIgnoreCase));
                         if (live != null)
                         {
-                            live.DeviceNumber = d.DeviceNumber;
-                            if (HasStoredCabinetName(d.DeviceName)) live.DeviceName = d.DeviceName.Trim();
+                            if (!string.IsNullOrWhiteSpace(d.DeviceNumber))
+                                live.DeviceNumber = d.DeviceNumber.Trim();
+                            if (HasStoredCabinetName(d.DeviceName, d.DeviceNumber))
+                                live.DeviceName = d.DeviceName.Trim();
+                            if (string.IsNullOrWhiteSpace(live.FirmwareVersion) &&
+                                !string.IsNullOrWhiteSpace(d.FirmwareVersion))
+                                live.FirmwareVersion = d.FirmwareVersion.Trim();
+                            if (string.IsNullOrWhiteSpace(live.HardwareVersion) &&
+                                !string.IsNullOrWhiteSpace(d.HardwareVersion))
+                                live.HardwareVersion = d.HardwareVersion.Trim();
                             continue;
                         }
                         d.IsOnline = false;
@@ -107,25 +121,8 @@ namespace CabinetLock
             }
             catch { /* 本地库可选 */ }
 
-            PersistSeenDevices(devices);
+            PersistNewlySeenDevices(devices);
             return devices.OrderByDescending(d => d.IsOnline).ThenBy(d => d.DeviceId).ToList();
-        }
-
-        /// <summary>把见过的柜子写入本机业务库，重启后仍显示。</summary>
-        private void PersistSeenDevices(List<Device> devices)
-        {
-            try
-            {
-                var arr = new Newtonsoft.Json.Linq.JArray();
-                foreach (var d in devices)
-                {
-                    if (IsTrueRoot(d)) continue;
-                    arr.Add(Newtonsoft.Json.Linq.JObject.FromObject(d));
-                }
-                uint v = BusinessDatabase.GetTableVersion("devices");
-                BusinessDatabase.ReplaceTable("devices", arr, v + 1);
-            }
-            catch { }
         }
 
         /// <summary>
@@ -176,7 +173,7 @@ namespace CabinetLock
             }
 
             if (!string.IsNullOrWhiteSpace(deviceName)) device.DeviceName = deviceName;
-            device.DeviceName ??= deviceId;
+            ApplyDefaultIdentity(device);
             device.IpAddress = ipAddress;
             device.IsOnline = true;
             device.LastOnlineTime = DateTime.Now;
@@ -201,6 +198,90 @@ namespace CabinetLock
             if (string.IsNullOrWhiteSpace(deviceId)) return null;
             return GetAllDevices().FirstOrDefault(d => d.DeviceId == deviceId);
         }
+
+        /// <summary>
+        /// 保存首次见到的柜机，以及注册报文中发生变化的稳定元数据。
+        /// 心跳和空字段不会覆盖已保存的固件/硬件版本。
+        /// </summary>
+        private static void PersistNewlySeenDevices(IReadOnlyCollection<Device> merged)
+        {
+            lock (DevicePersistenceLock)
+            {
+                try
+                {
+                    List<Device> stored = BusinessDatabase.ReadArray("devices")
+                        .ToObject<List<Device>>() ?? new List<Device>();
+                    bool changed = false;
+                    foreach (Device device in merged)
+                    {
+                        if (IsTrueRoot(device)) continue;
+                        Device? existing = stored.FirstOrDefault(candidate =>
+                            IsSamePhysicalDevice(candidate, device));
+                        if (existing == null)
+                        {
+                            stored.Add(CloneForStorage(device));
+                            changed = true;
+                            continue;
+                        }
+                        changed |= MergeStableReportedMetadata(existing, device);
+                    }
+                    if (!changed) return;
+
+                    BusinessDatabase.ReplaceTable(
+                        "devices",
+                        Newtonsoft.Json.Linq.JArray.FromObject(stored),
+                        BusinessDatabase.GetTableVersion("devices") + 1);
+                }
+                catch
+                {
+                    // 设备页仍返回实时合并结果；下一次刷新会再次尝试持久化。
+                }
+            }
+        }
+
+        private static bool MergeStableReportedMetadata(Device target, Device source)
+        {
+            bool changed = false;
+            if (!string.IsNullOrWhiteSpace(source.FirmwareVersion) &&
+                !string.Equals(target.FirmwareVersion, source.FirmwareVersion,
+                    StringComparison.Ordinal))
+            {
+                target.FirmwareVersion = source.FirmwareVersion.Trim();
+                changed = true;
+            }
+            if (!string.IsNullOrWhiteSpace(source.HardwareVersion) &&
+                !string.Equals(target.HardwareVersion, source.HardwareVersion,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                target.HardwareVersion = source.HardwareVersion.Trim();
+                changed = true;
+            }
+            if (string.IsNullOrWhiteSpace(target.MeshMac) &&
+                !string.IsNullOrWhiteSpace(source.MeshMac))
+            {
+                target.MeshMac = source.MeshMac.Trim();
+                changed = true;
+            }
+            return changed;
+        }
+
+        private static Device CloneForStorage(Device source) => new()
+        {
+            DeviceId = source.DeviceId,
+            DeviceName = source.DeviceName,
+            DeviceNumber = source.DeviceNumber,
+            IpAddress = source.IpAddress,
+            IsOnline = source.IsOnline,
+            RegisterTime = source.RegisterTime,
+            LastOnlineTime = source.LastOnlineTime,
+            LastSeenUnix = source.LastSeenUnix,
+            OfflineTimeUnix = source.OfflineTimeUnix,
+            MeshMac = source.MeshMac,
+            IsRoot = source.IsRoot,
+            FirmwareVersion = source.FirmwareVersion,
+            HardwareVersion = source.HardwareVersion,
+            Status = source.Status
+        };
 
         public Device? GetByNumber(string deviceNumber)
         {
@@ -269,6 +350,7 @@ namespace CabinetLock
                     OfflineTimeUnix = target.OfflineTimeUnix,
                     IsRoot = target.IsRoot,
                     FirmwareVersion = target.FirmwareVersion,
+                    HardwareVersion = target.HardwareVersion,
                     Status = target.Status
                 };
                 devices.Add(current);
@@ -287,6 +369,49 @@ namespace CabinetLock
 
         public bool UpdateDeviceNumber(Device target, string deviceNumber, out string error) =>
             UpdateDeviceInfo(target, target?.DeviceName ?? "", deviceNumber, out error);
+
+        public bool DeleteDevice(
+            Device target, out int removedStudentCount, out string error)
+        {
+            removedStudentCount = 0;
+            error = "";
+            if (target == null || string.IsNullOrWhiteSpace(target.DeviceId))
+            {
+                error = "柜机不存在";
+                return false;
+            }
+
+            List<Device> originalDevices = _root.Read<Device>("devices");
+            List<Device> devices = originalDevices.ToList();
+            devices.RemoveAll(device => IsSamePhysicalDevice(device, target) ||
+                string.Equals(device.DeviceId, target.DeviceId,
+                    StringComparison.OrdinalIgnoreCase));
+            if (!_root.Save("devices", devices))
+            {
+                error = "柜机记录删除失败";
+                return false;
+            }
+
+            try
+            {
+                if (!App.CabinetBindingService.RemoveDeviceAssignments(
+                        target.DeviceId, out removedStudentCount))
+                {
+                    _root.Save("devices", originalDevices);
+                    error = "学生柜机绑定清理失败，已恢复柜机记录";
+                    return false;
+                }
+            }
+            catch
+            {
+                _root.Save("devices", originalDevices);
+                throw;
+            }
+
+            App.CabinetSyncQueueService.RemoveDeviceJobs(target.DeviceId);
+            App.MeshBridge.ForgetDevice(target.DeviceId, target.MeshMac);
+            return true;
+        }
 
         private static bool IsSamePhysicalDevice(Device left, Device right)
         {
@@ -328,7 +453,7 @@ namespace CabinetLock
                     devices.Add(new Device
                     {
                         DeviceId = client.DeviceId,
-                        DeviceName = NormalizeCabinetName(client.DeviceName),
+                        DeviceName = client.DeviceName,
                         IsOnline = true,
                         RegisterTime = client.ConnectTime == default ? DateTime.Now : client.ConnectTime,
                         LastOnlineTime = client.LastSeen == default ? DateTime.Now : client.LastSeen,
@@ -337,10 +462,13 @@ namespace CabinetLock
                             : new DateTimeOffset(client.LastSeen).ToUnixTimeSeconds(),
                         MeshMac = client.MeshMac ?? "",
                         IsRoot = IsTrueRoot(client),
+                        FirmwareVersion = client.FirmwareVersion,
+                        HardwareVersion = client.HardwareVersion,
                         Status = client.LastStatusAt.HasValue
                             ? client.Status ?? new DeviceRuntimeStatus()
                             : new DeviceRuntimeStatus()
                     });
+                    ApplyDefaultIdentity(devices[^1]);
                 }
                 else
                 {
@@ -348,15 +476,20 @@ namespace CabinetLock
                     DateTime lastSeen = client.LastSeen == default ? DateTime.Now : client.LastSeen;
                     existing.LastOnlineTime = lastSeen;
                     existing.LastSeenUnix = new DateTimeOffset(lastSeen).ToUnixTimeSeconds();
-                    if (!HasStoredCabinetName(existing.DeviceName))
-                        existing.DeviceName = NormalizeCabinetName(client.DeviceName);
+                    if (!HasStoredCabinetName(existing.DeviceName, existing.DeviceNumber))
+                        existing.DeviceName = client.DeviceName;
                     if (!string.IsNullOrWhiteSpace(client.DeviceId))
                         existing.DeviceId = client.DeviceId;
                     if (!string.IsNullOrWhiteSpace(client.MeshMac))
                         existing.MeshMac = client.MeshMac;
                     // 仅真正的根节点才保留 IsRoot；CABINET_* 强制非根
                     existing.IsRoot = IsTrueRoot(client);
+                    if (!string.IsNullOrWhiteSpace(client.FirmwareVersion))
+                        existing.FirmwareVersion = client.FirmwareVersion;
+                    if (!string.IsNullOrWhiteSpace(client.HardwareVersion))
+                        existing.HardwareVersion = client.HardwareVersion;
                     ApplyLiveRuntimeStatus(existing, client);
+                    ApplyDefaultIdentity(existing);
                 }
             }
 
@@ -379,19 +512,37 @@ namespace CabinetLock
                 target.Status = source.Status;
         }
 
-        private static string NormalizeCabinetName(string? name)
+        private static void ApplyDefaultIdentity(Device device)
         {
-            string value = name?.Trim() ?? "";
-            return string.IsNullOrWhiteSpace(value) ||
-                   string.Equals(value, FirmwareDefaultCabinetName,
-                       StringComparison.OrdinalIgnoreCase)
-                ? DefaultCabinetName
-                : value;
+            string identity = BuildCabinetIdentity(device.DeviceId, device.MeshMac);
+            if (string.IsNullOrWhiteSpace(identity)) return;
+
+            if (!HasStoredCabinetName(device.DeviceName, device.DeviceNumber))
+                device.DeviceName = identity;
+            if (string.IsNullOrWhiteSpace(device.DeviceNumber))
+                device.DeviceNumber = identity;
         }
 
-        private static bool HasStoredCabinetName(string? name) =>
-            !string.IsNullOrWhiteSpace(name) &&
-            !string.Equals(name.Trim(), FirmwareDefaultCabinetName,
-                StringComparison.OrdinalIgnoreCase);
+        private static string BuildCabinetIdentity(string? deviceId, string? meshMac)
+        {
+            string macHex = new string((meshMac ?? "").Where(Uri.IsHexDigit).ToArray())
+                .ToUpperInvariant();
+            if (macHex.Length == 12) return $"CAB_{macHex}";
+            return deviceId?.Trim() ?? "";
+        }
+
+        private static bool HasStoredCabinetName(string? name, string? deviceNumber)
+        {
+            string value = name?.Trim() ?? "";
+            if (string.IsNullOrWhiteSpace(value) ||
+                string.Equals(value, FirmwareDefaultCabinetName,
+                    StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            // 旧版本自动生成“实训柜”且编号为空；把这类记录迁移到 CAB_<MAC>。
+            return !string.Equals(value, LegacyDefaultCabinetName,
+                       StringComparison.OrdinalIgnoreCase) ||
+                   !string.IsNullOrWhiteSpace(deviceNumber);
+        }
     }
 }

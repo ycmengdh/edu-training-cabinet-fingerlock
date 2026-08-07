@@ -154,6 +154,18 @@ namespace CabinetLock
         /// <summary>查询 SD 卡版本号响应（根节点 -> 上位机）</summary>
         SdVersionResponse,
 
+        /// <summary>查询压缩业务快照头</summary>
+        SdSnapshotManifest,
+        SdSnapshotManifestResponse,
+        /// <summary>开始/续传压缩业务快照</summary>
+        SdSnapshotBegin,
+        SdSnapshotChunk,
+        SdSnapshotCommit,
+        SdSnapshotResponse,
+        /// <summary>下载压缩业务快照</summary>
+        SdSnapshotDownload,
+        SdSnapshotDownloadPart,
+
         /// <summary>上传指纹模板到 SD 卡（上位机 -> 根节点）</summary>
         UploadFpTemplate,
 
@@ -207,10 +219,29 @@ namespace CabinetLock
         /// <summary>柜机本地权限查询响应</summary>
         PermissionsResponse,
 
+        /// <summary>按用户删除柜机上的全部权限记录</summary>
+        DeleteUserPermission,
+
         /// <summary>校验柜机指定槽位的模板 CRC</summary>
         CheckFingerprint,
 
         /// <summary>柜机指纹模板校验响应</summary>
-        FingerprintCheckResponse
+        FingerprintCheckResponse,
+
+        /// <summary>读取柜机传感器实际占用槽位</summary>
+        FingerprintListRequest,
+
+        /// <summary>柜机传感器槽位清单响应</summary>
+        FingerprintListResponse,
+
+        CabinetOtaBegin,
+        CabinetOtaChunk,
+        CabinetOtaCommit,
+        CabinetOtaStart,
+        CabinetOtaStatus,
+        CabinetOtaResponse,
+        CabinetOtaProgress,
+        CabinetOtaNodes,
+        CabinetOtaNodesResponse
     }
 }

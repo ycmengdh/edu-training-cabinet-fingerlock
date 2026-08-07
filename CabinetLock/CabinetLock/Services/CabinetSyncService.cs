@@ -100,9 +100,6 @@ namespace CabinetLock
                 }
             })).ConfigureAwait(false);
             List<UserCabinetSyncResult> ordered = results.OrderBy(result => result.DeviceId).ToList();
-            foreach (UserCabinetSyncResult result in ordered)
-                App.CabinetSyncQueueService.RecordUserOutcome(
-                    user.UserId, result.DeviceId, result.Success, result.ErrorMessage);
             return ordered;
         }
 
@@ -235,14 +232,11 @@ namespace CabinetLock
                 CommandResult transaction = SyncOneCabinet(deviceId, rows, snapshot.Version);
                 if (transaction.Success)
                 {
-                    App.CabinetSyncQueueService.RecordCabinetOutcome(deviceId, true);
                     return BroadcastCommandResult.Succeeded(new[] { deviceId });
                 }
                 string reason = string.IsNullOrWhiteSpace(transaction.ErrorMessage)
                     ? $"柜子 {deviceId} 未确认权限同步"
                     : transaction.ErrorMessage;
-                App.CabinetSyncQueueService.RecordCabinetOutcome(
-                    deviceId, false, reason);
                 return new BroadcastCommandResult
                 {
                     ErrorMessage = reason,
@@ -354,8 +348,6 @@ namespace CabinetLock
                 FingerprintFailures = failures.ToArray(),
                 PermissionResult = permissionResult
             };
-            App.CabinetSyncQueueService.RecordCabinetOutcome(
-                deviceId, syncResult.Success, syncResult.Success ? "" : syncResult.FormatForDisplay());
             return syncResult;
         }
 
@@ -395,14 +387,14 @@ namespace CabinetLock
 
         private static uint ComposePermissionVersion(PermissionDataVersions versions)
             => ComposePermissionVersion(versions.Users, versions.Classes,
-                versions.Permissions, versions.RolePermissions, versions.Fingerprints);
+                versions.Permissions, versions.Fingerprints);
 
         public static uint ComposePermissionVersion(uint usersVersion, uint permissionsVersion)
-            => ComposePermissionVersion(usersVersion, 0, permissionsVersion, permissionsVersion, 0);
+            => ComposePermissionVersion(usersVersion, 0, permissionsVersion, 0);
 
-        private static uint ComposePermissionVersion(
+        public static uint ComposePermissionVersion(
             uint usersVersion, uint classesVersion, uint permissionsVersion,
-            uint rolePermissionsVersion, uint fingerprintsVersion)
+            uint fingerprintsVersion)
         {
             unchecked
             {
@@ -410,7 +402,6 @@ namespace CabinetLock
                 value = (value ^ usersVersion) * 16777619;
                 value = (value ^ classesVersion) * 16777619;
                 value = (value ^ permissionsVersion) * 16777619;
-                value = (value ^ rolePermissionsVersion) * 16777619;
                 value = (value ^ fingerprintsVersion) * 16777619;
                 return value == 0 ? 1u : value;
             }

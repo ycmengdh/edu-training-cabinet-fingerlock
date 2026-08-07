@@ -26,6 +26,7 @@ namespace CabinetLock.Tests
         {
             Assert.True(MessageHmac.IsSensitive(Protocol.CmdControlLock));
             Assert.True(MessageHmac.IsSensitive(Protocol.CmdRestoreFingerprint));
+            Assert.True(MessageHmac.IsSensitive(Protocol.CmdDeleteUserPermission));
             Assert.False(MessageHmac.IsSensitive(Protocol.CmdHeartbeat));
         }
     }

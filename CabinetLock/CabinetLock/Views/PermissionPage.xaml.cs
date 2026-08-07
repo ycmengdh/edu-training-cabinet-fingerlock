@@ -32,10 +32,8 @@ namespace CabinetLock
         {
             _classOptions.Clear();
             _classOptions.Add("全部班级");
-            var visibleClasses = await Task.Run(() => App.ClassService.GetVisible()
-                .Select(c => c.Name)
-                .OrderBy(n => n)
-                .ToList());
+            var visibleClasses = (await Task.Run(App.ClassService.GetVisibleClassNames))
+                .Values.Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(name => name).ToList();
             foreach (var name in visibleClasses)
             {
                 _classOptions.Add(name);
@@ -53,23 +51,25 @@ namespace CabinetLock
             SetBusy(true, "正在读取根节点权限数据");
             try
             {
-                // V2.7：使用 GetVisibleUsers 实现教师数据范围隔离
-                _filteredUsers = await Task.Run(() =>
+                (PagedResult<User> users, Dictionary<string, string> classNames) = await Task.Run(() =>
                 {
-                    IEnumerable<User> users = App.UserService.GetVisibleUsers();
-                    var classNames = App.ClassService.GetVisible().ToDictionary(
-                        item => item.ClassId, item => item.Name, StringComparer.OrdinalIgnoreCase);
-                    var permissionUpdates = App.PermissionService.GetLatestUpdateTimes();
-                    IEnumerable<PermissionUserRow> rows = users.Select(user => new PermissionUserRow(
-                        user,
-                        classNames,
-                        permissionUpdates.TryGetValue(user.UserId, out DateTime updateTime) ? updateTime : null));
-                    rows = rows.Where(row =>
-                        (string.IsNullOrWhiteSpace(keyword) || row.Matches(keyword)) &&
-                        (string.IsNullOrWhiteSpace(classFilter) || row.ClassText.Contains(classFilter, StringComparison.OrdinalIgnoreCase))
-                    );
-                    return rows.OrderBy(row => row.User.Role).ThenBy(row => row.User.Name).ToList();
+                    PagedResult<User> page = App.UserService.QueryVisibleUsersPage(
+                        _pager.PageIndex,
+                        _pager.PageSize,
+                        keyword: keyword,
+                        className: classFilter,
+                        sort: UserPageSort.RoleThenName);
+                    return (page, App.ClassService.GetVisibleClassNames());
                 });
+                Dictionary<string, DateTime> permissionUpdates = await Task.Run(() =>
+                    App.PermissionService.GetLatestUpdateTimes(
+                        users.Items.Select(user => user.UserId).ToArray()));
+                _filteredUsers = users.Items.Select(user => new PermissionUserRow(
+                    user,
+                    classNames,
+                    permissionUpdates.TryGetValue(user.UserId, out DateTime updateTime) ? updateTime : null))
+                    .ToList();
+                _pager.SetTotalCount(users.TotalCount);
                 ApplyUserPage();
             }
             catch (RootDataUnavailableException ex)
@@ -87,11 +87,10 @@ namespace CabinetLock
 
         private void ApplyUserPage()
         {
-            var page = _pager.Slice(_filteredUsers);
-            UserListBox.ItemsSource = page;
-            UserListBox.SelectedIndex = page.Count > 0 ? 0 : -1;
+            UserListBox.ItemsSource = _filteredUsers;
+            UserListBox.SelectedIndex = _filteredUsers.Count > 0 ? 0 : -1;
             _pager.BindChrome(Pager);
-            PageStatusText.Text = _pager.StatusText(page.Count);
+            PageStatusText.Text = _pager.StatusText(_filteredUsers.Count);
         }
 
         private async void RefreshButton_Click(object sender, RoutedEventArgs e)
@@ -111,10 +110,10 @@ namespace CabinetLock
             await LoadUsersAsync(resetPage: true);
         }
 
-        private void Pager_PageRequested(object sender, Controls.PaginationRequestedEventArgs e)
+        private async void Pager_PageRequested(object sender, Controls.PaginationRequestedEventArgs e)
         {
             _pager.ApplyRequest(e);
-            ApplyUserPage();
+            await LoadUsersAsync(resetPage: false);
         }
 
         /// <summary>用户列表选中变化：加载该用户权限</summary>
@@ -124,8 +123,10 @@ namespace CabinetLock
             {
                 _selectedUser = null;
                 PermissionEditor.IsEnabled = false;
+                ShowStudentAuthorizationEditor(false);
+                StudentAuthorizationGrid.ItemsSource = null;
                 SelectedUserName.Text = "未选择用户";
-                SelectedUserRole.Text = "-";
+                ApplyRoleBadge(null);
                 SelectedUserFp.Text = "指纹 ID：-";
                 return;
             }
@@ -143,7 +144,16 @@ namespace CabinetLock
         {
             // 显示用户信息
             SelectedUserName.Text = user.Name;
-            SelectedUserRole.Text = user.Role;
+            ApplyRoleBadge(user.Role);
+            bool isStudent = string.Equals(user.Role, "student", StringComparison.OrdinalIgnoreCase);
+            ShowStudentAuthorizationEditor(isStudent);
+            if (isStudent)
+            {
+                SelectedUserFp.Text = "指纹模板：正在读取";
+                await LoadStudentAuthorizationsAsync(user);
+                return;
+            }
+
             SelectedUserFp.Text = user.FingerprintId.HasValue
                 ? $"指纹ID：{user.FingerprintId.Value}"
                 : "指纹ID：未分配";
@@ -196,6 +206,163 @@ namespace CabinetLock
                 Lock0CheckBox.IsChecked = false;
             }
             PageStatusText.Text = $"正在编辑 {user.Name} 的本地鉴权权限";
+        }
+
+        private void ShowStudentAuthorizationEditor(bool showStudent)
+        {
+            StudentAuthorizationPanel.Visibility = showStudent ? Visibility.Visible : Visibility.Collapsed;
+            StudentAuthorizationActions.Visibility = showStudent ? Visibility.Visible : Visibility.Collapsed;
+            StandardPermissionPanel.Visibility = showStudent ? Visibility.Collapsed : Visibility.Visible;
+            StandardPermissionActions.Visibility = showStudent ? Visibility.Collapsed : Visibility.Visible;
+        }
+
+        private async Task LoadStudentAuthorizationsAsync(User user)
+        {
+            SetBusy(true, $"正在读取 {user.Name} 的柜机授权");
+            try
+            {
+                StudentAuthorizationSnapshot snapshot = await Task.Run(() =>
+                {
+                    List<Device> devices = App.DeviceService.GetAllDevices()
+                        .Where(device => !DeviceService.IsTrueRoot(device) &&
+                            !string.IsNullOrWhiteSpace(device.DeviceId))
+                        .ToList();
+                    List<FingerprintTemplate> templates = BusinessDatabase.ReadAllFpTemplateMetas()
+                        .Where(item => string.Equals(item.UserId, user.UserId,
+                            StringComparison.OrdinalIgnoreCase))
+                        .GroupBy(item => item.FingerprintId)
+                        .Select(group => group.First())
+                        .ToList();
+                    IReadOnlyList<CabinetAssignment> assignments = App.CabinetBindingService
+                        .GetAssignments(user, devices.Select(device => device.DeviceId));
+                    bool[] defaultPermissions = App.PermissionService.GetFinalPermissions(user.UserId);
+                    IReadOnlyList<CabinetSyncJob> syncJobs = App.CabinetSyncQueueService.GetAll();
+                    Dictionary<string, Device> devicesById = devices
+                        .GroupBy(device => device.DeviceId, StringComparer.OrdinalIgnoreCase)
+                        .ToDictionary(group => group.Key, group => group.First(),
+                            StringComparer.OrdinalIgnoreCase);
+
+                    List<StudentAuthorizationRow> rows = assignments.Select(assignment =>
+                    {
+                        devicesById.TryGetValue(assignment.DeviceId, out Device? device);
+                        IReadOnlyList<int> selectedIds = App.CabinetBindingService
+                            .GetSelectedFingerprintIds(user, assignment.DeviceId, templates);
+                        string[] selectedFingerprints = templates
+                            .Where(item => item.Enabled && selectedIds.Contains(item.FingerprintId))
+                            .OrderBy(item => item.FingerIndex)
+                            .ThenBy(item => item.FingerprintId)
+                            .Select(item => $"{item.FingerDisplayName} #{item.FingerprintId}")
+                            .ToArray();
+                        bool[] lockPermissions = App.CabinetBindingService.GetLockPermissions(
+                            user, assignment.DeviceId, defaultPermissions);
+                        CabinetSyncJob? syncJob = syncJobs.FirstOrDefault(job =>
+                            string.Equals(job.DeviceId, assignment.DeviceId,
+                                StringComparison.OrdinalIgnoreCase) &&
+                            ((job.JobKind == "user" && string.Equals(job.UserId, user.UserId,
+                                StringComparison.OrdinalIgnoreCase)) || job.JobKind == "cabinet"));
+                        bool complete = selectedFingerprints.Length > 0 &&
+                            lockPermissions.Any(value => value);
+                        return new StudentAuthorizationRow
+                        {
+                            DeviceText = device == null
+                                ? assignment.DeviceId
+                                : string.IsNullOrWhiteSpace(device.DeviceName)
+                                    ? device.DeviceId : device.DeviceName,
+                            FingerprintText = selectedFingerprints.Length == 0
+                                ? "未选择" : string.Join("、", selectedFingerprints),
+                            LockPermissionText = FormatStudentLockPermissions(lockPermissions),
+                            AuthorizationStatusText = complete
+                                ? syncJob?.StatusText ?? "未校验" : "待配置"
+                        };
+                    }).OrderBy(row => row.DeviceText, StringComparer.OrdinalIgnoreCase).ToList();
+
+                    return new StudentAuthorizationSnapshot
+                    {
+                        FingerprintCount = templates.Count(item => item.Enabled),
+                        Rows = rows
+                    };
+                });
+
+                if (_selectedUser?.UserId != user.UserId) return;
+                SelectedUserFp.Text = $"指纹模板：{snapshot.FingerprintCount} 枚";
+                StudentAuthorizationGrid.ItemsSource = snapshot.Rows;
+                bool hasAssignments = snapshot.Rows.Count > 0;
+                StudentAuthorizationGrid.Visibility = hasAssignments
+                    ? Visibility.Visible : Visibility.Collapsed;
+                StudentAuthorizationEmpty.Visibility = hasAssignments
+                    ? Visibility.Collapsed : Visibility.Visible;
+                PageStatusText.Text = hasAssignments
+                    ? $"{user.Name} 已授权 {snapshot.Rows.Count} 台实训柜"
+                    : $"{user.Name} 尚未绑定实训柜";
+            }
+            catch (RootDataUnavailableException ex)
+            {
+                StudentAuthorizationGrid.ItemsSource = null;
+                StudentAuthorizationGrid.Visibility = Visibility.Collapsed;
+                StudentAuthorizationEmpty.Visibility = Visibility.Visible;
+                PageStatusText.Text = ex.Message;
+            }
+            catch (Exception ex)
+            {
+                StudentAuthorizationGrid.ItemsSource = null;
+                StudentAuthorizationGrid.Visibility = Visibility.Collapsed;
+                StudentAuthorizationEmpty.Visibility = Visibility.Visible;
+                PageStatusText.Text = $"柜机授权读取失败：{ex.Message}";
+            }
+            finally
+            {
+                SetBusy(false);
+            }
+        }
+
+        private static string FormatStudentLockPermissions(IReadOnlyList<bool> permissions)
+        {
+            string[] names = { "系统锁", "柜门 1", "柜门 2", "柜门 3" };
+            string[] selected = names.Where((_, index) => permissions.ElementAtOrDefault(index)).ToArray();
+            return selected.Length == 0 ? "未选择" : string.Join("、", selected);
+        }
+
+        private void ApplyRoleBadge(string? role)
+        {
+            string normalizedRole = role?.Trim().ToLowerInvariant() ?? "";
+            SelectedUserRole.Text = normalizedRole switch
+            {
+                "admin" => "管理员",
+                "teacher" => "教师",
+                "student" => "学生",
+                _ => "-"
+            };
+
+            string backgroundKey;
+            string borderKey;
+            string foregroundKey;
+            switch (normalizedRole)
+            {
+                case "admin":
+                    backgroundKey = "DangerSurfaceBrush";
+                    borderKey = "DangerBorderBrush";
+                    foregroundKey = "DangerBrush";
+                    break;
+                case "teacher":
+                    backgroundKey = "PrimaryLightBrush";
+                    borderKey = "PrimaryBrush";
+                    foregroundKey = "PrimaryDarkBrush";
+                    break;
+                case "student":
+                    backgroundKey = "HintBrush";
+                    borderKey = "HintBorderBrush";
+                    foregroundKey = "SuccessBrush";
+                    break;
+                default:
+                    backgroundKey = "SurfaceAltBrush";
+                    borderKey = "BorderBrush";
+                    foregroundKey = "SubTextBrush";
+                    break;
+            }
+
+            RoleBadge.Background = FindResource(backgroundKey) as Brush;
+            RoleBadge.BorderBrush = FindResource(borderKey) as Brush;
+            SelectedUserRole.Foreground = FindResource(foregroundKey) as Brush;
         }
 
         /// <summary>设置单个锁的勾选状态与来源标记</summary>
@@ -255,13 +422,9 @@ namespace CabinetLock
             {
                 UpdateSelectedPermissionTime(DateTime.Now);
                 await LoadUserPermissionsAsync(_selectedUser);
-                BroadcastCommandResult synced = await SyncPermissionsAsync();
                 MessageBox.Show(
-                    CabinetSyncService.FormatSyncResult(synced,
-                        "权限已保存，所有在线柜子均已确认",
-                        "权限已保存，但在线柜子未全部确认"),
-                    synced.Success ? "保存完成" : "同步提示", MessageBoxButton.OK,
-                    synced.Success ? MessageBoxImage.Information : MessageBoxImage.Warning);
+                    "权限已保存。在线柜子将立即增量更新，离线柜子已加入待同步队列。",
+                    "保存完成", MessageBoxButton.OK, MessageBoxImage.Information);
             }
             else
             {
@@ -302,13 +465,9 @@ namespace CabinetLock
             {
                 UpdateSelectedPermissionTime(null);
                 await LoadUserPermissionsAsync(_selectedUser);
-                BroadcastCommandResult synced = await SyncPermissionsAsync();
                 MessageBox.Show(
-                    CabinetSyncService.FormatSyncResult(synced,
-                        "个人权限已按模板重置，所有在线柜子均已确认",
-                        "个人权限已按模板重置，但在线柜子未全部确认"),
-                    "重置完成", MessageBoxButton.OK,
-                    synced.Success ? MessageBoxImage.Information : MessageBoxImage.Warning);
+                    "个人权限已按模板重置。在线柜子将立即增量更新，离线柜子已排队。",
+                    "重置完成", MessageBoxButton.OK, MessageBoxImage.Information);
             }
             else
             {
@@ -322,20 +481,24 @@ namespace CabinetLock
             UserListBox.IsEnabled = !busy;
             SaveButton.IsEnabled = !busy && _selectedUser != null;
             ResetButton.IsEnabled = !busy && _selectedUser != null;
+            ManageStudentAuthorizationButton.IsEnabled = !busy && _selectedUser != null;
             if (!string.IsNullOrEmpty(status)) PageStatusText.Text = status;
         }
 
-        private async Task<BroadcastCommandResult> SyncPermissionsAsync()
+        private async void ManageStudentAuthorizationButton_Click(object sender, RoutedEventArgs e)
         {
-            try
+            if (_selectedUser == null || !string.Equals(
+                    _selectedUser.Role, "student", StringComparison.OrdinalIgnoreCase)) return;
+
+            string className = UserListBox.SelectedItem is PermissionUserRow row
+                ? row.ClassName : "未分配";
+            var window = new StudentDetailWindow(_selectedUser, className)
             {
-                return await Task.Run(App.CabinetSyncService.SyncAllPermissions);
-            }
-            catch (RootDataUnavailableException ex)
-            {
-                PageStatusText.Text = ex.Message;
-                return BroadcastCommandResult.Failed(ex.Message);
-            }
+                Owner = Window.GetWindow(this)
+            };
+            window.ShowDialog();
+            _selectedUser = App.UserService.GetUser(_selectedUser.UserId) ?? _selectedUser;
+            await LoadUserPermissionsAsync(_selectedUser);
         }
 
         private void UpdateSelectedPermissionTime(DateTime? updateTime)
@@ -359,17 +522,18 @@ namespace CabinetLock
                 };
                 IdentityText = user.Role switch
                 {
-                    "teacher" => $"教师 ID {user.DisplayId}",
-                    "student" => $"学号 {user.DisplayId}",
-                    _ => $"账号 {user.DisplayId}"
+                    "teacher" => $"{user.DisplayId}",
+                    "student" => $"{user.DisplayId}",
+                    _ => $"{user.DisplayId}"
                 };
                 string[] assignedClasses = user.GetResponsibleClassIds().Select(classId =>
                     classNames.TryGetValue(classId, out string? className)
                         ? className : classId).ToArray();
+                ClassName = assignedClasses.Length == 0
+                    ? "未分配" : string.Join("、", assignedClasses);
                 ClassText = assignedClasses.Length == 0
-                    ? "未分配班级"
-                    : (string.Equals(user.Role, "teacher", StringComparison.OrdinalIgnoreCase)
-                        ? "负责 " : "班级 ") + string.Join("、", assignedClasses);
+                    ? "-"
+                    : string.Join("、", assignedClasses);
                 SetPermissionUpdateTime(permissionUpdateTime);
             }
 
@@ -377,6 +541,7 @@ namespace CabinetLock
             public string Name => User.Name;
             public string RoleText { get; }
             public string IdentityText { get; }
+            public string ClassName { get; }
             public string ClassText { get; }
             public string PermissionUpdateText { get; private set; } = "";
 
@@ -389,9 +554,23 @@ namespace CabinetLock
             public void SetPermissionUpdateTime(DateTime? updateTime)
             {
                 PermissionUpdateText = updateTime.HasValue
-                    ? $"权限更新 {updateTime.Value:yyyy-MM-dd HH:mm}"
+                    ? $" {updateTime.Value:yyyy-MM-dd HH:mm}"
                     : "尚无个人权限更新";
             }
+        }
+
+        private sealed class StudentAuthorizationSnapshot
+        {
+            public int FingerprintCount { get; init; }
+            public List<StudentAuthorizationRow> Rows { get; init; } = new();
+        }
+
+        private sealed class StudentAuthorizationRow
+        {
+            public string DeviceText { get; init; } = "";
+            public string FingerprintText { get; init; } = "";
+            public string LockPermissionText { get; init; } = "";
+            public string AuthorizationStatusText { get; init; } = "";
         }
     }
 }

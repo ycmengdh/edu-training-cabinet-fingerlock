@@ -147,9 +147,7 @@ namespace CabinetLock
                     bool ok = App.UserService.AssignFingerprint(userId, localFpId);
                     if (ok)
                     {
-                        // 触发全局权限同步，让其他柜子也更新该用户的指纹 ID
-                        var syncResult = App.CabinetSyncService.SyncAllPermissions();
-                        ResultText.Text += $"\n已覆盖全局主指纹 (fp_id={localFpId})，同步：{syncResult}";
+                        ResultText.Text += $"\n已覆盖全局主指纹 (fp_id={localFpId})，在线柜立即处理，离线柜已排队";
                     }
                     else
                     {

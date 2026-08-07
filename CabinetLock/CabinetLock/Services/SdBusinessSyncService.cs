@@ -3,8 +3,9 @@ using Newtonsoft.Json.Linq;
 namespace CabinetLock
 {
     /// <summary>
-    /// SD 业务同步：启动 SD→business.db；显式同步或链路恢复时 business.db→SD。
-    /// 开锁日志可从 SD 合并进 logs.db（非强制）。
+    /// SD 业务同步：启动 SD→business.db；显式同步或退出时 business.db→SD。
+    /// Routine sync excludes logs and fingerprint templates. Fingerprints are
+    /// persisted to SD when enrollment completes; full backup handles bulk data.
     /// </summary>
     public class SdBusinessSyncService
     {
@@ -45,6 +46,53 @@ namespace CabinetLock
 
             BusinessDatabase.Initialize();
 
+            progress?.Report("正在读取压缩业务快照…");
+            var fastProgress = new Progress<SnapshotTransferProgress>(value =>
+                progress?.Report($"正在下载业务数据：{value.Percent}%"));
+            SnapshotTransferResult fast = await App.SdStorageService
+                .DownloadBusinessSnapshotAsync(fastProgress,
+                    Math.Max(timeoutMs, 15000), cancellationToken)
+                .ConfigureAwait(false);
+            if (!fast.Unsupported && fast.Success && fast.ContainerBytes != null)
+            {
+                try
+                {
+                    progress?.Report("正在校验并导入业务数据…");
+                    BusinessSnapshot snapshot = BusinessSnapshotCodec.Decode(
+                        fast.ContainerBytes);
+                    BusinessSnapshotPackage package =
+                        BusinessSnapshotCodec.ReadPackage(snapshot);
+                    BusinessDatabase.ReplaceBusinessSnapshot(package.Tables,
+                        package.Versions);
+                    foreach (string table in BusinessDatabase.DailySyncTables)
+                    {
+                        result.PulledTables.Add(table);
+                        if (package.Tables[table].Count == 0)
+                            result.EmptyTables.Add(table);
+                    }
+                    result.Success = true;
+                    result.Message = $"业务快照同步完成（{fast.TransferredBytes / 1024.0:F1} KB）";
+                    return result;
+                }
+                catch (Exception ex)
+                {
+                    result.Success = false;
+                    result.Message = $"业务快照校验或导入失败：{ex.Message}";
+                    return result;
+                }
+            }
+            if (!fast.Unsupported && !fast.NotFound)
+            {
+                result.Success = false;
+                result.Message = string.IsNullOrWhiteSpace(fast.Error)
+                    ? "压缩业务快照下载失败"
+                    : fast.Error;
+                return result;
+            }
+            progress?.Report(fast.Unsupported
+                ? "根节点固件不支持快速同步，正在使用兼容模式…"
+                : "根节点尚无业务快照，正在读取兼容数据…");
+
             // 先拉版本快照，便于空表也能写对 version。
             SdVersionInfo? versions = null;
             try
@@ -57,10 +105,7 @@ namespace CabinetLock
             {
                 versions = null;
             }
-            if (versions != null)
-                BusinessDatabase.SetTableVersion("fingerprints", versions.FpVersion);
-
-            foreach (string table in BusinessDatabase.BusinessTables)
+            foreach (string table in BusinessDatabase.DailySyncTables)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 progress?.Report($"正在读取 SD 表：{table}…");
@@ -136,26 +181,6 @@ namespace CabinetLock
 
                 if (!imported && !result.FailedTables.Contains(table))
                     result.FailedTables.Add(table);
-            }
-
-            // 尽力合并开锁日志
-            try
-            {
-                progress?.Report("正在合并 SD 开锁日志（可选）…");
-                var logSnap = await App.SdStorageService.QueryTableSnapshotAsync("logs", timeoutMs)
-                    .ConfigureAwait(false);
-                if (logSnap != null && !string.IsNullOrWhiteSpace(logSnap.Json))
-                {
-                    var array = NormalizeTableArray(logSnap.Json, "logs", out _);
-                    if (array != null)
-                        LogDatabase.MergeUnlockFromArray(array);
-                }
-                progress?.Report("开锁日志合并完成，正在校验业务表…");
-            }
-            catch
-            {
-                // 开锁日志合并失败不影响业务
-                progress?.Report("开锁日志暂未合并，不影响业务同步…");
             }
 
             // 成功条件：核心表 users 必须成功；其余允许空表。
@@ -290,6 +315,52 @@ namespace CabinetLock
             }
 
             BusinessDatabase.Initialize();
+            progress?.Report("正在生成压缩业务快照…");
+            BusinessSnapshot businessSnapshot;
+            try
+            {
+                businessSnapshot = BusinessSnapshotCodec.CreateFromDatabase();
+            }
+            catch (Exception ex)
+            {
+                result.Success = false;
+                result.Message = $"生成业务快照失败：{ex.Message}";
+                return result;
+            }
+
+            var fastProgress = new Progress<SnapshotTransferProgress>(value =>
+                progress?.Report($"正在上传业务数据：{value.Percent}%"));
+            SnapshotTransferResult fast = await App.SdStorageService
+                .UploadBusinessSnapshotAsync(businessSnapshot, fastProgress,
+                    timeoutMs, cancellationToken).ConfigureAwait(false);
+            if (!fast.Unsupported)
+            {
+                if (!fast.Success)
+                {
+                    result.Success = false;
+                    result.Message = string.IsNullOrWhiteSpace(fast.Error)
+                        ? "压缩业务快照上传失败"
+                        : fast.Error;
+                    return result;
+                }
+
+                foreach (string table in BusinessDatabase.DailySyncTables)
+                {
+                    JArray rows = BusinessDatabase.ReadArray(table) ?? new JArray();
+                    if (fast.Unchanged)
+                        result.UnchangedTables.Add(table);
+                    else
+                        result.PulledTables.Add(table);
+                    if (rows.Count == 0) result.EmptyTables.Add(table);
+                }
+                result.Success = true;
+                result.Message = fast.Unchanged
+                    ? "业务数据无变化，无需重复上传"
+                    : $"业务快照上传完成（{businessSnapshot.CompressedPayload.Length / 1024.0:F1} KB）";
+                return result;
+            }
+            progress?.Report("根节点固件不支持快速同步，正在使用兼容模式…");
+
             SdVersionInfo? versions = null;
             try
             {
@@ -301,7 +372,7 @@ namespace CabinetLock
                 versions = null;
             }
 
-            foreach (string table in BusinessDatabase.BusinessTables)
+            foreach (string table in BusinessDatabase.DailySyncTables)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 progress?.Report($"正在上传业务表：{table}…");
@@ -377,88 +448,28 @@ namespace CabinetLock
                 }
             }
 
-            // 尽力回传开锁日志到 SD
-            try
-            {
-                progress?.Report("正在上传开锁日志…");
-                var unlock = LogDatabase.ReadAllUnlock();
-                if (unlock.Count > 0)
-                {
-                    var arr = JArray.FromObject(unlock);
-                    uint logBase = versions?.LogsVersion ?? 0;
-                    await App.SdStorageService.SaveTableWithFallbackAsync(
-                        "logs", arr.ToString(Newtonsoft.Json.Formatting.None), logBase, timeoutMs)
-                        .ConfigureAwait(false);
-                }
-            }
-            catch
-            {
-                // ignore
-            }
-
-            int fingerprintTotal = 0;
-            bool fingerprintUploadCompleted = true;
-            try
-            {
-                progress?.Report("正在上传指纹模板…");
-                fingerprintTotal = BusinessDatabase.ListFpTemplatesWithBytes().Count;
-                int fpOk = await UploadFingerprintsToSdAsync(timeoutMs).ConfigureAwait(false);
-                result.UploadedFingerprintCount = fpOk;
-                result.FailedFingerprintCount = Math.Max(0, fingerprintTotal - fpOk);
-                if (result.FailedFingerprintCount == 0)
-                {
-                    try
-                    {
-                        SdVersionInfo? refreshed = await App.SdStorageService
-                            .QueryVersionAsync(timeoutMs).ConfigureAwait(false);
-                        if (refreshed != null)
-                            BusinessDatabase.SetTableVersion("fingerprints", refreshed.FpVersion);
-                    }
-                    catch
-                    {
-                    }
-                }
-            }
-            catch
-            {
-                fingerprintUploadCompleted = false;
-                result.FailedFingerprintCount = Math.Max(1, fingerprintTotal);
-            }
-
             int processedTableCount = result.PulledTables.Count + result.UnchangedTables.Count;
             result.Success = result.FailedTables.Count == 0 &&
-                processedTableCount > 0 &&
-                fingerprintUploadCompleted &&
-                result.FailedFingerprintCount == 0;
-            string fingerprintSummary = fingerprintTotal > 0
-                ? $"；指纹模板 {result.UploadedFingerprintCount}/{fingerprintTotal} 条"
-                : "";
+                processedTableCount > 0;
             if (processedTableCount == 0)
             {
                 result.Success = false;
-                result.Message = "业务表上传失败" + fingerprintSummary;
+                result.Message = "业务表上传失败";
             }
             else if (result.FailedTables.Count > 0)
             {
                 result.Success = false;
                 result.Message =
-                    $"部分上传成功：{string.Join(",", result.PulledTables)}；失败：{string.Join("；", result.FailureDetails)}" +
-                    fingerprintSummary;
-            }
-            else if (!fingerprintUploadCompleted || result.FailedFingerprintCount > 0)
-            {
-                result.Success = false;
-                result.Message = $"业务表已上传，但有 {result.FailedFingerprintCount} 条指纹模板上传失败" +
-                    fingerprintSummary;
+                    $"部分上传成功：{string.Join(",", result.PulledTables)}；失败：{string.Join("；", result.FailureDetails)}";
             }
             else
             {
                 result.Message = result.PulledTables.Count == 0
-                    ? "业务表无变化，无需重复上传" + fingerprintSummary
+                    ? "业务表无变化，无需重复上传"
                     : $"已上传 {result.PulledTables.Count} 张业务表到 SD" +
                       (result.UnchangedTables.Count > 0
                           ? $"，跳过 {result.UnchangedTables.Count} 张未变化表"
-                          : "") + fingerprintSummary;
+                          : "");
             }
 
             return result;

@@ -54,6 +54,17 @@ namespace CabinetLock
         [JsonProperty("firmware_version")]
         public string FirmwareVersion { get; set; } = "";
 
+        [JsonProperty("hardware_version")]
+        public string HardwareVersion { get; set; } = "";
+
+        [JsonIgnore]
+        public string FirmwareVersionText => string.IsNullOrWhiteSpace(FirmwareVersion)
+            ? "未上报" : FirmwareVersion.Trim();
+
+        [JsonIgnore]
+        public string HardwareVersionText => string.IsNullOrWhiteSpace(HardwareVersion)
+            ? "未上报" : HardwareVersion.Trim();
+
         [JsonProperty("status")]
         public DeviceRuntimeStatus Status { get; set; } = new();
 
@@ -84,6 +95,28 @@ namespace CabinetLock
                 return Status.PermissionVersion == RootPermissionVersion ? "已同步" : "落后";
             }
         }
+
+        [JsonIgnore]
+        public string PermissionVersionPairText
+        {
+            get
+            {
+                string reported = Status.PermissionVersion == 0
+                    ? "未上报"
+                    : Status.PermissionVersion.ToString();
+                string expected = RootPermissionVersion == 0
+                    ? "未生成"
+                    : RootPermissionVersion.ToString();
+                return $"{reported} / {expected}";
+            }
+        }
+
+        [JsonIgnore]
+        public string PermissionVersionExplanation =>
+            $"柜端上报：{(Status.PermissionVersion == 0 ? "未上报" : Status.PermissionVersion.ToString())}\n" +
+            $"当前期望：{(RootPermissionVersion == 0 ? "未生成" : RootPermissionVersion.ToString())}\n" +
+            "这是由用户、班级、权限和指纹相关数据版本组合计算的 32 位同步标识，" +
+            "用于判断柜端权限数据是否一致；不是固件版本，也不是文件内容校验码。";
 
         /// <summary>列表筛选/着色：offline / lagging / ok / unknown</summary>
         [JsonIgnore]
@@ -129,6 +162,9 @@ namespace CabinetLock
         [JsonProperty("fingerprint_count")]
         public int FingerprintCount { get; set; }
 
+        [JsonProperty("fingerprint_ready")]
+        public bool FingerprintReady { get; set; }
+
         [JsonProperty("perm_count")]
         public int PermissionCount { get; set; }
 
@@ -146,6 +182,42 @@ namespace CabinetLock
 
         [JsonProperty("time_synced")]
         public bool TimeSynced { get; set; }
+
+        [JsonProperty("mesh_send_failures")]
+        public int MeshSendFailures { get; set; }
+
+        [JsonProperty("mesh_send_retries")]
+        public int MeshSendRetries { get; set; }
+
+        [JsonProperty("mesh_queue_full")]
+        public int MeshQueueFull { get; set; }
+
+        [JsonProperty("mesh_rx_drops")]
+        public int MeshRxDrops { get; set; }
+
+        [JsonProperty("mesh_rx_queue_high_water")]
+        public int MeshRxQueueHighWater { get; set; }
+
+        [JsonProperty("mesh_recoveries")]
+        public int MeshRecoveries { get; set; }
+
+        [JsonProperty("mesh_disconnects")]
+        public int MeshDisconnects { get; set; }
+
+        [JsonProperty("mesh_reconnects")]
+        public int MeshReconnects { get; set; }
+
+        [JsonProperty("mesh_stack_restarts")]
+        public int MeshStackRestarts { get; set; }
+
+        [JsonProperty("mesh_last_disconnect_reason")]
+        public int MeshLastDisconnectReason { get; set; }
+
+        [JsonProperty("serial_tx_drops")]
+        public int SerialTxDrops { get; set; }
+
+        [JsonProperty("serial_tx_failures")]
+        public int SerialTxFailures { get; set; }
 
         [JsonIgnore]
         public string UptimeText => UptimeSeconds <= 0

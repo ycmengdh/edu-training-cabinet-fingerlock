@@ -15,6 +15,10 @@ namespace CabinetLock
         [JsonProperty("msg_id")]
         public string MsgId { get; set; } = "";
 
+        /// <summary>上位机会话号，用于区分进程重启前后的同一消息 ID。</summary>
+        [JsonProperty("corr_id")]
+        public ushort CorrId { get; set; }
+
         /// <summary>命令字段（与 CommandType 枚举对应）</summary>
         [JsonProperty("cmd")]
         public string Cmd { get; set; } = "";
@@ -89,7 +93,8 @@ namespace CabinetLock
         /// 生成消息 ID：滚动 ushort（1..65535），与固件二进制 msg_id 对齐。
         /// 字符串形式便于 CommandService 字典匹配。
         /// </summary>
-        private static int _msgIdSeq;
+        private static int _msgIdSeq =
+            System.Security.Cryptography.RandomNumberGenerator.GetInt32(1, 65536);
         private static string GenerateMsgId()
         {
             int next = System.Threading.Interlocked.Increment(ref _msgIdSeq);

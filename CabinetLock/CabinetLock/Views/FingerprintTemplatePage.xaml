@@ -19,7 +19,7 @@
             <StackPanel>
                 <TextBlock Text="指纹库" Style="{StaticResource TitleText}"/>
                 <TextBlock x:Name="PageStatusText"
-                           Text="用户可存多枚指纹；默认下发第一枚，也可在学生详情按柜选择多枚，每枚占用一个传感器槽位"
+                           Text="用户可存多枚指纹；柜机指纹分配与同步在学生详情、班级管理等业务页面完成"
                            Style="{StaticResource PageStatusText}"/>
             </StackPanel>
             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Bottom">
@@ -87,14 +87,10 @@
                                         ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
                     <DataGridTextColumn Header="备份状态" Binding="{Binding BackupStatusText}" Width="100"
                                         ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                    <DataGridTemplateColumn Header="操作" Width="300">
+                    <DataGridTemplateColumn Header="操作" Width="150">
                         <DataGridTemplateColumn.CellTemplate>
                             <DataTemplate>
                                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
-                                    <Button Content="关联用户" Tag="{Binding FingerprintId}" Margin="0,0,6,0"
-                                            Style="{StaticResource SecondaryButton}" Click="BindUserButton_Click"/>
-                                    <Button Content="下发" Tag="{Binding FingerprintId}" Margin="0,0,6,0"
-                                            Click="DistributeOneButton_Click"/>
                                     <Button Content="测试" Tag="{Binding FingerprintId}" Margin="0,0,6,0"
                                             Style="{StaticResource SecondaryButton}" Click="TestOneButton_Click"/>
                                     <Button Content="删除" Tag="{Binding FingerprintId}"

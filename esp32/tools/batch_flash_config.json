@@ -1,0 +1,62 @@
+{
+  "default_profile": "cabinet",
+  "max_parallel": 4,
+  "poll_interval": 0.6,
+  "settle_delay": 1.0,
+  "retry_interval": 4.0,
+  "post_flash_delay": 1.0,
+  "verify_after_flash": true,
+  "ui_auto_start": false,
+  "baud": 921600,
+  "records_csv": "flash_records.csv",
+  "log_dir": "logs",
+  "vid_whitelist": [6790, 4292, 12346],
+  "python_exe": null,
+  "esptool_path": null,
+  "label_printer": {
+    "enabled": false,
+    "device_path": "",
+    "width_mm": 50,
+    "height_mm": 30,
+    "direction": 3,
+    "margin_left_mm": 5,
+    "margin_top_mm": -5,
+    "gap_mm": 3,
+    "speed": 40,
+    "deepness": 4,
+    "font_name": "Microsoft YaHei",
+    "font_size_mm": "3",
+    "timeout_seconds": 30,
+    "retry_count": 0,
+    "retry_delay_seconds": 2
+  },
+  "profiles": {
+    "cabinet": {
+      "chip": "esp32s3",
+      "before": "default_reset",
+      "flash_mode": "dio",
+      "flash_freq": "80m",
+      "flash_size": "16MB",
+      "erase_first": [],
+      "files": [
+        { "address": "0x0",      "path": "..\\cabinet_node\\build\\bootloader\\bootloader.bin" },
+        { "address": "0x8000",   "path": "..\\cabinet_node\\build\\partition_table\\partition-table.bin" },
+        { "address": "0x610000", "path": "..\\cabinet_node\\build\\ota_data_initial.bin" },
+        { "address": "0x10000",  "path": "..\\cabinet_node\\build\\cabinet_node_idf.bin" }
+      ]
+    },
+    "root": {
+      "chip": "esp32s3",
+      "before": "usb_reset",
+      "flash_mode": "dio",
+      "flash_freq": "80m",
+      "flash_size": "16MB",
+      "erase_first": [],
+      "files": [
+        { "address": "0x0",     "path": "..\\root_node\\build\\bootloader\\bootloader.bin" },
+        { "address": "0x8000",  "path": "..\\root_node\\build\\partition_table\\partition-table.bin" },
+        { "address": "0x10000", "path": "..\\root_node\\build\\cabinet_root_idf.bin" }
+      ]
+    }
+  }
+}

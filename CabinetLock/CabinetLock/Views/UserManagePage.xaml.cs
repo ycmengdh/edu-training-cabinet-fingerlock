@@ -1,5 +1,6 @@
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 
 namespace CabinetLock
 {
@@ -14,6 +15,7 @@ namespace CabinetLock
         private readonly string? _className;
         private readonly ListPager _pager = new(50);
         private List<User> _filteredUsers = new();
+        private bool _busy;
 
         public UserManagePage()
             : this(null, null)
@@ -30,8 +32,7 @@ namespace CabinetLock
                 PageTitleText.Text = $"班级工作台 · {_className}";
                 PageStatusText.Text = "维护本班学生、录入指纹并分配柜子权限";
                 RoleFilterPanel.Visibility = Visibility.Collapsed;
-                ImportCsvButton.Visibility = Visibility.Collapsed;
-                ResetPasswordButton.Visibility = Visibility.Collapsed;
+                ImportUsersButton.Visibility = Visibility.Collapsed;
             }
             Loaded += async (s, e) =>
             {
@@ -51,28 +52,15 @@ namespace CabinetLock
             SetBusy(true, "正在读取根节点用户数据");
             try
             {
-                _filteredUsers = await Task.Run(() =>
-                {
-                    var visible = App.UserService.GetVisibleUsers();
-                    IEnumerable<User> query = visible;
-                    if (_classId != null)
-                    {
-                        query = query.Where(u => u.Role == "student" &&
-                            string.Equals(u.ClassId, _classId, StringComparison.OrdinalIgnoreCase));
-                    }
-                    else if (!string.IsNullOrEmpty(role))
-                    {
-                        query = query.Where(u => u.Role == role);
-                    }
-                    if (!string.IsNullOrWhiteSpace(keyword))
-                    {
-                        query = query.Where(u =>
-                            (u.Name?.Contains(keyword, StringComparison.OrdinalIgnoreCase) ?? false) ||
-                            u.DisplayId.Contains(keyword, StringComparison.OrdinalIgnoreCase) ||
-                            (u.ClassId?.Contains(keyword, StringComparison.OrdinalIgnoreCase) ?? false));
-                    }
-                    return query.OrderBy(u => u.Role).ThenBy(u => u.DisplayId).ToList();
-                });
+                PagedResult<User> result = await Task.Run(() =>
+                    App.UserService.QueryVisibleUsersPage(
+                        _pager.PageIndex,
+                        _pager.PageSize,
+                        role: _classId == null ? role : "student",
+                        keyword: keyword,
+                        classId: _classId));
+                _filteredUsers = result.Items.ToList();
+                _pager.SetTotalCount(result.TotalCount);
                 ApplyUserPage();
             }
             catch (RootDataUnavailableException ex)
@@ -90,10 +78,10 @@ namespace CabinetLock
 
         private void ApplyUserPage()
         {
-            var page = _pager.Slice(_filteredUsers);
-            UserDataGrid.ItemsSource = page;
+            UserDataGrid.ItemsSource = _filteredUsers;
             _pager.BindChrome(Pager);
-            PageStatusText.Text = _pager.StatusText(page.Count);
+            PageStatusText.Text = _pager.StatusText(_filteredUsers.Count);
+            UpdateSelectionActions();
         }
 
         private string? GetSelectedRole()
@@ -118,10 +106,10 @@ namespace CabinetLock
         private async void RefreshButton_Click(object sender, RoutedEventArgs e) =>
             await LoadUsersAsync(resetPage: false);
 
-        private void Pager_PageRequested(object sender, Controls.PaginationRequestedEventArgs e)
+        private async void Pager_PageRequested(object sender, Controls.PaginationRequestedEventArgs e)
         {
             _pager.ApplyRequest(e);
-            ApplyUserPage();
+            await LoadUsersAsync(resetPage: false);
         }
 
         private void SelectPageCheckBox_Changed(object sender, RoutedEventArgs e)
@@ -131,6 +119,131 @@ namespace CabinetLock
             bool selected = checkBox.IsChecked == true;
             foreach (User item in page) item.IsSelected = selected;
             UserDataGrid.Items.Refresh();
+            UpdateSelectionActions();
+        }
+
+        private void UserSelectionCheckBox_Changed(object sender, RoutedEventArgs e)
+        {
+            if (!IsLoaded) return;
+            UpdateSelectionActions();
+        }
+
+        private List<User> GetCheckedUsers() =>
+            _filteredUsers.Where(user => user.IsSelected).ToList();
+
+        private void UpdateSelectionActions()
+        {
+            bool hasCheckedUsers = GetCheckedUsers().Count > 0;
+            BatchAssignPermButton.IsEnabled = !_busy && hasCheckedUsers;
+            DeleteUserButton.IsEnabled = !_busy && hasCheckedUsers;
+        }
+
+        private void SelectUserForRowAction(User user)
+        {
+            UserDataGrid.SelectedItem = user;
+            UserDataGrid.ScrollIntoView(user);
+        }
+
+        private void EditRowButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not Button { Tag: User user }) return;
+            SelectUserForRowAction(user);
+            EditUserButton_Click(sender, e);
+        }
+
+        private void AssignFingerprintRowButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not Button { Tag: User user }) return;
+            SelectUserForRowAction(user);
+            AssignFingerprintButton_Click(sender, e);
+        }
+
+        private void MoreRowButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not Button { Tag: User user } button) return;
+            SelectUserForRowAction(user);
+
+            var menu = new ContextMenu
+            {
+                PlacementTarget = button,
+                Placement = PlacementMode.Bottom,
+                HorizontalOffset = -140,
+                VerticalOffset = 2,
+                Background = FindResource("CardBrush") as System.Windows.Media.Brush,
+                BorderBrush = FindResource("BorderBrush") as System.Windows.Media.Brush,
+                BorderThickness = new Thickness(1),
+                Padding = new Thickness(4),
+                MinWidth = 172
+            };
+
+            if (!string.Equals(user.Role, "student", StringComparison.OrdinalIgnoreCase))
+            {
+                menu.Items.Add(CreateRowMenuItem("\uE72E", "重置密码", () =>
+                {
+                    SelectUserForRowAction(user);
+                    ResetPasswordButton_Click(button, new RoutedEventArgs());
+                }));
+            }
+
+            menu.Items.Add(CreateRowMenuItem("\uE777", "恢复指纹到柜子", () =>
+            {
+                SelectUserForRowAction(user);
+                RestoreFingerprintButton_Click(button, new RoutedEventArgs());
+            }, user.FingerprintId.HasValue));
+
+            bool isCurrentUser = string.Equals(
+                user.UserId, App.CurrentUser?.UserId, StringComparison.OrdinalIgnoreCase);
+            menu.Items.Add(CreateRowMenuItem(user.Enabled ? "\uE711" : "\uE73E",
+                user.Enabled ? "停用用户" : "启用用户", () =>
+                {
+                    SelectUserForRowAction(user);
+                    ToggleUserButton_Click(button, new RoutedEventArgs());
+                }, !isCurrentUser));
+
+            menu.Items.Add(new Separator { Margin = new Thickness(4, 3, 4, 3) });
+            menu.Items.Add(CreateRowMenuItem("\uE74D", "删除用户",
+                async () => await DeleteUsersAsync(new List<User> { user }),
+                user.CanDeleteAccount && !isCurrentUser, danger: true));
+
+            button.ContextMenu = menu;
+            menu.IsOpen = true;
+        }
+
+        private MenuItem CreateRowMenuItem(
+            string glyph,
+            string text,
+            Action action,
+            bool enabled = true,
+            bool danger = false)
+        {
+            var foreground = danger
+                ? FindResource("DangerBrush") as System.Windows.Media.Brush
+                : FindResource("TextBrush") as System.Windows.Media.Brush;
+            var header = new StackPanel { Orientation = Orientation.Horizontal };
+            header.Children.Add(new TextBlock
+            {
+                Text = glyph,
+                FontFamily = FindResource("AppIconFont") as System.Windows.Media.FontFamily,
+                Foreground = foreground,
+                Width = 22,
+                VerticalAlignment = VerticalAlignment.Center
+            });
+            header.Children.Add(new TextBlock
+            {
+                Text = text,
+                Foreground = foreground,
+                VerticalAlignment = VerticalAlignment.Center
+            });
+
+            var item = new MenuItem
+            {
+                Header = header,
+                IsEnabled = enabled,
+                Padding = new Thickness(10, 7, 10, 7),
+                Background = System.Windows.Media.Brushes.Transparent
+            };
+            item.Click += (_, _) => action();
+            return item;
         }
 
         // ===== 基础账号维护（留在列表页） =====
@@ -199,21 +312,31 @@ namespace CabinetLock
             }
         }
 
-        private List<User> GetCheckedOrSelectedUsers()
-        {
-            var checkedUsers = _filteredUsers.Where(u => u.IsSelected).ToList();
-            if (checkedUsers.Count > 0) return checkedUsers;
-
-            // 兼容：未勾选时回退到 DataGrid 当前选中行
-            return UserDataGrid.SelectedItems.OfType<User>().ToList();
-        }
-
         private async void DeleteUserButton_Click(object sender, RoutedEventArgs e)
         {
-            List<User> targets = GetCheckedOrSelectedUsers();
+            await DeleteUsersAsync(GetCheckedUsers());
+        }
+
+        private async Task DeleteUsersAsync(List<User> targets)
+        {
             if (targets.Count == 0)
             {
                 MessageBox.Show("请先勾选要删除的用户", "提示");
+                return;
+            }
+
+            if (targets.Any(SystemAdministratorPolicy.IsReserved))
+            {
+                MessageBox.Show("超级管理员 admin 是保留账号，不能删除；姓名、密码和指纹等资料仍可编辑。",
+                    "操作受限", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            if (targets.Any(user => string.Equals(
+                    user.UserId, App.CurrentUser?.UserId, StringComparison.OrdinalIgnoreCase)))
+            {
+                MessageBox.Show("不能删除当前登录账号", "操作受限",
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 
@@ -359,13 +482,9 @@ namespace CabinetLock
                     return;
                 }
 
-                BroadcastCommandResult synced = await Task.Run(App.CabinetSyncService.SyncAllPermissions);
                 MessageBox.Show(
-                    CabinetSyncService.FormatSyncResult(synced,
-                        $"用户已{action}，所有在线柜子均已确认权限更新",
-                        $"用户已{action}，但在线柜子未全部确认权限更新"),
-                    action + "完成", MessageBoxButton.OK,
-                    synced.Success ? MessageBoxImage.Information : MessageBoxImage.Warning);
+                    $"用户已{action}。在线柜子将立即增量更新，离线柜子已加入待同步队列。",
+                    action + "完成", MessageBoxButton.OK, MessageBoxImage.Information);
                 await LoadUsersAsync();
             }
             catch (RootDataUnavailableException ex)
@@ -453,21 +572,23 @@ namespace CabinetLock
                     return;
                 }
 
-                if (roleChanged && updated.FingerprintId.HasValue && updated.Enabled)
+                if (string.Equals(selected.UserId, App.CurrentUser?.UserId,
+                        StringComparison.OrdinalIgnoreCase))
                 {
-                    BroadcastCommandResult synced = await Task.Run(App.CabinetSyncService.SyncAllPermissions);
-                    MessageBox.Show(
-                        CabinetSyncService.FormatSyncResult(synced,
-                            "用户信息已更新，权限已同步到在线柜子",
-                            "用户信息已更新，但权限未全部同步"),
-                        "编辑完成", MessageBoxButton.OK,
-                        synced.Success ? MessageBoxImage.Information : MessageBoxImage.Warning);
+                    User? refreshedCurrentUser = await Task.Run(() =>
+                        App.UserService.GetUser(selected.UserId));
+                    if (refreshedCurrentUser != null)
+                    {
+                        App.CurrentUser = refreshedCurrentUser;
+                        if (OwnerWindow is MainWindow mainWindow)
+                            mainWindow.RefreshCurrentUserDisplay();
+                    }
                 }
-                else
-                {
-                    MessageBox.Show("用户信息已更新", "编辑完成",
-                        MessageBoxButton.OK, MessageBoxImage.Information);
-                }
+
+                MessageBox.Show(roleChanged
+                        ? "用户信息已更新，权限变更已进入增量同步队列"
+                        : "用户信息已更新",
+                    "编辑完成", MessageBoxButton.OK, MessageBoxImage.Information);
                 await LoadUsersAsync();
             }
             catch (RootDataUnavailableException ex)
@@ -526,7 +647,6 @@ namespace CabinetLock
                 MessageBox.Show("请先选择要分配指纹的用户", "提示");
                 return;
             }
-
             var window = new EnrollFingerprintWindow(presetDeviceId: null, presetUserId: selected.UserId)
             {
                 Owner = OwnerWindow
@@ -595,14 +715,23 @@ namespace CabinetLock
                     return;
                 }
 
-                BroadcastCommandResult synced = await Task.Run(App.CabinetSyncService.SyncAllPermissions);
+                User? restoredUser = App.UserService.GetUser(selected.UserId);
+                IReadOnlyList<UserCabinetSyncResult> synced = restoredUser == null
+                    ? Array.Empty<UserCabinetSyncResult>()
+                    : await App.CabinetSyncService.VerifyAndSyncUserAsync(
+                        restoredUser, new[] { targetDevice });
+                bool syncOk = synced.Count == 1 && synced[0].Success;
+                if (!syncOk && restoredUser != null)
+                {
+                    App.CabinetSyncQueueService.EnqueueUser(
+                        restoredUser.UserId, new[] { targetDevice }, "恢复指纹后补同步权限");
+                    App.CabinetSyncQueueService.Trigger();
+                }
                 MessageBox.Show(
                     "模板已写入目标柜子。\n" +
-                    CabinetSyncService.FormatSyncResult(synced,
-                        "权限同步完成。",
-                        "权限同步未全部完成。"),
+                    (syncOk ? "目标柜权限同步完成。" : "目标柜权限同步未确认，已保留待同步任务。"),
                     "恢复完成", MessageBoxButton.OK,
-                    synced.Success ? MessageBoxImage.Information : MessageBoxImage.Warning);
+                    syncOk ? MessageBoxImage.Information : MessageBoxImage.Warning);
             }
             catch (RootDataUnavailableException ex)
             {
@@ -616,7 +745,7 @@ namespace CabinetLock
 
         private async void BatchAssignPermButton_Click(object sender, RoutedEventArgs e)
         {
-            var selectedUsers = GetCheckedOrSelectedUsers();
+            var selectedUsers = GetCheckedUsers();
             if (selectedUsers.Count == 0)
             {
                 MessageBox.Show("请先勾选一个或多个用户", "提示");
@@ -628,7 +757,7 @@ namespace CabinetLock
                 await LoadUsersAsync();
         }
 
-        private async void ImportCsvButton_Click(object sender, RoutedEventArgs e)
+        private async void ImportUsersButton_Click(object sender, RoutedEventArgs e)
         {
             var window = new ImportUsersWindow { Owner = OwnerWindow };
             if (window.ShowDialog() == true || window.AnyImported)
@@ -637,17 +766,14 @@ namespace CabinetLock
 
         private void SetBusy(bool busy, string? status = null)
         {
+            _busy = busy;
             RefreshButton.IsEnabled = !busy;
             AddUserButton.IsEnabled = !busy;
-            ImportCsvButton.IsEnabled = !busy;
-            AssignFingerprintButton.IsEnabled = !busy;
-            RestoreFingerprintButton.IsEnabled = !busy;
-            BatchAssignPermButton.IsEnabled = !busy;
-            EditUserButton.IsEnabled = !busy;
-            ResetPasswordButton.IsEnabled = !busy;
-            ToggleUserButton.IsEnabled = !busy;
-            DeleteUserButton.IsEnabled = !busy;
+            ImportUsersButton.IsEnabled = !busy;
             RoleFilterBox.IsEnabled = !busy;
+            UserSearchBox.IsEnabled = !busy;
+            UserDataGrid.IsEnabled = !busy;
+            UpdateSelectionActions();
             if (!string.IsNullOrEmpty(status)) PageStatusText.Text = status;
         }
     }

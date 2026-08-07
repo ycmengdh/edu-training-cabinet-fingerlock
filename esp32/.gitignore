@@ -1,0 +1,7 @@
+**/build/
+**/managed_components/
+**/sdkconfig
+**/sdkconfig.old
+tools/flash_records.csv
+tools/SUPVAN.T50PRO.DLL/SUPVAN.T50PRO.DLL/
+tools/SUPVAN.T50PRO.DLL/PackageSDK/Supvan.T50PRO.SDK.Demo/

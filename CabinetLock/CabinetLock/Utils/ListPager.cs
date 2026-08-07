@@ -21,6 +21,13 @@ namespace CabinetLock
 
         public void Reset() => PageIndex = 0;
 
+        public void SetTotalCount(int totalCount)
+        {
+            TotalCount = Math.Max(0, totalCount);
+            if (PageIndex >= TotalPages) PageIndex = TotalPages - 1;
+            if (PageIndex < 0) PageIndex = 0;
+        }
+
         public void ApplyRequest(Controls.PaginationRequestedEventArgs request)
         {
             PageSize = Math.Max(1, request.PageSize);

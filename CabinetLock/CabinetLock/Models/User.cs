@@ -83,6 +83,14 @@ namespace CabinetLock
         [JsonIgnore]
         public bool IsSelected { get; set; }
 
+        [JsonIgnore]
+        public bool IsSystemAdministrator =>
+            string.Equals(UserId, SystemAdministratorPolicy.UserId,
+                StringComparison.OrdinalIgnoreCase);
+
+        [JsonIgnore]
+        public bool CanDeleteAccount => !SystemAdministratorPolicy.IsReserved(this);
+
         /// <summary>
         /// 学生被分配到的柜机通讯 ID。null 表示兼容旧数据（默认全部柜机），
         /// 空数组表示尚未分配；教师和管理员不受此字段限制。

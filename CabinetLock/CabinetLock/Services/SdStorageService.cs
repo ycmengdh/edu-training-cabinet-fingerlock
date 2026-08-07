@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Buffers.Binary;
 using System.Text;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -14,6 +15,7 @@ namespace CabinetLock
     ///   SD_QUERY / SD_QUERY_RESPONSE / SD_QUERY_PART   读取整张表
     ///   SD_SAVE / SD_SAVE_RESPONSE                     保存整张表（带乐观锁）
     ///   SD_QUERY_VERSION / SD_VERSION_RESPONSE         查询版本号
+    ///   SD_SNAPSHOT_*                                  压缩业务快照流式传输
     ///   UPLOAD_FP_TEMPLATE / *_RESPONSE                上传指纹模板
     ///   DOWNLOAD_FP_TEMPLATE / *_RESPONSE              下载指纹模板
     ///   DELETE_FP_TEMPLATE / *_RESPONSE                删除指纹模板
@@ -27,12 +29,24 @@ namespace CabinetLock
         // comfortably below that boundary and stream larger tables in 2KB chunks.
         private const int DirectSavePayloadLimit = 3000;
         private const int UploadChunkSize = 2048;
+        private const int SnapshotChunkSize = 3000;
+        private const int SnapshotAckWindow = 4;
+        private const byte SnapshotOperationBegin = 1;
+        private const byte SnapshotOperationChunk = 2;
+        private const byte SnapshotOperationCommit = 3;
+        private const byte SnapshotStatusOk = 0;
+        private const byte SnapshotStatusNotFound = 1;
+        private const byte SnapshotStatusInvalid = 2;
+        private const byte SnapshotStatusIoError = 3;
+        private const byte SnapshotStatusHashMismatch = 4;
+        private const byte SnapshotStatusOutOfOrder = 5;
 
         /// <summary>大表分片重组缓冲：msg_id -> (已收集分片, 总分片数)</summary>
         private readonly ConcurrentDictionary<string, FragmentBuffer> _fragments = new();
 
         /// <summary>待响应的请求：msg_id -> TaskCompletionSource</summary>
         private readonly ConcurrentDictionary<string, PendingRequest> _pending = new();
+        private readonly ConcurrentDictionary<string, SnapshotDownloadBuffer> _snapshotDownloads = new();
 
         /// <summary>根节点设备 ID（SD 卡命令发往根节点）</summary>
         public string RootDeviceId { get; private set; } = "";
@@ -41,6 +55,8 @@ namespace CabinetLock
         public bool? IsStorageReady { get; private set; }
 
         public string LastError { get; private set; } = "";
+
+        public SdVersionInfo? LastVersion { get; private set; }
 
         public bool IsRootConnected => App.MeshBridge.IsConnected &&
             !string.IsNullOrEmpty(RootDeviceId);
@@ -85,6 +101,11 @@ namespace CabinetLock
                     pending.Tcs.TrySetResult(null);
                 }
             }
+            foreach (var pair in _snapshotDownloads)
+            {
+                if (_snapshotDownloads.TryRemove(pair.Key, out var download))
+                    download.Tcs.TrySetResult(null);
+            }
             UpdateDegradedState();
             StatusChanged?.Invoke();
         }
@@ -115,6 +136,20 @@ namespace CabinetLock
         public void HandleResponse(Message msg)
         {
             if (msg == null || string.IsNullOrEmpty(msg.MsgId)) return;
+
+            if (msg.Cmd == Protocol.CmdSdSnapshotDownloadPart)
+            {
+                HandleSnapshotDownloadPart(msg);
+                return;
+            }
+
+            if (msg.Cmd == Protocol.CmdError &&
+                _snapshotDownloads.TryRemove(msg.MsgId, out var failedDownload))
+            {
+                CaptureResponseError(msg);
+                failedDownload.Tcs.TrySetResult(null);
+                return;
+            }
 
             // 分片消息：累积重组
             if (msg.Cmd == Protocol.CmdSdQueryPart)
@@ -302,7 +337,7 @@ namespace CabinetLock
             {
                 var data = resp.Data as JObject;
                 if (data == null) return null;
-                return new SdVersionInfo
+                var version = new SdVersionInfo
                 {
                     GlobalVersion = data["global_version"]?.Value<uint>() ?? 0,
                     UsersVersion = data["users_version"]?.Value<uint>() ?? 0,
@@ -314,6 +349,8 @@ namespace CabinetLock
                     SdTotalBytes = data["sd_total_bytes"]?.Value<ulong>() ?? 0,
                     SdUsedBytes = data["sd_used_bytes"]?.Value<ulong>() ?? 0
                 };
+                LastVersion = version;
+                return version;
             }
             return null;
         }
@@ -322,6 +359,368 @@ namespace CabinetLock
         public SdVersionInfo? QueryVersion(int timeoutMs = DefaultTimeoutMs)
         {
             return QueryVersionAsync(timeoutMs).GetAwaiter().GetResult();
+        }
+
+        // ====== Compressed business snapshot ======
+
+        public async Task<SnapshotTransferResult> UploadBusinessSnapshotAsync(
+            BusinessSnapshot snapshot,
+            IProgress<SnapshotTransferProgress>? progress = null,
+            int timeoutMs = 10000,
+            CancellationToken cancellationToken = default)
+        {
+            if (snapshot == null) throw new ArgumentNullException(nameof(snapshot));
+            var manifest = await QueryBusinessSnapshotManifestAsync(timeoutMs)
+                .ConfigureAwait(false);
+            if (manifest.Unsupported)
+                return SnapshotTransferResult.UnsupportedResult(LastError);
+            if (manifest.Exists && manifest.Header != null &&
+                BusinessSnapshotCodec.TryReadHeader(manifest.Header, out _, out _,
+                    out byte[] remoteHash) &&
+                System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+                    remoteHash, snapshot.ContentSha256))
+            {
+                progress?.Report(new SnapshotTransferProgress(0,
+                    snapshot.CompressedPayload.Length, "unchanged"));
+                return new SnapshotTransferResult
+                {
+                    Success = true,
+                    Unchanged = true,
+                    TotalBytes = snapshot.CompressedPayload.Length
+                };
+            }
+
+            LastError = "";
+            SnapshotResponse begin = await BeginSnapshotAsync(snapshot, timeoutMs)
+                .ConfigureAwait(false);
+            if (!begin.Valid || begin.Status != SnapshotStatusOk)
+                return SnapshotTransferResult.Failed(LastError, begin.Unsupported);
+
+            uint offset = Math.Min(begin.NextOffset,
+                (uint)snapshot.CompressedPayload.Length);
+            int resumeAttempts = 0;
+            while (offset < snapshot.CompressedPayload.Length)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                uint groupStart = offset;
+                SnapshotResponse acknowledgement = default;
+                bool groupSent = true;
+                for (int index = 0; index < SnapshotAckWindow &&
+                     offset < snapshot.CompressedPayload.Length; index++)
+                {
+                    int length = Math.Min(SnapshotChunkSize,
+                        snapshot.CompressedPayload.Length - (int)offset);
+                    bool requestAck = index == SnapshotAckWindow - 1 ||
+                        offset + length >= snapshot.CompressedPayload.Length;
+                    byte[] payload = PackSnapshotChunk(snapshot.UploadId, offset,
+                        snapshot.CompressedPayload.AsSpan((int)offset, length), requestAck);
+                    var message = Message.Create(Protocol.CmdSdSnapshotChunk,
+                        RootDeviceId, payload);
+                    if (requestAck)
+                    {
+                        Message? response = await SendRequestAsync(message, timeoutMs,
+                            attemptsOverride: 1).ConfigureAwait(false);
+                        acknowledgement = ParseSnapshotResponse(response,
+                            SnapshotOperationChunk);
+                        if (!acknowledgement.Valid) groupSent = false;
+                    }
+                    else if (!App.MeshBridge.SendToDevice(RootDeviceId, message))
+                    {
+                        groupSent = false;
+                        break;
+                    }
+                    offset += (uint)length;
+                    if (requestAck) break;
+                }
+
+                if (!groupSent || acknowledgement.Status != SnapshotStatusOk)
+                {
+                    if (++resumeAttempts > 3)
+                        return SnapshotTransferResult.Failed(
+                            string.IsNullOrWhiteSpace(LastError)
+                                ? "业务快照分块上传未收到确认"
+                                : LastError);
+                    begin = await BeginSnapshotAsync(snapshot, timeoutMs)
+                        .ConfigureAwait(false);
+                    if (!begin.Valid || begin.Status != SnapshotStatusOk)
+                        return SnapshotTransferResult.Failed(LastError, begin.Unsupported);
+                    offset = Math.Min(begin.NextOffset,
+                        (uint)snapshot.CompressedPayload.Length);
+                    if (offset < groupStart)
+                        progress?.Report(new SnapshotTransferProgress(offset,
+                            snapshot.CompressedPayload.Length, "resume"));
+                    continue;
+                }
+
+                resumeAttempts = 0;
+                offset = Math.Min(acknowledgement.NextOffset,
+                    (uint)snapshot.CompressedPayload.Length);
+                progress?.Report(new SnapshotTransferProgress(offset,
+                    snapshot.CompressedPayload.Length, "upload"));
+            }
+
+            byte[] commitPayload = new byte[20];
+            commitPayload[0] = BusinessSnapshotCodec.FormatVersion;
+            snapshot.UploadId.CopyTo(commitPayload, 4);
+            Message? commitMessage = await SendRequestAsync(
+                Message.Create(Protocol.CmdSdSnapshotCommit, RootDeviceId, commitPayload),
+                timeoutMs, attemptsOverride: 1).ConfigureAwait(false);
+            SnapshotResponse commit = ParseSnapshotResponse(commitMessage,
+                SnapshotOperationCommit);
+            if (!commit.Valid || commit.Status != SnapshotStatusOk)
+            {
+                // A lost commit response is indistinguishable from a failed
+                // commit on the wire. Re-read the promoted manifest before
+                // reporting failure so an already durable snapshot succeeds.
+                SnapshotManifestResult committedManifest =
+                    await QueryBusinessSnapshotManifestAsync(timeoutMs)
+                        .ConfigureAwait(false);
+                bool committed = committedManifest.Exists &&
+                    committedManifest.Header != null &&
+                    BusinessSnapshotCodec.TryReadHeader(committedManifest.Header,
+                        out _, out _, out byte[] committedHash) &&
+                    System.Security.Cryptography.CryptographicOperations
+                        .FixedTimeEquals(committedHash, snapshot.ContentSha256);
+                if (!committed)
+                {
+                    return SnapshotTransferResult.Failed(
+                        string.IsNullOrWhiteSpace(LastError)
+                            ? "根节点未能校验并提交业务快照"
+                            : LastError,
+                        commit.Unsupported || committedManifest.Unsupported);
+                }
+            }
+
+            LastError = "";
+            progress?.Report(new SnapshotTransferProgress(
+                snapshot.CompressedPayload.Length,
+                snapshot.CompressedPayload.Length, "commit"));
+            return new SnapshotTransferResult
+            {
+                Success = true,
+                TransferredBytes = snapshot.CompressedPayload.Length,
+                TotalBytes = snapshot.CompressedPayload.Length
+            };
+        }
+
+        public async Task<SnapshotTransferResult> DownloadBusinessSnapshotAsync(
+            IProgress<SnapshotTransferProgress>? progress = null,
+            int timeoutMs = 15000,
+            CancellationToken cancellationToken = default)
+        {
+            var manifest = await QueryBusinessSnapshotManifestAsync(timeoutMs)
+                .ConfigureAwait(false);
+            if (manifest.Unsupported)
+                return SnapshotTransferResult.UnsupportedResult(LastError);
+            if (!manifest.Exists || manifest.Header == null ||
+                !BusinessSnapshotCodec.TryReadHeader(manifest.Header,
+                    out uint compressedSize, out _, out _))
+            {
+                return new SnapshotTransferResult
+                {
+                    NotFound = true,
+                    Error = "根节点尚无业务快照"
+                };
+            }
+
+            int expectedSize = checked(BusinessSnapshotCodec.HeaderSize +
+                (int)compressedSize);
+            for (int attempt = 0; attempt < 2; attempt++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var request = Message.Create(Protocol.CmdSdSnapshotDownload,
+                    RootDeviceId, PackSnapshotDownloadRequest(0));
+                var buffer = new SnapshotDownloadBuffer(expectedSize, progress);
+                _snapshotDownloads[request.MsgId] = buffer;
+                if (!App.MeshBridge.SendToDevice(RootDeviceId, request))
+                {
+                    _snapshotDownloads.TryRemove(request.MsgId, out _);
+                    continue;
+                }
+
+                Task completed = await Task.WhenAny(buffer.Tcs.Task,
+                    Task.Delay(timeoutMs, cancellationToken)).ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (completed == buffer.Tcs.Task)
+                {
+                    byte[]? container = await buffer.Tcs.Task.ConfigureAwait(false);
+                    if (container != null)
+                    {
+                        return new SnapshotTransferResult
+                        {
+                            Success = true,
+                            ContainerBytes = container,
+                            TransferredBytes = container.Length,
+                            TotalBytes = container.Length
+                        };
+                    }
+                }
+                _snapshotDownloads.TryRemove(request.MsgId, out _);
+            }
+
+            return SnapshotTransferResult.Failed(
+                string.IsNullOrWhiteSpace(LastError)
+                    ? "业务快照下载超时"
+                    : LastError);
+        }
+
+        private async Task<SnapshotManifestResult> QueryBusinessSnapshotManifestAsync(
+            int timeoutMs)
+        {
+            var request = Message.Create(Protocol.CmdSdSnapshotManifest,
+                RootDeviceId, new byte[] { BusinessSnapshotCodec.FormatVersion });
+            Message? response = await SendRequestAsync(request, timeoutMs,
+                attemptsOverride: 1).ConfigureAwait(false);
+            if (response?.Cmd == Protocol.CmdError)
+            {
+                CaptureResponseError(response);
+                return new SnapshotManifestResult
+                {
+                    Unsupported = IsUnsupportedSnapshotError(response)
+                };
+            }
+            if (response?.Cmd != Protocol.CmdSdSnapshotManifestResponse ||
+                response.Data is not byte[] payload || payload.Length < 4 ||
+                payload[0] != BusinessSnapshotCodec.FormatVersion)
+            {
+                LastError = "根节点未返回有效的业务快照清单";
+                return new SnapshotManifestResult();
+            }
+            if (payload[1] == SnapshotStatusNotFound)
+                return new SnapshotManifestResult { Exists = false };
+            if (payload[1] != SnapshotStatusOk ||
+                payload.Length != 4 + BusinessSnapshotCodec.HeaderSize)
+            {
+                LastError = "根节点业务快照清单无效";
+                return new SnapshotManifestResult();
+            }
+            return new SnapshotManifestResult
+            {
+                Exists = true,
+                Header = payload.AsSpan(4, BusinessSnapshotCodec.HeaderSize).ToArray()
+            };
+        }
+
+        private async Task<SnapshotResponse> BeginSnapshotAsync(
+            BusinessSnapshot snapshot, int timeoutMs)
+        {
+            Message? response = await SendRequestAsync(
+                Message.Create(Protocol.CmdSdSnapshotBegin, RootDeviceId,
+                    snapshot.Header), timeoutMs, attemptsOverride: 1)
+                .ConfigureAwait(false);
+            return ParseSnapshotResponse(response, SnapshotOperationBegin);
+        }
+
+        private SnapshotResponse ParseSnapshotResponse(
+            Message? message, byte expectedOperation)
+        {
+            if (message?.Cmd == Protocol.CmdError)
+            {
+                CaptureResponseError(message);
+                return new SnapshotResponse
+                {
+                    Unsupported = IsUnsupportedSnapshotError(message)
+                };
+            }
+            if (message?.Cmd != Protocol.CmdSdSnapshotResponse ||
+                message.Data is not byte[] data || data.Length < 28 ||
+                data[0] != BusinessSnapshotCodec.FormatVersion ||
+                data[1] != expectedOperation)
+            {
+                LastError = "根节点业务快照响应无效";
+                return default;
+            }
+            byte status = data[2];
+            uint nextOffset = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(4, 4));
+            uint totalSize = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(8, 4));
+            if (status != SnapshotStatusOk)
+                LastError = SnapshotStatusMessage(status);
+            return new SnapshotResponse
+            {
+                Valid = true,
+                Status = status,
+                NextOffset = nextOffset,
+                TotalSize = totalSize
+            };
+        }
+
+        private static byte[] PackSnapshotChunk(byte[] uploadId, uint offset,
+            ReadOnlySpan<byte> data, bool requestAck)
+        {
+            byte[] payload = new byte[24 + data.Length];
+            payload[0] = BusinessSnapshotCodec.FormatVersion;
+            payload[1] = requestAck ? (byte)1 : (byte)0;
+            uploadId.CopyTo(payload, 4);
+            BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(20, 4), offset);
+            data.CopyTo(payload.AsSpan(24));
+            return payload;
+        }
+
+        private static byte[] PackSnapshotDownloadRequest(uint offset)
+        {
+            byte[] payload = new byte[8];
+            payload[0] = BusinessSnapshotCodec.FormatVersion;
+            BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(4, 4), offset);
+            return payload;
+        }
+
+        private static bool IsUnsupportedSnapshotError(Message response)
+        {
+            if (response.Data is not JObject data) return false;
+            int code = data["error_code"]?.Value<int>() ?? 0;
+            return code is 9001 or 9002;
+        }
+
+        private static string SnapshotStatusMessage(byte status) => status switch
+        {
+            SnapshotStatusNotFound => "根节点业务快照不存在",
+            SnapshotStatusInvalid => "根节点拒绝了无效的业务快照",
+            SnapshotStatusIoError => "根节点写入业务快照失败",
+            SnapshotStatusHashMismatch => "根节点校验业务快照 SHA-256 失败",
+            SnapshotStatusOutOfOrder => "业务快照分块偏移不连续",
+            _ => $"根节点业务快照错误：{status}"
+        };
+
+        private void HandleSnapshotDownloadPart(Message message)
+        {
+            if (!_snapshotDownloads.TryGetValue(message.MsgId, out var target) ||
+                message.Data is not byte[] payload || payload.Length < 12 ||
+                payload[0] != BusinessSnapshotCodec.FormatVersion)
+                return;
+
+            bool complete = false;
+            bool failed = false;
+            lock (target)
+            {
+                uint offset = BinaryPrimitives.ReadUInt32LittleEndian(payload.AsSpan(4, 4));
+                uint total = BinaryPrimitives.ReadUInt32LittleEndian(payload.AsSpan(8, 4));
+                int dataLength = payload.Length - 12;
+                if (total != target.Buffer.Length || offset > total ||
+                    (uint)dataLength > total - offset)
+                {
+                    failed = true;
+                }
+                else if (offset == target.NextOffset)
+                {
+                    Buffer.BlockCopy(payload, 12, target.Buffer, (int)offset, dataLength);
+                    target.NextOffset += (uint)dataLength;
+                    target.Progress?.Report(new SnapshotTransferProgress(
+                        target.NextOffset, target.Buffer.Length, "download"));
+                }
+                else if (offset + dataLength > target.NextOffset)
+                {
+                    failed = true;
+                }
+
+                bool last = (payload[1] & 1) != 0;
+                complete = last && target.NextOffset == total;
+                if (last && !complete) failed = true;
+            }
+
+            if (complete && _snapshotDownloads.TryRemove(message.MsgId, out target))
+                target.Tcs.TrySetResult(target.Buffer);
+            else if (failed && _snapshotDownloads.TryRemove(message.MsgId, out target))
+                target.Tcs.TrySetResult(null);
         }
 
         // ====== 指纹模板 ======
@@ -668,6 +1067,77 @@ namespace CabinetLock
             public int Total { get; set; }
             public Dictionary<int, string> Parts { get; } = new();
         }
+
+        private sealed class SnapshotDownloadBuffer
+        {
+            public SnapshotDownloadBuffer(int size,
+                IProgress<SnapshotTransferProgress>? progress)
+            {
+                Buffer = new byte[size];
+                Progress = progress;
+            }
+
+            public byte[] Buffer { get; }
+            public uint NextOffset { get; set; }
+            public IProgress<SnapshotTransferProgress>? Progress { get; }
+            public TaskCompletionSource<byte[]?> Tcs { get; } =
+                new(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+
+        private sealed class SnapshotManifestResult
+        {
+            public bool Exists { get; set; }
+            public bool Unsupported { get; set; }
+            public byte[]? Header { get; set; }
+        }
+
+        private struct SnapshotResponse
+        {
+            public bool Valid { get; set; }
+            public bool Unsupported { get; set; }
+            public byte Status { get; set; }
+            public uint NextOffset { get; set; }
+            public uint TotalSize { get; set; }
+        }
+    }
+
+    public sealed class SnapshotTransferProgress
+    {
+        public SnapshotTransferProgress(long transferredBytes, long totalBytes,
+            string phase)
+        {
+            TransferredBytes = transferredBytes;
+            TotalBytes = totalBytes;
+            Phase = phase ?? "";
+        }
+
+        public long TransferredBytes { get; }
+        public long TotalBytes { get; }
+        public string Phase { get; }
+        public int Percent => TotalBytes <= 0 ? 0 :
+            (int)Math.Clamp(TransferredBytes * 100 / TotalBytes, 0, 100);
+    }
+
+    public sealed class SnapshotTransferResult
+    {
+        public bool Success { get; set; }
+        public bool Unsupported { get; set; }
+        public bool NotFound { get; set; }
+        public bool Unchanged { get; set; }
+        public long TransferredBytes { get; set; }
+        public long TotalBytes { get; set; }
+        public byte[]? ContainerBytes { get; set; }
+        public string Error { get; set; } = "";
+
+        internal static SnapshotTransferResult Failed(string? error,
+            bool unsupported = false) => new()
+        {
+            Unsupported = unsupported,
+            Error = error ?? ""
+        };
+
+        internal static SnapshotTransferResult UnsupportedResult(string? error) =>
+            Failed(error, unsupported: true);
     }
 
     /// <summary>SD 卡版本信息</summary>

@@ -34,13 +34,28 @@ namespace CabinetLock
         public List<SystemAlert> Alerts { get; init; } = new();
         public List<LogEntry> RecentLogs { get; init; } = new();
         public DateTime RefreshedAt { get; init; } = DateTime.Now;
+        public int BoundStudentCount { get; init; }
+        public int TotalStudentCount { get; init; }
+        public int OpenSyncCount { get; init; }
+        public int FailedSyncCount { get; init; }
+        public string ScopeUserId { get; init; } = "";
+        public string ScopeRole { get; init; } = "";
 
         public int OnlineCount => Devices.Count(device => device.IsOnline);
         public int CriticalCount => Alerts.Count(alert => alert.Severity == SystemAlertSeverity.Critical);
         public int WarningCount => Alerts.Count(alert => alert.Severity == SystemAlertSeverity.Warning);
         public int PendingLogCount => Devices.Sum(device => device.Status.PendingLogCount);
-        public int SynchronizedCount => Devices.Count(device =>
-            device.IsOnline && device.Status.PermissionVersion == Version.GlobalVersion);
+        public int SynchronizedCount
+        {
+            get
+            {
+                uint expected = CabinetSyncService.ComposePermissionVersion(
+                    Version.UsersVersion, Version.ClassesVersion,
+                    Version.PermissionsVersion, Version.FpVersion);
+                return Devices.Count(device =>
+                    device.IsOnline && device.Status.PermissionVersion == expected);
+            }
+        }
         public double SdUsagePercent => Version.SdTotalBytes == 0
             ? 0
             : Version.SdUsedBytes * 100d / Version.SdTotalBytes;

@@ -16,7 +16,7 @@ CMD_READ_STATUS = 0x0034
 CMD_STATUS_RESPONSE = 0x0035
 CMD_HEARTBEAT = 0x0002
 CMD_ACK = 0x0004
-CMD_TIME_SYNC = 0x0037
+CMD_CONTROL_LOCK = 0x0010
 FRAME_VERSION = 0x01
 
 
@@ -168,6 +168,7 @@ def decode_status_payload(payload: bytes) -> dict:
         "fp_poll_max_ms": u16(22),
         "work_mode": "mesh" if flags & 0x02 else "debug",
         "time_synced": bool(flags & 0x01),
+        "fingerprint_ready": bool(flags & 0x04),
     }
 
 
@@ -201,14 +202,12 @@ def run_link(
             observer_port.reset_input_buffer()
         for request_index in range(count):
             message_id = (message_base + request_index) & 0xFFFF
-            command = CMD_READ_STATUS if probe == "status" else CMD_TIME_SYNC
+            command = CMD_READ_STATUS if probe == "status" else CMD_CONTROL_LOCK
             expected_command = CMD_STATUS_RESPONSE if probe == "status" else CMD_ACK
             payload = (
                 b"{}"
                 if probe == "status"
-                else json.dumps(
-                    {"timestamp": int(time.time())}, separators=(",", ":")
-                ).encode("utf-8")
+                else bytes((request_index % 4, 0))
             )
             request = encode_frame(
                 encode_app(command, message_id, device_id, payload)
@@ -263,7 +262,7 @@ def run_link(
                         ):
                             link_events.append(log_message)
                         if (
-                            f"process command: {'READ_STATUS' if probe == 'status' else 'TIME_SYNC'}"
+                            f"process command: {'READ_STATUS' if probe == 'status' else 'CONTROL_LOCK'}"
                             in log_message
                             and f"msg_id={message_id}" in log_message
                         ):
@@ -283,7 +282,7 @@ def run_link(
                         except (UnicodeDecodeError, json.JSONDecodeError):
                             log_message = ""
                         if (
-                            f"process command: {'READ_STATUS' if probe == 'status' else 'TIME_SYNC'}"
+                            f"process command: {'READ_STATUS' if probe == 'status' else 'CONTROL_LOCK'}"
                             in log_message
                             and f"msg_id={message_id}" in log_message
                             and device_process_ms is None
@@ -399,7 +398,9 @@ def main() -> int:
         choices=("all", "root", "mesh", "uart"),
         default="all",
     )
-    parser.add_argument("--probe", choices=("status", "ack"), default="status")
+    parser.add_argument(
+        "--probe", choices=("status", "lock", "ack"), default="status"
+    )
     parser.add_argument("--retry-ms", type=int, default=0)
     parser.add_argument("--pace-ms", type=int, default=50)
     args = parser.parse_args()

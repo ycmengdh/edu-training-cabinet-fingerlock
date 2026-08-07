@@ -167,7 +167,7 @@ namespace CabinetLock
             {
                 SetFeedback(errorFeedback ??
                     (builtInCredentials
-                        ? "用户表已有账户，请使用已存在账号登录；默认 admin/admin123 仅在无用户时可用"
+                        ? "系统管理员密码错误；首次初始化密码为 admin123"
                         : "用户 ID 不存在、账号已停用或密码错误"),
                     "DangerBrush");
                 PasswordBox.Clear();

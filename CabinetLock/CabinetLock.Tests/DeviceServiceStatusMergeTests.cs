@@ -46,6 +46,32 @@ public class DeviceServiceStatusMergeTests
         Assert.Same(original, persisted.Status);
     }
 
+    [Theory]
+    [InlineData("", "", "CAB_AABBCCDDEE01", "CAB_AABBCCDDEE01")]
+    [InlineData("Cabinet Node", "", "CAB_AABBCCDDEE01", "CAB_AABBCCDDEE01")]
+    [InlineData("实训柜", "", "CAB_AABBCCDDEE01", "CAB_AABBCCDDEE01")]
+    [InlineData("一号柜", "现场-01", "一号柜", "现场-01")]
+    public void ApplyDefaultIdentity_UsesCabMacWithoutOverwritingUserValues(
+        string name, string number, string expectedName, string expectedNumber)
+    {
+        var device = new Device
+        {
+            DeviceId = "CAB_OLD",
+            MeshMac = "AA:BB:CC:DD:EE:01",
+            DeviceName = name,
+            DeviceNumber = number
+        };
+
+        MethodInfo method = typeof(DeviceService).GetMethod(
+            "ApplyDefaultIdentity", BindingFlags.Static | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("DeviceService.ApplyDefaultIdentity not found");
+        method.Invoke(null, new object[] { device });
+
+        Assert.Equal(expectedName, device.DeviceName);
+        Assert.Equal(expectedNumber, device.DeviceNumber);
+        Assert.Equal("CAB_OLD", device.DeviceId);
+    }
+
     private static void ApplyLiveRuntimeStatus(Device target, DeviceClient source)
     {
         MethodInfo method = typeof(DeviceService).GetMethod(

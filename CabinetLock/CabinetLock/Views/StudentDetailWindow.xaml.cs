@@ -106,7 +106,7 @@ namespace CabinetLock
                     ? "未选择" : string.Join("、", selectedFingerprints.Select(item =>
                         $"{item.FingerDisplayName} #{item.FingerprintId}")),
                 SyncStatusText = !bound ? "-" : selectedFingerprints.Count == 0 || !lockPermissions.Any(value => value)
-                    ? "待处理" : syncJob?.StatusText ?? "已配置"
+                    ? "待处理" : syncJob?.StatusText ?? "未校验"
             };
         }
 
@@ -287,19 +287,11 @@ namespace CabinetLock
 
         private async void EnrollFingerprintButton_Click(object sender, RoutedEventArgs e)
         {
-            string? target = (CabinetGrid.SelectedItem as StudentCabinetRow)?.DeviceId;
-            if (string.IsNullOrWhiteSpace(target) || !_devices.Any(device =>
-                    string.Equals(device.DeviceId, target, StringComparison.OrdinalIgnoreCase) && device.IsOnline))
+            var window = new EnrollFingerprintWindow(
+                presetDeviceId: null, presetUserId: _user.UserId, fixedStudentMode: true)
             {
-                target = _devices.FirstOrDefault(device => device.IsOnline)?.DeviceId;
-            }
-            if (string.IsNullOrWhiteSpace(target))
-            {
-                MessageBox.Show("请选择一台在线柜机作为采集设备", "无法录入", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
-
-            var window = new EnrollFingerprintWindow(target, _user.UserId) { Owner = this };
+                Owner = this
+            };
             window.ShowDialog();
             if (window.EnrolledFingerprintId <= 0) return;
             await LoadAsync();

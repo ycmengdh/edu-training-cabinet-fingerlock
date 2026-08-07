@@ -69,6 +69,7 @@ namespace CabinetLock
 
         public event Action<string, string, PermissionProbeResult>? OnPermissionsResponse;
         public event Action<string, string, FingerprintProbeResult>? OnFingerprintCheckResponse;
+        public event Action<string, string, string>? OnFingerprintListResponse;
 
         /// <summary>
         /// V2.7 本机副指纹清单响应：deviceId, json（含 count + backups 数组）。
@@ -98,14 +99,15 @@ namespace CabinetLock
             var cmdType = Protocol.ToCommandType(msg.Cmd);
             if (cmdType == null) return;
 
-            // SD_QUERY_PART / ENROLL_PROGRESS 复用同一 msg_id，禁止去重否则只剩第一条
+            // Multipart responses reuse one msg_id and must bypass duplicate suppression.
             if (cmdType != CommandType.SdQueryPart &&
+                cmdType != CommandType.SdSnapshotDownloadPart &&
                 cmdType != CommandType.EnrollProgress &&
                 cmdType != CommandType.Heartbeat &&
                 !string.IsNullOrEmpty(msg.MsgId))
             {
                 string sourceId = device?.DeviceId ?? msg.SourceDeviceId ?? msg.DeviceId;
-                if (IsDuplicate($"{sourceId}|{msg.Cmd}|{msg.MsgId}")) return;
+                if (IsDuplicate($"{sourceId}|{msg.CorrId}|{msg.Cmd}|{msg.MsgId}")) return;
             }
 
             switch (cmdType.Value)
@@ -152,6 +154,9 @@ namespace CabinetLock
                 case CommandType.FingerprintCheckResponse:
                     HandleFingerprintCheckResponse(device, msg);
                     break;
+                case CommandType.FingerprintListResponse:
+                    HandleFingerprintListResponse(device, msg);
+                    break;
                 case CommandType.BackupFpList:
                     HandleBackupFpList(device, msg);
                     break;
@@ -166,13 +171,21 @@ namespace CabinetLock
                 case CommandType.SdQueryPart:
                 case CommandType.SdSaveResponse:
                 case CommandType.SdVersionResponse:
+                case CommandType.SdSnapshotManifestResponse:
+                case CommandType.SdSnapshotResponse:
+                case CommandType.SdSnapshotDownloadPart:
                 case CommandType.FpTemplateUploadResponse:
                 case CommandType.FpTemplateDownloadResponse:
                 case CommandType.FpTemplateDeleteResponse:
                     App.SdStorageService.HandleResponse(msg);
                     break;
+                case CommandType.CabinetOtaResponse:
+                case CommandType.CabinetOtaNodesResponse:
+                    App.CabinetOtaService.HandleResponse(msg);
+                    break;
                 case CommandType.Error:
                     App.SdStorageService.HandleResponse(msg);
+                    App.CabinetOtaService.HandleResponse(msg);
                     HandleError(msg);
                     break;
                 default:
@@ -222,6 +235,7 @@ namespace CabinetLock
         /// </summary>
         private void HandleRegister(DeviceClient? device, Message msg)
         {
+            MergeReportedMetadata(device, msg);
             var deviceName = TryGetStringData(msg, "device_name")
                 ?? TryGetStringData(msg, "deviceName")
                 ?? "未命名设备";
@@ -270,9 +284,23 @@ namespace CabinetLock
         /// </summary>
         private void HandleConfigResponse(DeviceClient? device, Message msg)
         {
+            MergeReportedMetadata(device, msg);
             var configJson = msg.Data != null ? JsonHelper.Serialize(msg.Data) : "{}";
             var deviceId = device?.DeviceId ?? msg.DeviceId;
             OnConfigResponse?.Invoke(deviceId, configJson);
+        }
+
+        private static void MergeReportedMetadata(DeviceClient? device, Message msg)
+        {
+            if (device == null || msg.Data is not JObject data) return;
+
+            string? firmwareVersion = data["firmware_version"]?.ToString();
+            if (!string.IsNullOrWhiteSpace(firmwareVersion))
+                device.FirmwareVersion = firmwareVersion.Trim();
+
+            string? hardwareVersion = data["hardware_version"]?.ToString();
+            if (!string.IsNullOrWhiteSpace(hardwareVersion))
+                device.HardwareVersion = hardwareVersion.Trim();
         }
 
         /// <summary>
@@ -302,6 +330,7 @@ namespace CabinetLock
         /// </summary>
         private void HandleAck(DeviceClient? device, Message msg)
         {
+            if (msg.CorrId != 0 && msg.CorrId != AppMessageMapper.SessionId) return;
             // 二进制 ACK：信封 msg_id 与 data.ref_msg_id 通常相同；优先信封，回退 ref_msg_id
             var msgId = msg.MsgId;
             if (string.IsNullOrEmpty(msgId))
@@ -317,6 +346,7 @@ namespace CabinetLock
 
         private void HandleError(Message msg)
         {
+            if (msg.CorrId != 0 && msg.CorrId != AppMessageMapper.SessionId) return;
             // error_code 可能是数字（二进制解包）或字符串（旧 JSON）
             string code = TryGetStringData(msg, "error_code") ?? Protocol.ErrUnknown;
             string message = TryGetStringData(msg, "message") ?? "设备处理命令失败";
@@ -448,6 +478,13 @@ namespace CabinetLock
                 ExpectedCrc32 = data?["expected_crc32"]?.Value<uint>() ?? 0,
                 ActualCrc32 = data?["actual_crc32"]?.Value<uint>() ?? 0
             });
+        }
+
+        private void HandleFingerprintListResponse(DeviceClient? device, Message msg)
+        {
+            string deviceId = device?.DeviceId ?? msg.SourceDeviceId ?? msg.DeviceId;
+            string json = msg.Data == null ? "{}" : JsonHelper.Serialize(msg.Data);
+            OnFingerprintListResponse?.Invoke(deviceId, msg.MsgId, json);
         }
 
         /// <summary>V2.7 处理本机副指纹清单响应</summary>

@@ -35,6 +35,7 @@ namespace CabinetLock
             App.MessageHandler.OnDeviceRegistered += OnDeviceRegistered;
             _refreshTimer.Start();
             RefreshLiveEventCount();
+            await ApplyCachedSnapshotAsync();
             await LoadSnapshotAsync();
         }
 
@@ -106,7 +107,7 @@ namespace CabinetLock
         }
 
         private async void RefreshButton_Click(object sender, RoutedEventArgs e) =>
-            await LoadSnapshotAsync();
+            await LoadSnapshotAsync(showProgress: true);
 
         private void PendingSyncMetric_Click(object sender, MouseButtonEventArgs e)
         {
@@ -146,14 +147,40 @@ namespace CabinetLock
             (Window.GetWindow(this) as MainWindow)?.NavigateToCabinetDetail(row.DeviceId);
         }
 
-        private async Task LoadSnapshotAsync()
+        private async Task ApplyCachedSnapshotAsync()
+        {
+            if (IsDirectUart) return;
+            SystemHealthSnapshot? snapshot = App.SystemHealthService.LastSnapshot;
+            if (!SnapshotMatchesCurrentUser(snapshot)) snapshot = null;
+            SdVersionInfo? version = App.SdStorageService.LastVersion;
+            if (snapshot == null && version != null)
+            {
+                try
+                {
+                    snapshot = await Task.Run(() =>
+                        App.SystemHealthService.LoadSnapshot(version));
+                }
+                catch
+                {
+                    return;
+                }
+            }
+            if (!IsLoaded || snapshot == null) return;
+            ApplyNormalMetricLabels();
+            UpdateLinkMetric();
+            ApplySnapshot(snapshot);
+            PageStatusText.Text = $"正在后台刷新 · 上次 {snapshot.RefreshedAt:HH:mm:ss}";
+        }
+
+        private async Task LoadSnapshotAsync(bool showProgress = false)
         {
             if (_loading) return;
             _loading = true;
             RefreshButton.IsEnabled = false;
-            PageStatusText.Text = "正在读取根节点运行状态";
+            if (showProgress ||
+                !SnapshotMatchesCurrentUser(App.SystemHealthService.LastSnapshot))
+                PageStatusText.Text = "正在读取根节点运行状态";
             UpdateLinkMetric();
-            PopulatePendingSyncMetric();
             try
             {
                 if (IsDirectUart)
@@ -171,8 +198,9 @@ namespace CabinetLock
                 if (!App.SdStorageService.IsAvailable)
                     throw new RootDataUnavailableException("根节点数据服务尚未连接");
 
-                SystemHealthSnapshot snapshot = await Task.Run(
-                    App.SystemHealthService.LoadSnapshot);
+                SystemHealthSnapshot snapshot =
+                    await App.SystemHealthService.LoadSnapshotAsync();
+                if (!IsLoaded) return;
                 ApplySnapshot(snapshot);
                 PageStatusText.Text = snapshot.CriticalCount > 0
                     ? $"发现 {snapshot.CriticalCount} 项异常，需要处理"
@@ -192,6 +220,13 @@ namespace CabinetLock
             }
         }
 
+        private static bool SnapshotMatchesCurrentUser(SystemHealthSnapshot? snapshot) =>
+            snapshot != null &&
+            string.Equals(snapshot.ScopeUserId, App.CurrentUser?.UserId,
+                StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(snapshot.ScopeRole, App.CurrentUser?.Role,
+                StringComparison.OrdinalIgnoreCase);
+
         private void ApplySnapshot(SystemHealthSnapshot snapshot)
         {
             DeviceValueText.Text = $"{snapshot.OnlineCount} / {snapshot.Devices.Count}";
@@ -209,8 +244,9 @@ namespace CabinetLock
             RecentLogDataGrid.ItemsSource = snapshot.RecentLogs;
             PendingLogText.Text = $"待传 {snapshot.PendingLogCount}";
             RefreshTimeText.Text = $"最近刷新 {snapshot.RefreshedAt:yyyy-MM-dd HH:mm:ss}";
-            PopulateStudentBindMetric();
-            PopulatePendingSyncMetric();
+            PopulateStudentBindMetric(snapshot.BoundStudentCount,
+                snapshot.TotalStudentCount);
+            ApplyPendingSyncMetric(snapshot.OpenSyncCount, snapshot.FailedSyncCount);
         }
 
         private void ApplyDirectSnapshot()
@@ -282,14 +318,9 @@ namespace CabinetLock
         {
             try
             {
-                int open = App.CabinetSyncQueueService.CountOpen();
-                int failed = App.CabinetSyncQueueService.CountFailed();
-                PendingSyncValueText.Text = open.ToString();
-                PendingSyncDetailText.Text = open == 0
-                    ? "队列空闲 · 点此查看"
-                    : failed > 0
-                        ? $"失败 {failed} · 点此处理"
-                        : "等待下发 · 点此查看";
+                (int open, int failed) =
+                    App.CabinetSyncQueueService.CountOpenAndFailed();
+                ApplyPendingSyncMetric(open, failed);
             }
             catch
             {
@@ -298,24 +329,22 @@ namespace CabinetLock
             }
         }
 
-        private void PopulateStudentBindMetric()
+        private void ApplyPendingSyncMetric(int open, int failed)
         {
-            try
-            {
-                var visibleStudents = App.UserService.GetVisibleUsersByRole("student");
-                int totalStudents = visibleStudents.Count;
-                var boundUserIds = App.PermissionService.GetAllBoundUserIds();
-                int boundStudents = visibleStudents.Count(u => boundUserIds.Contains(u.UserId));
-                StudentBindValueText.Text = $"{boundStudents} / {totalStudents}";
-                StudentBindDetailText.Text = totalStudents == 0
-                    ? "暂无学生"
-                    : $"绑定率 {(totalStudents > 0 ? boundStudents * 100.0 / totalStudents : 0):F0}%";
-            }
-            catch
-            {
-                StudentBindValueText.Text = "-";
-                StudentBindDetailText.Text = "无法读取学生数据";
-            }
+            PendingSyncValueText.Text = open.ToString();
+            PendingSyncDetailText.Text = open == 0
+                ? "队列空闲 · 点此查看"
+                : failed > 0
+                    ? $"失败 {failed} · 点此处理"
+                    : "等待下发 · 点此查看";
+        }
+
+        private void PopulateStudentBindMetric(int boundStudents, int totalStudents)
+        {
+            StudentBindValueText.Text = $"{boundStudents} / {totalStudents}";
+            StudentBindDetailText.Text = totalStudents == 0
+                ? "暂无学生"
+                : $"绑定率 {boundStudents * 100.0 / totalStudents:F0}%";
         }
 
         private void ClearSnapshot()

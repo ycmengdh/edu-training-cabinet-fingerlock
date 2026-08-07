@@ -17,11 +17,10 @@ namespace CabinetLock
         private const int ReconnectIntervalMs = 500;
         private const int ReadChunkSize = 4096;
         private const int IoIdleDelayMs = 2;
-        // ESP32-S3 HWCDC historically defaults to a 256-byte RX queue. Pace
-        // writes in USB packet-sized chunks so large SD_SAVE frames remain
-        // reliable even before the root firmware is upgraded.
-        private const int WriteChunkSize = 64;
-        private const int WriteChunkDelayMs = 2;
+        // Current ESP-IDF root/cabinet firmware uses an 8 KB RX queue. Keep
+        // modest pacing for USB/UART stability without capping OTA near 32 KB/s.
+        private const int WriteChunkSize = 1024;
+        private const int WriteChunkDelayMs = 1;
         private const int ReceiveQueueCapacity = 4096;
 
         private SerialPort? _port;

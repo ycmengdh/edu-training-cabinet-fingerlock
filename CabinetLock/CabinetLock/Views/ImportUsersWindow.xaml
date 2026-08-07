@@ -2,52 +2,126 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:CabinetLock"
-        Title="导入用户 CSV" Height="420" Width="520"
-        WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
+        Title="导入用户 Excel" Height="680" Width="940" MinHeight="600" MinWidth="820"
+        WindowStartupLocation="CenterOwner" ResizeMode="CanResize"
         Background="{StaticResource BackgroundBrush}">
     <Grid Margin="24,20,24,22">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <StackPanel>
-            <TextBlock Text="导入用户 CSV" Style="{StaticResource TitleText}"/>
-            <TextBlock Text="列顺序：user_code, name, role, password, class_id, device_number（后两列可选）。学生的 user_code 填学号，首行表头可自动跳过。"
-                       Foreground="{StaticResource SubTextBrush}" FontSize="11" Margin="0,5,0,0"
-                       TextWrapping="Wrap"/>
-        </StackPanel>
-
-        <Border Grid.Row="1" Style="{StaticResource Panel}" Margin="0,16,0,12" Padding="16">
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
             <StackPanel>
-                <TextBlock Text="文件" Style="{StaticResource LabelText}" Margin="0,0,0,6"/>
+                <TextBlock Text="导入用户" Style="{StaticResource TitleText}"/>
+                <TextBlock x:Name="SubtitleText"
+                           Text="使用 Excel 模板批量导入学生、教师或管理员"
+                           Foreground="{StaticResource SubTextBrush}" FontSize="11" Margin="0,5,0,0"/>
+            </StackPanel>
+            <Button x:Name="DownloadTemplateButton" Grid.Column="1"
+                    Style="{StaticResource SecondaryButton}" Click="DownloadTemplateButton_Click">
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="&#xE896;" FontFamily="{StaticResource AppIconFont}" Margin="0,0,7,0"/>
+                    <TextBlock Text="下载导入模板"/>
+                </StackPanel>
+            </Button>
+        </Grid>
+
+        <Border Grid.Row="1" Style="{StaticResource ToolbarPanel}" Margin="0,16,0,12">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
                 <Grid>
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
-                    <TextBox x:Name="FilePathBox" IsReadOnly="True" Height="34"/>
-                    <Button Grid.Column="1" Content="浏览…" Margin="8,0,0,0" Width="88" Height="34"
-                            Style="{StaticResource SecondaryButton}" Click="BrowseButton_Click"/>
+                    <TextBlock Text="Excel 文件" Style="{StaticResource LabelText}" Margin="0,0,10,0"/>
+                    <TextBox x:Name="FilePathBox" Grid.Column="1" IsReadOnly="True" Height="36"
+                             ToolTip="请选择基于导入模板编辑的 .xlsx 文件"/>
                 </Grid>
-                <TextBlock x:Name="HintText"
-                           Text="学生密码可为空；device_number 填现场设备编号，导入后自动绑定对应柜机。"
-                           Foreground="{StaticResource SubTextBrush}" FontSize="11" Margin="0,14,0,0"
-                           TextWrapping="Wrap"/>
-                <TextBlock x:Name="ResultText" Margin="0,14,0,0" TextWrapping="Wrap"
-                           Visibility="Collapsed"/>
-            </StackPanel>
+                <Button x:Name="BrowseButton" Grid.Column="1" Content="选择文件" Margin="8,0,0,0"
+                        Style="{StaticResource SecondaryButton}" Click="BrowseButton_Click"/>
+            </Grid>
         </Border>
 
-        <TextBlock x:Name="StatusText" Grid.Row="2"
-                   Foreground="{StaticResource SubTextBrush}" FontSize="11"
-                   Margin="0,0,0,12" TextWrapping="Wrap"/>
+        <Grid Grid.Row="2" Margin="0,0,0,12">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <Grid>
+                <TextBlock x:Name="StatusText" Text="请选择 Excel 文件后开始导入"
+                           Foreground="{StaticResource SubTextBrush}" FontSize="11"/>
+                <TextBlock x:Name="ResultSummaryText" HorizontalAlignment="Right"
+                           Foreground="{StaticResource SubTextBrush}" FontSize="11"/>
+            </Grid>
+            <ProgressBar x:Name="ImportProgressBar" Grid.Row="1" Height="7" Margin="0,8,0,0"
+                         Minimum="0" Maximum="100" Value="0"/>
+        </Grid>
 
-        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right">
-            <Button Content="关闭" Style="{StaticResource SecondaryButton}" Click="CloseButton_Click"/>
-            <Button x:Name="ImportButton" Content="开始导入" Margin="8,0,0,0" Click="ImportButton_Click"/>
-        </StackPanel>
+        <Border Grid.Row="3" Style="{StaticResource Panel}">
+            <TabControl x:Name="ResultTabs" Background="Transparent" BorderThickness="0">
+                <TabItem>
+                    <TabItem.Header>
+                        <TextBlock x:Name="ImportedTabText" Text="已导入 0"/>
+                    </TabItem.Header>
+                    <DataGrid x:Name="ImportedDataGrid" BorderThickness="0" IsReadOnly="True"
+                              AutoGenerateColumns="False" Margin="0,8,0,0">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Excel 行" Binding="{Binding RowNumber}" Width="76"/>
+                            <DataGridTextColumn Header="用户编号" Binding="{Binding UserCode}" Width="130"/>
+                            <DataGridTextColumn Header="姓名" Binding="{Binding Name}" Width="110"/>
+                            <DataGridTextColumn Header="角色" Binding="{Binding RoleDisplay}" Width="90"/>
+                            <DataGridTextColumn Header="班级 ID" Binding="{Binding ClassIds}" Width="140"/>
+                            <DataGridTextColumn Header="设备编号" Binding="{Binding DeviceNumber}" Width="110"/>
+                            <DataGridTextColumn Header="结果" Binding="{Binding Result}" Width="*"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </TabItem>
+                <TabItem>
+                    <TabItem.Header>
+                        <TextBlock x:Name="FailedTabText" Text="导入异常 0"/>
+                    </TabItem.Header>
+                    <DataGrid x:Name="FailedDataGrid" BorderThickness="0" IsReadOnly="True"
+                              AutoGenerateColumns="False" Margin="0,8,0,0">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Excel 行" Binding="{Binding RowNumber}" Width="76"/>
+                            <DataGridTextColumn Header="用户编号" Binding="{Binding UserCode}" Width="130"/>
+                            <DataGridTextColumn Header="姓名" Binding="{Binding Name}" Width="110"/>
+                            <DataGridTextColumn Header="角色" Binding="{Binding RoleDisplay}" Width="90"/>
+                            <DataGridTextColumn Header="班级 ID" Binding="{Binding ClassIds}" Width="130"/>
+                            <DataGridTextColumn Header="设备编号" Binding="{Binding DeviceNumber}" Width="100"/>
+                            <DataGridTextColumn Header="异常原因" Binding="{Binding Error}" Width="*"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </TabItem>
+            </TabControl>
+        </Border>
+
+        <Grid Grid.Row="4" Margin="0,14,0,0">
+            <StackPanel Orientation="Horizontal">
+                <Button x:Name="ExportImportedButton" Content="导出已导入" IsEnabled="False"
+                        Style="{StaticResource SecondaryButton}" Click="ExportImportedButton_Click"/>
+                <Button x:Name="ExportFailedButton" Content="导出导入异常" IsEnabled="False"
+                        Style="{StaticResource SecondaryButton}" Margin="8,0,0,0"
+                        Click="ExportFailedButton_Click"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button x:Name="CloseButton" Content="关闭" Style="{StaticResource SecondaryButton}"
+                        Click="CloseButton_Click"/>
+                <Button x:Name="ImportButton" Content="开始导入" Margin="8,0,0,0"
+                        Click="ImportButton_Click"/>
+            </StackPanel>
+        </Grid>
     </Grid>
 </local:BorderlessWindow>

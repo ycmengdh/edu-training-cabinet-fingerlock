@@ -14,18 +14,12 @@ namespace CabinetLock
         public List<UserPermission> GetUserPermissions(string userId)
         {
             if (string.IsNullOrWhiteSpace(userId)) return new List<UserPermission>();
-            return _root.Read<UserPermission>("permissions")
-                .Where(p => p.UserId == userId).OrderBy(p => p.LockId).ToList();
+            return BusinessDatabase.ReadUserPermissions(userId);
         }
 
-        public Dictionary<string, DateTime> GetLatestUpdateTimes()
-        {
-            return _root.Read<UserPermission>("permissions")
-                .Where(permission => !string.IsNullOrWhiteSpace(permission.UserId))
-                .GroupBy(permission => permission.UserId, StringComparer.OrdinalIgnoreCase)
-                .ToDictionary(group => group.Key, group => group.Max(item => item.UpdateTime),
-                    StringComparer.OrdinalIgnoreCase);
-        }
+        public Dictionary<string, DateTime> GetLatestUpdateTimes(
+            IReadOnlyCollection<string>? userIds = null) =>
+            BusinessDatabase.ReadLatestPermissionUpdateTimes(userIds);
 
         public (bool hasOverride, bool hasAccess) GetUserPermission(string userId, int lockId)
         {
@@ -48,6 +42,46 @@ namespace CabinetLock
                     result[permission.LockId] = permission.HasAccess;
             }
             PermissionPolicy.Enforce(role, result);
+            return result;
+        }
+
+        public Dictionary<string, bool[]> GetFinalPermissions(
+            IReadOnlyCollection<User> users)
+        {
+            var result = new Dictionary<string, bool[]>(StringComparer.OrdinalIgnoreCase);
+            if (users == null || users.Count == 0) return result;
+
+            Dictionary<string, List<UserPermission>> permissionsByUser =
+                BusinessDatabase.ReadUserPermissions(users.Select(user => user.UserId));
+            var defaultsByRole = new Dictionary<string, bool[]>(StringComparer.OrdinalIgnoreCase);
+            foreach (User user in users)
+            {
+                permissionsByUser.TryGetValue(user.UserId, out List<UserPermission>? permissions);
+                permissions ??= new List<UserPermission>();
+                bool[] values;
+                if (permissions.Select(item => item.LockId).Distinct().Count() < LockCount)
+                {
+                    if (!defaultsByRole.TryGetValue(user.Role, out bool[]? defaults))
+                    {
+                        defaults = _rolePermissions.GetRolePermission(user.Role).ToArray();
+                        PermissionPolicy.Enforce(user.Role, defaults);
+                        defaultsByRole[user.Role] = defaults;
+                    }
+                    values = defaults.ToArray();
+                }
+                else
+                {
+                    values = new bool[LockCount];
+                }
+
+                foreach (UserPermission permission in permissions)
+                {
+                    if (permission.LockId >= 0 && permission.LockId < LockCount)
+                        values[permission.LockId] = permission.HasAccess;
+                }
+                PermissionPolicy.Enforce(user.Role, values);
+                result[user.UserId] = values;
+            }
             return result;
         }
 
@@ -155,7 +189,9 @@ namespace CabinetLock
             if (user != null) Scope.EnsureCanModify(user);
             var items = _root.Read<UserPermission>("permissions");
             items.RemoveAll(p => p.UserId == userId && p.LockId == lockId);
-            return _root.Save("permissions", items);
+            bool saved = _root.Save("permissions", items);
+            if (saved && user != null) QueueUserSync(user, "恢复角色默认权限");
+            return saved;
         }
 
         public bool DeleteAllUserPermissions(string userId)
@@ -165,7 +201,9 @@ namespace CabinetLock
             if (user != null) Scope.EnsureCanModify(user);
             var items = _root.Read<UserPermission>("permissions");
             items.RemoveAll(p => p.UserId == userId);
-            return _root.Save("permissions", items);
+            bool saved = _root.Save("permissions", items);
+            if (saved && user != null) QueueUserSync(user, "恢复全部角色默认权限");
+            return saved;
         }
 
         /// <summary>
@@ -197,8 +235,8 @@ namespace CabinetLock
                 if (user.Enabled)
                     App.CabinetSyncQueueService.EnqueueUser(user.UserId, assigned, reason);
                 else
-                    foreach (string deviceId in assigned)
-                        App.CabinetSyncQueueService.EnqueueCabinet(deviceId, reason);
+                    App.CabinetSyncQueueService.EnqueueUserDeletion(
+                        user.UserId, assigned, reason);
                 App.CabinetSyncQueueService.Trigger();
             }
             catch

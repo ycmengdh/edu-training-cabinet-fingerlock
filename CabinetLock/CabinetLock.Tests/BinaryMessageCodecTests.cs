@@ -3,6 +3,42 @@ namespace CabinetLock.Tests;
 public class BinaryMessageCodecTests
 {
     [Fact]
+    public void AppMessageMapper_UsesStableNonZeroProcessSession()
+    {
+        var first = AppMessageMapper.ToApp(new Message
+        {
+            MsgId = "1",
+            Cmd = Protocol.CmdReadStatus,
+            DeviceId = "CABINET_001"
+        });
+        var second = AppMessageMapper.ToApp(new Message
+        {
+            MsgId = "2",
+            Cmd = Protocol.CmdReadStatus,
+            DeviceId = "CABINET_002"
+        });
+
+        Assert.NotEqual((ushort)0, AppMessageMapper.SessionId);
+        Assert.Equal(AppMessageMapper.SessionId, first.CorrId);
+        Assert.Equal(first.CorrId, second.CorrId);
+    }
+
+    [Fact]
+    public void AppMessageMapper_PreservesSessionWhenDecoding()
+    {
+        var decoded = AppMessageMapper.ToMessage(new AppMessage
+        {
+            CmdId = CmdIds.Ack,
+            MsgId = 7,
+            CorrId = 0x4321,
+            DeviceId = "CABINET_001",
+            Payload = BinaryMessageCodec.AckPayload.Pack(7, 0, "open")
+        });
+
+        Assert.Equal((ushort)0x4321, decoded.CorrId);
+    }
+
+    [Fact]
     public void EncodeDecode_RoundTripsEnvelope()
     {
         var original = new AppMessage
@@ -143,7 +179,7 @@ public class BinaryMessageCodecTests
         payload[0] = BinaryMessageCodec.CabinetStatusPayload.Version;
         payload[1] = 0x05;
         payload[2] = 2;
-        payload[3] = 0x03;
+        payload[3] = 0x07;
         System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(4, 4), 1234);
         System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(8, 2), 7);
         System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(10, 2), 42);
@@ -163,11 +199,47 @@ public class BinaryMessageCodecTests
         var data = Assert.IsType<Newtonsoft.Json.Linq.JObject>(message.Data);
         Assert.Equal(1234u, data.Value<uint>("uptime"));
         Assert.Equal(7, data.Value<int>("fingerprint_count"));
+        Assert.True(data.Value<bool>("fingerprint_ready"));
         Assert.Equal(60u, data.Value<uint>("perm_version"));
         Assert.Equal(-55, data.Value<int>("mesh_link_rssi"));
         Assert.Equal("mesh", data.Value<string>("work_mode"));
         Assert.True(data.Value<bool>("time_synced"));
         Assert.Equal(new[] { 1, 0, 1, 0 }, data["lock_status"]!.Values<int>());
+    }
+
+    [Fact]
+    public void CabinetStatusReport_UsesTheSameCompactPayloadAsStatusResponse()
+    {
+        byte[] payload = new byte[BinaryMessageCodec.CabinetStatusPayload.Size];
+        payload[0] = BinaryMessageCodec.CabinetStatusPayload.Version;
+        payload[1] = 0x0A;
+        payload[2] = 3;
+        payload[3] = 0x07;
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(
+            payload.AsSpan(4, 4), 4321);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(
+            payload.AsSpan(8, 2), 8);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(
+            payload.AsSpan(10, 2), 12);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(
+            payload.AsSpan(12, 4), 77);
+        payload[20] = unchecked((byte)-61);
+
+        Message message = AppMessageMapper.ToMessage(new AppMessage
+        {
+            CmdId = CmdIds.StatusReport,
+            MsgId = 10,
+            DeviceId = "CABINET_002",
+            Payload = payload,
+        });
+
+        var data = Assert.IsType<Newtonsoft.Json.Linq.JObject>(message.Data);
+        Assert.Equal(4321, (int?)data["uptime"]);
+        Assert.Equal(12, (int?)data["perm_count"]);
+        Assert.Equal(77, (int?)data["perm_version"]);
+        Assert.Equal(-61, (int?)data["mesh_link_rssi"]);
+        Assert.Equal(1, (int?)data["lock_status"]?[1]);
+        Assert.Equal(3, (int?)data["mesh_layer"]);
     }
 
     [Fact]
@@ -299,6 +371,11 @@ public class BinaryMessageCodecTests
         Assert.Equal(Protocol.CmdHeartbeat, CmdIds.ToCmdName(CmdIds.Heartbeat));
         Assert.Equal(CmdIds.ControlLock, CmdIds.ToCmdId(Protocol.CmdControlLock));
         Assert.Equal(CmdIds.SyncPermission, CmdIds.ToCmdId(Protocol.CmdSyncPermission));
+        Assert.Equal(CmdIds.DeleteUserPermission,
+            CmdIds.ToCmdId(Protocol.CmdDeleteUserPermission));
+        AppMessage delete = AppMessageMapper.ToApp(Message.Create(
+            Protocol.CmdDeleteUserPermission, "CABINET_001", new { user_id = "U001" }));
+        Assert.True(delete.Flags.HasFlag(AppMessageFlags.NeedsAck));
         Assert.Null(CmdIds.ToCmdId("NOT_A_REAL_CMD"));
         Assert.Null(CmdIds.ToCmdName(0xFFFF));
     }

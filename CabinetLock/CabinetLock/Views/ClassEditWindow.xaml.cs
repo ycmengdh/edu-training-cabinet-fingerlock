@@ -16,6 +16,10 @@ namespace CabinetLock
             ClassIdBox.Text = existing?.ClassId ?? "";
             ClassIdBox.IsEnabled = isCreate;
             NameBox.Text = existing?.Name ?? "";
+            StatusSection.Visibility = isCreate ? Visibility.Collapsed : Visibility.Visible;
+            EnabledStatusButton.IsChecked = existing?.Enabled != false;
+            DisabledStatusButton.IsChecked = existing?.Enabled == false;
+            Height = isCreate ? 310 : 382;
             string? classId = existing?.ClassId;
             _teachers = teachers.OrderBy(item => item.Name).ThenBy(item => item.DisplayId)
                 .Select(item => new TeacherPickItem(item,
@@ -29,6 +33,7 @@ namespace CabinetLock
 
         public string ClassId { get; private set; } = "";
         public string ClassName { get; private set; } = "";
+        public bool RequestedEnabled { get; private set; } = true;
         public IReadOnlyList<string> SelectedTeacherIds { get; private set; } = Array.Empty<string>();
 
         private void SelectEnabledButton_Click(object sender, RoutedEventArgs e)
@@ -53,6 +58,7 @@ namespace CabinetLock
             }
             ClassId = ClassIdBox.Text.Trim();
             ClassName = NameBox.Text.Trim();
+            RequestedEnabled = EnabledStatusButton.IsChecked == true;
             SelectedTeacherIds = _teachers.Where(item => item.IsSelected)
                 .Select(item => item.UserId).ToList();
             DialogResult = true;

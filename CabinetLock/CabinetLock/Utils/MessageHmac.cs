@@ -26,7 +26,8 @@ namespace CabinetLock
             Protocol.CmdSyncPermission,
             Protocol.CmdCommitPermissionSync,
             Protocol.CmdClearPermissions,
-            Protocol.CmdSyncPermissions
+            Protocol.CmdSyncPermissions,
+            Protocol.CmdDeleteUserPermission
         };
 
         public static bool IsSensitive(string? cmd) =>

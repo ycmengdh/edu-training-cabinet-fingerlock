@@ -123,7 +123,7 @@ namespace CabinetLock
         private void SelectAllButton_Click(object sender, RoutedEventArgs e)
         {
             foreach (var item in _cabinets)
-                item.IsSelected = item.IsOnline && item.AssignedUserIds.Count == 0;
+                item.IsSelected = item.AssignedUserIds.Count == 0;
             UpdateSelectionCount();
         }
 
@@ -152,7 +152,7 @@ namespace CabinetLock
                 .ToList();
             if (targetDevices.Count == 0)
             {
-                AppToast.Warning("请至少勾选一个在线柜子");
+                AppToast.Warning("请至少勾选一个柜子");
                 return;
             }
 
@@ -210,8 +210,17 @@ namespace CabinetLock
                 // 优先按选中柜同步，避免无关柜风暴
                 var failedDevices = new List<string>();
                 var confirmed = new List<string>();
+                var queuedDevices = new List<string>();
                 foreach (string deviceId in targetDevices)
                 {
+                    CabinetPickItem? target = _cabinets.FirstOrDefault(item =>
+                        string.Equals(item.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase));
+                    if (target?.IsOnline != true)
+                    {
+                        queuedDevices.Add(deviceId);
+                        StatusText.Text = $"{deviceId} 离线，已加入待同步队列";
+                        continue;
+                    }
                     var progress = new Progress<string>(message =>
                         StatusText.Text = $"{deviceId}：{message}");
                     CabinetDataSyncResult one = await App.CabinetSyncService
@@ -227,7 +236,8 @@ namespace CabinetLock
                         Success = false,
                         ErrorMessage = "部分柜子未确认权限同步",
                         ConfirmedDeviceIds = confirmed.ToArray(),
-                        FailedDeviceIds = failedDevices.ToArray()
+                        FailedDeviceIds = failedDevices.ToArray(),
+                        MissingDeviceIds = queuedDevices.ToArray()
                     };
 
                 SuccessCount = success;
@@ -236,13 +246,13 @@ namespace CabinetLock
 
                 string msg =
                     $"批量分配完成：用户成功 {success}，失败 {fail}\n" +
-                    $"柜子确认 {confirmed.Count}/{targetDevices.Count}\n" +
+                    $"柜子确认 {confirmed.Count}，离线排队 {queuedDevices.Count}，失败 {failedDevices.Count}\n" +
                     CabinetSyncService.FormatSyncResult(syncResult,
-                        "所选在线柜子均已确认权限更新（每用户一槽）。",
+                        "在线柜子均已确认，离线柜子将在上线后自动同步。",
                         "部分柜子未确认，可在待同步队列中重试。");
                 if (fail == 0 && syncResult.Success)
                 {
-                    AppToast.Success($"批量分配完成：{success} 用户 · {confirmed.Count} 柜");
+                    AppToast.Success($"批量分配完成：{success} 用户 · {confirmed.Count} 柜确认 · {queuedDevices.Count} 柜排队");
                 }
                 else
                 {

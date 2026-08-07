@@ -40,6 +40,7 @@ namespace CabinetLock
         public const ushort SyncPermissions = 0x0025;
         public const ushort ReadPermissions = 0x0026;
         public const ushort PermissionsResponse = 0x0027;
+        public const ushort DeleteUserPermission = 0x0028;
 
         public const ushort ReadConfig = 0x0030;
         public const ushort WriteConfig = 0x0031;
@@ -61,6 +62,14 @@ namespace CabinetLock
         public const ushort SdSaveResponse = 0x0045;
         public const ushort SdQueryVersion = 0x0046;
         public const ushort SdVersionResponse = 0x0047;
+        public const ushort SdSnapshotManifest = 0x0048;
+        public const ushort SdSnapshotManifestResponse = 0x0049;
+        public const ushort SdSnapshotBegin = 0x004A;
+        public const ushort SdSnapshotChunk = 0x004B;
+        public const ushort SdSnapshotCommit = 0x004C;
+        public const ushort SdSnapshotResponse = 0x004D;
+        public const ushort SdSnapshotDownload = 0x004E;
+        public const ushort SdSnapshotDownloadPart = 0x004F;
 
         public const ushort UploadFpTemplate = 0x0050;
         public const ushort FpTemplateUploadResponse = 0x0051;
@@ -70,11 +79,23 @@ namespace CabinetLock
         public const ushort FpTemplateDeleteResponse = 0x0055;
         public const ushort CheckFingerprint = 0x0056;
         public const ushort FingerprintCheckResponse = 0x0057;
+        public const ushort FingerprintListRequest = 0x0058;
+        public const ushort FingerprintListResponse = 0x0059;
 
         public const ushort LogReport = 0x0060;
         public const ushort LogReportAck = 0x0061;
         public const ushort PermLost = 0x0062;
         public const ushort PermLostAck = 0x0063;
+
+        public const ushort CabinetOtaBegin = 0x0070;
+        public const ushort CabinetOtaChunk = 0x0071;
+        public const ushort CabinetOtaCommit = 0x0072;
+        public const ushort CabinetOtaStart = 0x0073;
+        public const ushort CabinetOtaStatus = 0x0074;
+        public const ushort CabinetOtaResponse = 0x0075;
+        public const ushort CabinetOtaProgress = 0x0077;
+        public const ushort CabinetOtaNodes = 0x0078;
+        public const ushort CabinetOtaNodesResponse = 0x0079;
 
         // 字符串命令名（与 Protocol.Cmd* 及固件日志一致；未在 Protocol 中的补充于此）
         public const string NameHeartbeatAck = "HEARTBEAT_ACK";
@@ -118,6 +139,7 @@ namespace CabinetLock
             { SyncPermissions, Protocol.CmdSyncPermissions },
             { ReadPermissions, NameReadPermissions },
             { PermissionsResponse, Protocol.CmdPermissionsResponse },
+            { DeleteUserPermission, Protocol.CmdDeleteUserPermission },
             { ReadConfig, Protocol.CmdReadConfig },
             { WriteConfig, Protocol.CmdWriteConfig },
             { ConfigResponse, Protocol.CmdConfigResponse },
@@ -137,6 +159,14 @@ namespace CabinetLock
             { SdSaveResponse, Protocol.CmdSdSaveResponse },
             { SdQueryVersion, Protocol.CmdSdQueryVersion },
             { SdVersionResponse, Protocol.CmdSdVersionResponse },
+            { SdSnapshotManifest, Protocol.CmdSdSnapshotManifest },
+            { SdSnapshotManifestResponse, Protocol.CmdSdSnapshotManifestResponse },
+            { SdSnapshotBegin, Protocol.CmdSdSnapshotBegin },
+            { SdSnapshotChunk, Protocol.CmdSdSnapshotChunk },
+            { SdSnapshotCommit, Protocol.CmdSdSnapshotCommit },
+            { SdSnapshotResponse, Protocol.CmdSdSnapshotResponse },
+            { SdSnapshotDownload, Protocol.CmdSdSnapshotDownload },
+            { SdSnapshotDownloadPart, Protocol.CmdSdSnapshotDownloadPart },
             { UploadFpTemplate, Protocol.CmdUploadFpTemplate },
             { FpTemplateUploadResponse, Protocol.CmdFpTemplateUploadResponse },
             { DownloadFpTemplate, Protocol.CmdDownloadFpTemplate },
@@ -145,10 +175,21 @@ namespace CabinetLock
             { FpTemplateDeleteResponse, Protocol.CmdFpTemplateDeleteResponse },
             { CheckFingerprint, Protocol.CmdCheckFingerprint },
             { FingerprintCheckResponse, Protocol.CmdFingerprintCheckResponse },
+            { FingerprintListRequest, Protocol.CmdFingerprintListRequest },
+            { FingerprintListResponse, Protocol.CmdFingerprintListResponse },
             { LogReport, Protocol.CmdLogReport },
             { LogReportAck, NameLogReportAck },
             { PermLost, NamePermLost },
             { PermLostAck, NamePermLostAck },
+            { CabinetOtaBegin, Protocol.CmdCabinetOtaBegin },
+            { CabinetOtaChunk, Protocol.CmdCabinetOtaChunk },
+            { CabinetOtaCommit, Protocol.CmdCabinetOtaCommit },
+            { CabinetOtaStart, Protocol.CmdCabinetOtaStart },
+            { CabinetOtaStatus, Protocol.CmdCabinetOtaStatus },
+            { CabinetOtaResponse, Protocol.CmdCabinetOtaResponse },
+            { CabinetOtaProgress, Protocol.CmdCabinetOtaProgress },
+            { CabinetOtaNodes, Protocol.CmdCabinetOtaNodes },
+            { CabinetOtaNodesResponse, Protocol.CmdCabinetOtaNodesResponse },
         };
 
         private static readonly Dictionary<string, ushort> NameToId =

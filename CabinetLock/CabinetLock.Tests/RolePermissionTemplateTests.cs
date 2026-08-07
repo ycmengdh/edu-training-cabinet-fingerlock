@@ -60,9 +60,10 @@ public sealed class RolePermissionTemplateTests
                 CreateTime = DateTime.Now
             }));
 
+            string newUserId = new UserService().GetUserByCode("S_NEW")!.UserId;
             bool[] newUserPermissions = BusinessDatabase.ReadArray("permissions")
                 .OfType<JObject>()
-                .Where(item => item.Value<string>("user_id") == "S_NEW")
+                .Where(item => item.Value<string>("user_id") == newUserId)
                 .OrderBy(item => item.Value<int>("lock_id"))
                 .Select(item => item.Value<bool>("has_access"))
                 .ToArray();

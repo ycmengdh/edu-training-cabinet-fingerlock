@@ -15,6 +15,15 @@ namespace CabinetLock
                 Upsert("user", userId.Trim(), deviceId.Trim(), reason);
         }
 
+        public void EnqueueUserDeletion(
+            string userId, IEnumerable<string> deviceIds, string reason)
+        {
+            if (string.IsNullOrWhiteSpace(userId) || deviceIds == null) return;
+            foreach (string deviceId in deviceIds.Where(id => !string.IsNullOrWhiteSpace(id))
+                         .Distinct(StringComparer.OrdinalIgnoreCase))
+                Upsert("delete_user", userId.Trim(), deviceId.Trim(), reason);
+        }
+
         public void EnqueueCabinet(string deviceId, string reason)
         {
             if (string.IsNullOrWhiteSpace(deviceId)) return;
@@ -35,16 +44,65 @@ FROM cabinet_sync_queue ORDER BY update_time DESC";
             return jobs;
         }
 
+        public IReadOnlyList<CabinetSyncJob> GetRelevant(
+            IEnumerable<string>? userIds, IEnumerable<string>? deviceIds)
+        {
+            string[] users = NormalizeIds(userIds);
+            string[] devices = NormalizeIds(deviceIds);
+            if (users.Length == 0 && devices.Length == 0)
+                return Array.Empty<CabinetSyncJob>();
+
+            BusinessDatabase.Initialize();
+            using SqliteConnection connection = BusinessDatabase.Open();
+            using SqliteCommand command = connection.CreateCommand();
+            var conditions = new List<string>();
+            if (users.Length > 0)
+            {
+                string[] names = users.Select((_, index) => $"$user_{index}").ToArray();
+                for (int index = 0; index < users.Length; index++)
+                    command.Parameters.AddWithValue(names[index], users[index]);
+                conditions.Add($"(job_kind='user' AND user_id COLLATE NOCASE IN ({string.Join(',', names)}))");
+            }
+            if (devices.Length > 0)
+            {
+                string[] names = devices.Select((_, index) => $"$device_{index}").ToArray();
+                for (int index = 0; index < devices.Length; index++)
+                    command.Parameters.AddWithValue(names[index], devices[index]);
+                conditions.Add($"(job_kind='cabinet' AND device_id COLLATE NOCASE IN ({string.Join(',', names)}))");
+            }
+            command.CommandText = $@"SELECT job_key,job_kind,user_id,device_id,reason,state,
+attempt_count,next_attempt_time,last_error,update_time,complete_time
+FROM cabinet_sync_queue WHERE {string.Join(" OR ", conditions)}
+ORDER BY update_time DESC";
+            using SqliteDataReader reader = command.ExecuteReader();
+            var jobs = new List<CabinetSyncJob>();
+            while (reader.Read()) jobs.Add(Map(reader));
+            return jobs;
+        }
+
         /// <summary>未完成任务（pending/running/failed 待重试）。</summary>
         public IReadOnlyList<CabinetSyncJob> GetOpen() =>
             GetAll().Where(job => !string.Equals(job.State, "completed", StringComparison.OrdinalIgnoreCase))
                 .OrderByDescending(job => job.UpdateTime)
                 .ToList();
 
-        public int CountOpen() => GetOpen().Count;
+        public (int Open, int Failed) CountOpenAndFailed()
+        {
+            BusinessDatabase.Initialize();
+            using SqliteConnection connection = BusinessDatabase.Open();
+            using SqliteCommand command = connection.CreateCommand();
+            command.CommandText = @"
+SELECT COUNT(1),COALESCE(SUM(CASE WHEN state='failed' THEN 1 ELSE 0 END),0)
+FROM cabinet_sync_queue WHERE state<>'completed'";
+            using SqliteDataReader reader = command.ExecuteReader();
+            return reader.Read()
+                ? (reader.GetInt32(0), reader.GetInt32(1))
+                : (0, 0);
+        }
 
-        public int CountFailed() => GetOpen().Count(job =>
-            string.Equals(job.State, "failed", StringComparison.OrdinalIgnoreCase));
+        public int CountOpen() => CountOpenAndFailed().Open;
+
+        public int CountFailed() => CountOpenAndFailed().Failed;
 
         public CabinetSyncJob? GetUserJob(string userId, string deviceId) => GetAll()
             .FirstOrDefault(job => job.JobKind == "user" &&
@@ -54,6 +112,17 @@ FROM cabinet_sync_queue ORDER BY update_time DESC";
         public CabinetSyncJob? GetCabinetJob(string deviceId) => GetAll()
             .FirstOrDefault(job => job.JobKind == "cabinet" &&
                 string.Equals(job.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase));
+
+        public void RemoveDeviceJobs(string deviceId)
+        {
+            if (string.IsNullOrWhiteSpace(deviceId)) return;
+            BusinessDatabase.Initialize();
+            using SqliteConnection connection = BusinessDatabase.Open();
+            using SqliteCommand command = connection.CreateCommand();
+            command.CommandText = "DELETE FROM cabinet_sync_queue WHERE device_id=$device_id";
+            command.Parameters.AddWithValue("$device_id", deviceId.Trim());
+            command.ExecuteNonQuery();
+        }
 
         public async Task RunAsync(CancellationToken cancellationToken)
         {
@@ -96,7 +165,8 @@ FROM cabinet_sync_queue ORDER BY update_time DESC";
                 foreach (CabinetSyncJob job in due)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    MarkRunning(job);
+                    string lease = MarkRunning(job);
+                    if (string.IsNullOrEmpty(lease)) continue;
                     try
                     {
                         bool success;
@@ -108,6 +178,15 @@ FROM cabinet_sync_queue ORDER BY update_time DESC";
                                 .ConfigureAwait(false);
                             success = result.Success;
                             error = success ? "" : result.FormatForDisplay();
+                        }
+                        else if (job.JobKind == "delete_user")
+                        {
+                            CommandResult result = await App.CommandService
+                                .DeleteUserPermissionAsync(job.DeviceId, job.UserId,
+                                    CabinetSyncService.GetExpectedPermissionVersion())
+                                .ConfigureAwait(false);
+                            success = result.Success;
+                            error = result.Success ? "" : result.ErrorMessage;
                         }
                         else
                         {
@@ -129,14 +208,13 @@ FROM cabinet_sync_queue ORDER BY update_time DESC";
                         }
                         if (success)
                         {
-                            MarkCompleted(job.JobKey);
-                            completed++;
+                            if (MarkCompleted(job.JobKey, lease)) completed++;
                         }
-                        else MarkFailed(job, error);
+                        else MarkFailed(job, error, lease);
                     }
                     catch (Exception ex)
                     {
-                        MarkFailed(job, ex.Message);
+                        MarkFailed(job, ex.Message, lease);
                     }
                     await Task.Delay(100, cancellationToken).ConfigureAwait(false);
                 }
@@ -170,12 +248,15 @@ FROM cabinet_sync_queue ORDER BY update_time DESC";
             BusinessDatabase.Initialize();
             using SqliteConnection connection = BusinessDatabase.Open();
             using SqliteCommand command = connection.CreateCommand();
-            string key = $"{kind}:{deviceId}:{userId}".ToUpperInvariant();
+            // upsert/delete 共用一个用户级键，离线期间反复操作只保留最终意图。
+            string keyKind = kind == "delete_user" ? "user" : kind;
+            string key = $"{keyKind}:{deviceId}:{userId}".ToUpperInvariant();
             command.CommandText = @"
 INSERT INTO cabinet_sync_queue(job_key,job_kind,user_id,device_id,reason,state,
 attempt_count,next_attempt_time,last_error,update_time,complete_time)
 VALUES($key,$kind,$user,$device,$reason,'pending',0,NULL,'',$now,NULL)
-ON CONFLICT(job_key) DO UPDATE SET reason=excluded.reason,state='pending',
+ON CONFLICT(job_key) DO UPDATE SET job_kind=excluded.job_kind,
+reason=excluded.reason,state='pending',
 next_attempt_time=NULL,last_error='',update_time=excluded.update_time,complete_time=NULL;";
             command.Parameters.AddWithValue("$key", key);
             command.Parameters.AddWithValue("$kind", kind);
@@ -186,29 +267,46 @@ next_attempt_time=NULL,last_error='',update_time=excluded.update_time,complete_t
             command.ExecuteNonQuery();
         }
 
-        private static void MarkRunning(CabinetSyncJob job) => ExecuteStateUpdate(
-            job.JobKey, "running", job.AttemptCount + 1, null, "", false);
+        private static string MarkRunning(CabinetSyncJob job)
+        {
+            string lease = DateTime.Now.ToString("o");
+            BusinessDatabase.Initialize();
+            using SqliteConnection connection = BusinessDatabase.Open();
+            using SqliteCommand command = connection.CreateCommand();
+            command.CommandText = @"UPDATE cabinet_sync_queue SET state='running',
+attempt_count=$attempts,next_attempt_time=NULL,last_error='',update_time=$lease,
+complete_time=NULL WHERE job_key=$key AND update_time=$expected";
+            command.Parameters.AddWithValue("$attempts", job.AttemptCount + 1);
+            command.Parameters.AddWithValue("$lease", lease);
+            command.Parameters.AddWithValue("$key", job.JobKey);
+            command.Parameters.AddWithValue("$expected", job.UpdateTime.ToString("o"));
+            return command.ExecuteNonQuery() == 1 ? lease : "";
+        }
 
-        private static void MarkCompleted(string jobKey) => ExecuteStateUpdate(
-            jobKey, "completed", null, null, "", true);
+        private static bool MarkCompleted(string jobKey, string? expectedUpdateTime = null) =>
+            ExecuteStateUpdate(jobKey, "completed", null, null, "", true,
+                expectedUpdateTime);
 
-        private static void MarkFailed(CabinetSyncJob job, string error)
+        private static void MarkFailed(
+            CabinetSyncJob job, string error, string? expectedUpdateTime = null)
         {
             int attempt = job.AttemptCount + 1;
             double seconds = Math.Min(300, 5 * Math.Pow(2, Math.Min(6, attempt - 1)));
             ExecuteStateUpdate(job.JobKey, "failed", attempt,
-                DateTime.Now.AddSeconds(seconds), error, false);
+                DateTime.Now.AddSeconds(seconds), error, false, expectedUpdateTime);
         }
 
-        private static void ExecuteStateUpdate(string key, string state, int? attempts,
-            DateTime? nextAttempt, string error, bool completed)
+        private static bool ExecuteStateUpdate(string key, string state, int? attempts,
+            DateTime? nextAttempt, string error, bool completed,
+            string? expectedUpdateTime = null)
         {
             BusinessDatabase.Initialize();
             using SqliteConnection connection = BusinessDatabase.Open();
             using SqliteCommand command = connection.CreateCommand();
             command.CommandText = @"UPDATE cabinet_sync_queue SET state=$state,
 attempt_count=COALESCE($attempts,attempt_count),next_attempt_time=$next,
-last_error=$error,update_time=$now,complete_time=$complete WHERE job_key=$key";
+last_error=$error,update_time=$now,complete_time=$complete WHERE job_key=$key
+AND ($expected IS NULL OR update_time=$expected)";
             command.Parameters.AddWithValue("$state", state);
             command.Parameters.AddWithValue("$attempts", attempts.HasValue ? attempts.Value : DBNull.Value);
             command.Parameters.AddWithValue("$next", nextAttempt.HasValue
@@ -218,7 +316,9 @@ last_error=$error,update_time=$now,complete_time=$complete WHERE job_key=$key";
             command.Parameters.AddWithValue("$complete", completed
                 ? DateTime.Now.ToString("o") : DBNull.Value);
             command.Parameters.AddWithValue("$key", key);
-            command.ExecuteNonQuery();
+            command.Parameters.AddWithValue("$expected",
+                (object?)expectedUpdateTime ?? DBNull.Value);
+            return command.ExecuteNonQuery() == 1;
         }
 
         private static CabinetSyncJob Map(SqliteDataReader reader) => new()
@@ -239,6 +339,13 @@ last_error=$error,update_time=$now,complete_time=$complete WHERE job_key=$key";
         private static DateTime? Parse(SqliteDataReader reader, int ordinal) =>
             reader.IsDBNull(ordinal) ? null : DateTime.TryParse(reader.GetString(ordinal), out DateTime value)
                 ? value : null;
+
+        private static string[] NormalizeIds(IEnumerable<string>? ids) =>
+            (ids ?? Array.Empty<string>())
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .Select(id => id.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
     }
 
     public sealed class CabinetSyncJob

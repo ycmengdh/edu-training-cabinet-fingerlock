@@ -27,27 +27,12 @@ namespace CabinetLock
             SetBusy(true, "正在读取班级数据");
             try
             {
-                List<ClassInfo> classes = await Task.Run(() =>
-                {
-                    var items = App.ClassService.GetVisible();
-                    var users = App.UserService.GetAllUsers();
-                    foreach (var item in items)
-                    {
-                        var teachers = users
-                            .Where(user => string.Equals(user.Role, "teacher", StringComparison.OrdinalIgnoreCase)
-                                && user.IsResponsibleForClass(item.ClassId))
-                            .Select(user => string.IsNullOrWhiteSpace(user.Name) ? user.DisplayId : user.Name)
-                            .Where(name => !string.IsNullOrWhiteSpace(name))
-                            .ToList();
-                        item.TeacherText = teachers.Count == 0 ? "未分配" : string.Join("、", teachers);
-                        item.TeacherCount = teachers.Count;
-                        item.StudentCount = users.Count(user =>
-                            string.Equals(user.Role, "student", StringComparison.OrdinalIgnoreCase)
-                            && string.Equals(user.ClassId, item.ClassId, StringComparison.OrdinalIgnoreCase));
-                    }
-                    return items;
-                });
-                _classes = classes;
+                string keyword = ClassSearchBox?.Text?.Trim() ?? "";
+                PagedResult<ClassInfo> result = await Task.Run(() =>
+                    App.ClassService.QueryVisiblePage(
+                        _pager.PageIndex, _pager.PageSize, keyword));
+                _classes = result.Items.ToList();
+                _pager.SetTotalCount(result.TotalCount);
                 ApplyClassPage();
             }
             catch (RootDataUnavailableException ex)
@@ -66,32 +51,25 @@ namespace CabinetLock
         private void ApplyClassPage()
         {
             string keyword = ClassSearchBox?.Text?.Trim() ?? "";
-            List<ClassInfo> filtered = string.IsNullOrWhiteSpace(keyword)
-                ? _classes
-                : _classes.Where(item =>
-                    item.ClassId.Contains(keyword, StringComparison.OrdinalIgnoreCase) ||
-                    item.Name.Contains(keyword, StringComparison.OrdinalIgnoreCase) ||
-                    item.TeacherText.Contains(keyword, StringComparison.OrdinalIgnoreCase))
-                    .ToList();
-            var page = _pager.Slice(filtered);
-            ClassDataGrid.ItemsSource = page;
+            ClassDataGrid.ItemsSource = _classes;
             _pager.BindChrome(Pager, "个班级");
             PageStatusText.Text = string.IsNullOrWhiteSpace(keyword)
-                ? _pager.StatusText(page.Count, "个班级")
-                : $"找到 {filtered.Count} 个班级 · {_pager.StatusText(page.Count, "个班级")}";
+                ? _pager.StatusText(_classes.Count, "个班级")
+                : $"找到 {_pager.TotalCount} 个班级 · {_pager.StatusText(_classes.Count, "个班级")}";
             UpdateDeleteButtonState();
         }
 
-        private void ClassSearchBox_TextChanged(object sender, TextChangedEventArgs e)
+        private async void ClassSearchBox_TextChanged(object sender, TextChangedEventArgs e)
         {
+            if (!IsLoaded) return;
             _pager.Reset();
-            ApplyClassPage();
+            await LoadAsync();
         }
 
-        private void Pager_PageRequested(object sender, Controls.PaginationRequestedEventArgs e)
+        private async void Pager_PageRequested(object sender, Controls.PaginationRequestedEventArgs e)
         {
             _pager.ApplyRequest(e);
-            ApplyClassPage();
+            await LoadAsync();
         }
 
         private async void RefreshButton_Click(object sender, RoutedEventArgs e) => await LoadAsync();
@@ -99,7 +77,7 @@ namespace CabinetLock
         private async void AddButton_Click(object sender, RoutedEventArgs e)
         {
             if (!ShowClassDialog(null, out string classId, out string name,
-                    out IReadOnlyList<string> teacherIds)) return;
+                    out IReadOnlyList<string> teacherIds, out _)) return;
             SetBusy(true, "正在保存班级");
             try
             {
@@ -130,8 +108,10 @@ namespace CabinetLock
 
         private async Task EditClassAsync(ClassInfo selected)
         {
+            bool wasEnabled = selected.Enabled;
             if (!ShowClassDialog(selected, out _, out string name,
-                    out IReadOnlyList<string> teacherIds)) return;
+                    out IReadOnlyList<string> teacherIds,
+                    out bool requestedEnabled)) return;
             selected.Name = name.Trim();
             SetBusy(true, "正在保存班级");
             try
@@ -142,6 +122,12 @@ namespace CabinetLock
                     if (!await Task.Run(() => App.UserService.SetClassTeachers(selected.ClassId, teacherIds)))
                         AppToast.Warning("班级信息已更新，但负责教师保存失败，可重试");
                     AppToast.Success("班级已更新");
+                    if (requestedEnabled != wasEnabled)
+                    {
+                        ShowLifecycleWindow(new[] { selected }, requestedEnabled
+                            ? ClassLifecycleAction.Enable
+                            : ClassLifecycleAction.Disable);
+                    }
                     await LoadAsync();
                 }
                 else AppToast.Error("更新失败");
@@ -258,7 +244,7 @@ namespace CabinetLock
         }
 
         private bool ShowClassDialog(ClassInfo? existing, out string classId, out string name,
-            out IReadOnlyList<string> teacherIds)
+            out IReadOnlyList<string> teacherIds, out bool enabled)
         {
             var editor = new ClassEditWindow(existing, App.UserService.GetUsersByRole("teacher"))
             {
@@ -269,11 +255,13 @@ namespace CabinetLock
                 classId = existing?.ClassId ?? "";
                 name = existing?.Name ?? "";
                 teacherIds = Array.Empty<string>();
+                enabled = existing?.Enabled ?? true;
                 return false;
             }
             classId = editor.ClassId;
             name = editor.ClassName;
             teacherIds = editor.SelectedTeacherIds;
+            enabled = editor.RequestedEnabled;
             return true;
         }
 

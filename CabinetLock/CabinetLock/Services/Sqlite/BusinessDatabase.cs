@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.IO;
 using Microsoft.Data.Sqlite;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -9,7 +10,7 @@ namespace CabinetLock
     /// 本机业务库 business.db：users / classes / permissions / role_permissions / devices。
     /// 运行期读写本库；启动从 SD 覆盖导入，关闭回写 SD。
     /// </summary>
-    public static class BusinessDatabase
+    public static partial class BusinessDatabase
     {
         private static readonly object Sync = new();
         private static bool _initialized;
@@ -17,6 +18,13 @@ namespace CabinetLock
         public static readonly string[] BusinessTables =
         {
             "users", "classes", "permissions", "role_permissions", "devices", "fingerprints"
+        };
+
+        // Routine synchronization intentionally excludes fingerprint metadata/blob data.
+        // Fingerprints are written to SD at enrollment time and are handled by full backup.
+        public static readonly string[] DailySyncTables =
+        {
+            "users", "classes", "permissions", "role_permissions", "devices"
         };
 
         /// <summary>
@@ -145,6 +153,7 @@ CREATE TABLE IF NOT EXISTS devices (
   mesh_mac TEXT,
   is_root INTEGER NOT NULL DEFAULT 0,
   firmware_version TEXT,
+  hardware_version TEXT,
   status_json TEXT
 );
 CREATE TABLE IF NOT EXISTS fingerprints (
@@ -178,6 +187,18 @@ CREATE TABLE IF NOT EXISTS cabinet_sync_queue (
 );
 CREATE INDEX IF NOT EXISTS ix_sync_queue_due
 ON cabinet_sync_queue(state, next_attempt_time);
+CREATE INDEX IF NOT EXISTS ix_sync_queue_user
+ON cabinet_sync_queue(job_kind, user_id);
+CREATE INDEX IF NOT EXISTS ix_sync_queue_device
+ON cabinet_sync_queue(job_kind, device_id);
+CREATE INDEX IF NOT EXISTS ix_users_role_id
+ON users(role, user_id);
+CREATE INDEX IF NOT EXISTS ix_users_class_role
+ON users(class_id, role);
+CREATE INDEX IF NOT EXISTS ix_classes_name
+ON classes(name);
+CREATE INDEX IF NOT EXISTS ix_permissions_user_update
+ON permissions(user_id, update_time);
 ";
             cmd.ExecuteNonQuery();
             EnsureColumn(conn, "users", "gender", "TEXT NOT NULL DEFAULT ''");
@@ -186,6 +207,7 @@ ON cabinet_sync_queue(state, next_attempt_time);
             EnsureColumn(conn, "users", "assigned_device_ids_json", "TEXT");
             EnsureColumn(conn, "users", "cabinet_assignments_json", "TEXT");
             EnsureColumn(conn, "devices", "device_number", "TEXT");
+            EnsureColumn(conn, "devices", "hardware_version", "TEXT");
             EnsureColumn(conn, "fingerprints", "finger_name", "TEXT NOT NULL DEFAULT ''");
             EnsureColumn(conn, "fingerprints", "quality", "INTEGER NOT NULL DEFAULT 0");
             EnsureColumn(conn, "fingerprints", "enabled", "INTEGER NOT NULL DEFAULT 1");
@@ -324,6 +346,87 @@ ON CONFLICT(table_name) DO UPDATE SET version=$v, updated_at=$u;";
             }
         }
 
+        /// <summary>
+        /// Atomically replaces every table carried by a daily business snapshot.
+        /// No caller can observe a mixture of old and new table generations.
+        /// </summary>
+        public static void ReplaceBusinessSnapshot(
+            IReadOnlyDictionary<string, JArray> tables,
+            IReadOnlyDictionary<string, uint> versions)
+        {
+            if (tables == null) throw new ArgumentNullException(nameof(tables));
+            if (versions == null) throw new ArgumentNullException(nameof(versions));
+            foreach (string table in DailySyncTables)
+            {
+                if (!tables.ContainsKey(table))
+                    throw new InvalidDataException($"Snapshot table is missing: {table}");
+            }
+
+            lock (Sync)
+            {
+                Initialize();
+                using var conn = Open();
+                JArray snapshotUsers = EnsureSystemAdministrator(
+                    tables["users"] ?? new JArray(), ReadUsers(conn));
+                using var tx = conn.BeginTransaction();
+                foreach (string table in DailySyncTables)
+                {
+                    JArray array = string.Equals(table, "users",
+                        StringComparison.OrdinalIgnoreCase)
+                        ? snapshotUsers
+                        : tables[table] ?? new JArray();
+                    switch (table)
+                    {
+                        case "users": WriteUsers(conn, tx, array); break;
+                        case "classes": WriteClasses(conn, tx, array); break;
+                        case "permissions": WritePermissions(conn, tx, array); break;
+                        case "role_permissions": WriteRolePermissions(conn, tx, array); break;
+                        case "devices": WriteDevices(conn, tx, array); break;
+                    }
+
+                    using var cmd = conn.CreateCommand();
+                    cmd.Transaction = tx;
+                    cmd.CommandText = @"
+INSERT INTO table_meta(table_name, version, updated_at) VALUES($t,$v,$u)
+ON CONFLICT(table_name) DO UPDATE SET version=$v, updated_at=$u;";
+                    cmd.Parameters.AddWithValue("$t", table);
+                    cmd.Parameters.AddWithValue("$v",
+                        (long)(versions.TryGetValue(table, out uint version) ? version : 0));
+                    cmd.Parameters.AddWithValue("$u", DateTime.Now.ToString("o"));
+                    cmd.ExecuteNonQuery();
+                }
+                tx.Commit();
+            }
+        }
+
+        private static JArray EnsureSystemAdministrator(
+            JArray incomingUsers, JArray existingUsers)
+        {
+            JObject? incomingAdministrator = incomingUsers.OfType<JObject>()
+                .FirstOrDefault(row => SystemAdministratorPolicy.IsReservedId(
+                                           row.Value<string>("user_id")) ||
+                                       SystemAdministratorPolicy.IsReservedId(
+                                           row.Value<string>("user_code")));
+            JObject? existingAdministrator = existingUsers.OfType<JObject>()
+                .FirstOrDefault(row => SystemAdministratorPolicy.IsReservedId(
+                                           row.Value<string>("user_id")) ||
+                                       SystemAdministratorPolicy.IsReservedId(
+                                           row.Value<string>("user_code")));
+
+            User administrator = (incomingAdministrator ?? existingAdministrator)
+                ?.ToObject<User>() ?? SystemAdministratorPolicy.CreateDefault();
+            SystemAdministratorPolicy.Normalize(administrator);
+
+            var normalized = new JArray(incomingUsers.OfType<JObject>()
+                .Where(row => !SystemAdministratorPolicy.IsReservedId(
+                                  row.Value<string>("user_id")) &&
+                              !SystemAdministratorPolicy.IsReservedId(
+                                  row.Value<string>("user_code")))
+                .Select(row => row.DeepClone()));
+            normalized.Add(JObject.FromObject(administrator));
+            return normalized;
+        }
+
         /// <summary>从旧 JSON 缓存迁移（仅当业务库为空时）。</summary>
         public static void MigrateFromLocalCacheIfEmpty()
         {
@@ -404,8 +507,13 @@ ON CONFLICT(table_name) DO UPDATE SET version=$v, updated_at=$u;";
             {
                 Initialize();
                 using var conn = Open();
-                return ReadAllFpMetasUnlocked(conn)
-                    .FirstOrDefault(m => m.FingerprintId == fingerprintId);
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = @"SELECT fingerprint_id,user_id,user_name,finger_index,finger_name,
+quality,enabled,enroll_time,template_size,source_device,backup_status,note FROM fingerprints
+WHERE fingerprint_id=$id LIMIT 1";
+                cmd.Parameters.AddWithValue("$id", fingerprintId);
+                using var reader = cmd.ExecuteReader();
+                return reader.Read() ? MapFpMeta(reader) : null;
             }
         }
 
@@ -802,7 +910,7 @@ cabinet_assignments_json,fingerprint_id,password_salt,password_hash,enabled,crea
             var arr = new JArray();
             using var cmd = conn.CreateCommand();
             cmd.CommandText = @"SELECT device_id,device_name,device_number,ip_address,online,register_time,last_online_time,
-last_seen,offline_time,mesh_mac,is_root,firmware_version,status_json FROM devices";
+last_seen,offline_time,mesh_mac,is_root,firmware_version,hardware_version,status_json FROM devices";
             using var r = cmd.ExecuteReader();
             while (r.Read())
             {
@@ -821,13 +929,14 @@ last_seen,offline_time,mesh_mac,is_root,firmware_version,status_json FROM device
                     ["offline_time"] = r.IsDBNull(8) ? 0 : r.GetInt64(8),
                     ["mesh_mac"] = r.IsDBNull(9) ? "" : r.GetString(9),
                     ["is_root"] = !r.IsDBNull(10) && r.GetInt64(10) != 0,
-                    ["firmware_version"] = r.IsDBNull(11) ? "" : r.GetString(11)
+                    ["firmware_version"] = r.IsDBNull(11) ? "" : r.GetString(11),
+                    ["hardware_version"] = r.IsDBNull(12) ? "" : r.GetString(12)
                 };
-                if (!r.IsDBNull(12))
+                if (!r.IsDBNull(13))
                 {
                     try
                     {
-                        var status = JToken.Parse(r.GetString(12));
+                        var status = JToken.Parse(r.GetString(13));
                         obj["status"] = status;
                     }
                     catch
@@ -957,8 +1066,8 @@ VALUES($r,$0,$1,$2,$3,$t)";
                 using var cmd = conn.CreateCommand();
                 cmd.Transaction = tx;
                 cmd.CommandText = @"INSERT INTO devices(device_id,device_name,device_number,ip_address,online,register_time,last_online_time,
-last_seen,offline_time,mesh_mac,is_root,firmware_version,status_json)
-VALUES($id,$n,$number,$ip,$on,$rt,$lo,$ls,$of,$mac,$root,$fw,$st)";
+last_seen,offline_time,mesh_mac,is_root,firmware_version,hardware_version,status_json)
+VALUES($id,$n,$number,$ip,$on,$rt,$lo,$ls,$of,$mac,$root,$fw,$hw,$st)";
                 cmd.Parameters.AddWithValue("$id", token.Value<string>("device_id") ?? "");
                 cmd.Parameters.AddWithValue("$n", token.Value<string>("device_name") ?? "");
                 string number = token.Value<string>("device_number")?.Trim() ?? "";
@@ -973,6 +1082,7 @@ VALUES($id,$n,$number,$ip,$on,$rt,$lo,$ls,$of,$mac,$root,$fw,$st)";
                 cmd.Parameters.AddWithValue("$mac", token.Value<string>("mesh_mac") ?? "");
                 cmd.Parameters.AddWithValue("$root", (token.Value<bool?>("is_root") ?? false) ? 1 : 0);
                 cmd.Parameters.AddWithValue("$fw", token.Value<string>("firmware_version") ?? "");
+                cmd.Parameters.AddWithValue("$hw", token.Value<string>("hardware_version") ?? "");
                 string statusJson = token["status"]?.ToString(Formatting.None) ?? "{}";
                 cmd.Parameters.AddWithValue("$st", statusJson);
                 cmd.ExecuteNonQuery();

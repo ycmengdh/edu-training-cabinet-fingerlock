@@ -13,14 +13,17 @@
             <Setter Property="Height" Value="44" />
             <Setter Property="FontSize" Value="13" />
             <Setter Property="Padding" Value="38,4,12,4" />
-            <Setter Property="SelectionBrush" Value="{StaticResource PrimaryBrush}" />
-            <Setter Property="SelectionTextBrush" Value="White" />
+            <Setter Property="SelectionBrush" Value="{StaticResource InputSelectionBrush}" />
+            <Setter Property="SelectionTextBrush" Value="{StaticResource InputSelectionTextBrush}" />
             <Setter Property="SelectionOpacity" Value="1" />
         </Style>
         <Style x:Key="LoginPasswordBox" TargetType="PasswordBox" BasedOn="{StaticResource {x:Type PasswordBox}}">
             <Setter Property="Height" Value="44" />
             <Setter Property="FontSize" Value="13" />
             <Setter Property="Padding" Value="38,4,12,4" />
+            <Setter Property="SelectionBrush" Value="{StaticResource InputSelectionBrush}" />
+            <Setter Property="SelectionTextBrush" Value="{StaticResource InputSelectionTextBrush}" />
+            <Setter Property="SelectionOpacity" Value="1" />
         </Style>
         <Style x:Key="LoginActionButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
             <Setter Property="Height" Value="44" />
@@ -55,7 +58,6 @@
             </Setter>
         </Style>
     </Window.Resources>
-
     <Grid>
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="320" />
@@ -79,14 +81,13 @@
                                SnapsToDevicePixels="True" />
                     </Border>
                     <StackPanel Margin="14,0,0,0" VerticalAlignment="Center">
-                        <TextBlock Text="实训中心" Foreground="{StaticResource SidebarTextBrush}" FontSize="14" FontWeight="SemiBold" />
-                        <TextBlock Text="设备管理控制台" Foreground="{StaticResource SidebarMutedBrush}" FontSize="10" Margin="0,4,0,0" />
+                        <TextBlock Text="实训柜权限管理系统" Foreground="{StaticResource SidebarTextBrush}" FontSize="14" FontWeight="SemiBold" />
                     </StackPanel>
                 </StackPanel>
 
                 <StackPanel Grid.Row="1" VerticalAlignment="Center">
-                    <TextBlock Text="实训柜" Foreground="{StaticResource SidebarTextBrush}" FontSize="34" FontWeight="SemiBold" />
-                    <TextBlock Text="指纹权限管理系统" Foreground="{StaticResource SidebarTextBrush}" FontSize="16" Margin="0,8,0,0" />
+                    <TextBlock Text="实训柜权限管理" Foreground="{StaticResource SidebarTextBrush}" FontSize="34" FontWeight="SemiBold" />
+                    <TextBlock Text="欢迎使用" Foreground="{StaticResource SidebarTextBrush}" FontSize="16" Margin="0,8,0,0" />
                     <Border Width="42" Height="3" Background="{StaticResource AccentBrush}"
                             HorizontalAlignment="Left" Margin="0,22,0,0" />
                     <TextBlock Text="业务数据已就绪，请输入账号登录" Foreground="{StaticResource SidebarMutedBrush}" FontSize="11"
@@ -129,7 +130,8 @@
             <StackPanel Grid.Row="1" VerticalAlignment="Center">
                 <TextBlock Text="账号 ID" Style="{StaticResource LabelText}" Margin="0,0,0,8" FontSize="12" />
                 <Grid>
-                    <TextBox x:Name="UserIdBox" Style="{StaticResource LoginTextBox}" Text="admin" />
+                    <TextBox x:Name="UserIdBox" Style="{StaticResource LoginTextBox}"
+                             SelectionOpacity="0.55" Text="admin" />
                     <TextBlock Text="&#xE77B;" FontFamily="{StaticResource AppIconFont}" FontSize="15"
                                Foreground="{StaticResource SubTextBrush}" Margin="14,0,0,0" HorizontalAlignment="Left"
                                VerticalAlignment="Center" IsHitTestVisible="False" />
@@ -137,9 +139,11 @@
 
                 <TextBlock Text="密码" Style="{StaticResource LabelText}" Margin="0,16,0,8" FontSize="12" />
                     <Grid>
-                        <PasswordBox x:Name="PasswordBox" Style="{StaticResource LoginPasswordBox}" />
+                        <PasswordBox x:Name="PasswordBox" Style="{StaticResource LoginPasswordBox}"
+                                     SelectionOpacity="0.55" />
                         <TextBox x:Name="PasswordTextBox" Style="{StaticResource LoginTextBox}"
-                                 Visibility="Collapsed" Padding="38,4,48,4" />
+                                 Visibility="Collapsed" Padding="38,4,48,4" MaxLength="128"
+                                 SelectionOpacity="0.55" />
                         <TextBlock Text="&#xE72E;" FontFamily="Segoe MDL2 Assets" FontSize="15"
                                    Foreground="{StaticResource SubTextBrush}" Margin="14,0,0,0"
                                    HorizontalAlignment="Left" VerticalAlignment="Center"
@@ -156,8 +160,9 @@
 
 
 
-                <Button x:Name="LoginButton" Content="登录" Style="{StaticResource LoginActionButton}"
-                        Margin="0,22,0,0" Click="LoginButton_Click" />
+                <Button x:Name="LoginButton" Style="{StaticResource LoginActionButton}" Margin="0,22,0,0" Click="LoginButton_Click">
+                    <TextBlock Text="登录" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                </Button>
                 <CheckBox x:Name="RememberPasswordCheckBox" 
                           Content="记住密码" 
                           Margin="0,12,0,0" 

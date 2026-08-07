@@ -4,7 +4,7 @@ using System.Windows.Controls;
 namespace CabinetLock
 {
     /// <summary>
-    /// 角色默认权限配置页（仅 admin 可访问）
+    /// 角色默认权限配置页（教师只读，只有 admin 可以修改）
     /// 3 行（admin/teacher/student）× 4 列（界面 Lock1-4）的权限矩阵。
     /// 保存只更新新用户默认权限模板，不广播、不改变已有用户权限。
     /// </summary>
@@ -18,9 +18,8 @@ namespace CabinetLock
             Loaded += async (s, e) =>
             {
                 _canEdit = DataScopeContext.Instance.IsAdmin;
-                PermissionMatrix.IsEnabled = _canEdit;
+                ApplyEditingState();
                 await LoadRolePermissionsAsync();
-                if (!_canEdit) PageStatusText.Text = "仅系统管理员可以修改默认权限模板";
             };
         }
 
@@ -61,7 +60,9 @@ namespace CabinetLock
             StudentLock1.IsChecked = student.Lock1;
             StudentLock2.IsChecked = student.Lock2;
             StudentLock3.IsChecked = student.Lock3;
-            PageStatusText.Text = "默认权限模板已加载";
+            PageStatusText.Text = _canEdit
+                ? "默认权限模板已加载"
+                : "只读查看 · 仅系统管理员可以修改默认权限模板";
         }
 
         /// <summary>保存按钮：只保存新用户默认权限模板。</summary>
@@ -163,6 +164,22 @@ namespace CabinetLock
             SaveButton.IsEnabled = !busy && _canEdit;
             ReloadButton.IsEnabled = !busy;
             if (!string.IsNullOrEmpty(status)) PageStatusText.Text = status;
+        }
+
+        private void ApplyEditingState()
+        {
+            SaveButton.Visibility = _canEdit ? Visibility.Visible : Visibility.Collapsed;
+            foreach (CheckBox checkBox in new[]
+                     {
+                         AdminLock0, AdminLock1, AdminLock2, AdminLock3,
+                         TeacherLock0, TeacherLock1, TeacherLock2, TeacherLock3,
+                         StudentLock0, StudentLock1, StudentLock2, StudentLock3
+                     })
+            {
+                checkBox.IsHitTestVisible = _canEdit;
+                checkBox.Focusable = _canEdit;
+                checkBox.IsTabStop = _canEdit;
+            }
         }
     }
 }

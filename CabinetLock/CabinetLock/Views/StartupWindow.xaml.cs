@@ -672,6 +672,8 @@ namespace CabinetLock
             if (_navigating) return;
             _navigating = true;
             try { App.CabinetBindingService.MigrateLegacyBindings(); } catch { }
+            if (Application.Current is App app)
+                app.StartCabinetBackgroundServicesOnce();
             var login = new LoginWindow();
             login.Show();
             Close();

@@ -28,6 +28,12 @@ namespace CabinetLock
         /// <summary>是否为 Mesh 根节点</summary>
         public bool IsRoot { get; set; }
 
+        /// <summary>设备最近一次 REGISTER 上报的固件版本。</summary>
+        public string FirmwareVersion { get; set; } = "";
+
+        /// <summary>设备最近一次 REGISTER 上报的硬件兼容版本。</summary>
+        public string HardwareVersion { get; set; } = "";
+
         /// <summary>最近一次柜机状态响应；直连与 Mesh 共用。</summary>
         public DeviceRuntimeStatus Status { get; set; } = new();
 

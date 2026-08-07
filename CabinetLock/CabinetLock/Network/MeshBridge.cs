@@ -242,6 +242,22 @@ namespace CabinetLock
             }
         }
 
+        public void ForgetDevice(string deviceId, string? meshMac = null)
+        {
+            if (string.IsNullOrWhiteSpace(deviceId) && string.IsNullOrWhiteSpace(meshMac)) return;
+            lock (_devicesLock)
+            {
+                string[] keys = _devices.Where(item =>
+                        string.Equals(item.Value.DeviceId, deviceId,
+                            StringComparison.OrdinalIgnoreCase) ||
+                        (!string.IsNullOrWhiteSpace(meshMac) && string.Equals(
+                            item.Value.MeshMac, meshMac, StringComparison.OrdinalIgnoreCase)))
+                    .Select(item => item.Key)
+                    .ToArray();
+                foreach (string key in keys) _devices.Remove(key);
+            }
+        }
+
         /// <summary>当前已知设备总数（含离线/根节点，调试用）。</summary>
         public int KnownDeviceCount
         {
@@ -518,13 +534,19 @@ namespace CabinetLock
                 device.IsOnline = true;
                 device.LastSeen = DateTime.Now;
 
-                // REGISTER 时刷新名称 / 根节点标记
-                if (string.Equals(msg.Cmd, Protocol.CmdRegister, StringComparison.OrdinalIgnoreCase) &&
-                    msg.Data is Newtonsoft.Json.Linq.JObject jo)
+                bool isRegister = string.Equals(
+                    msg.Cmd, Protocol.CmdRegister, StringComparison.OrdinalIgnoreCase);
+                bool isConfigResponse = string.Equals(
+                    msg.Cmd, Protocol.CmdConfigResponse, StringComparison.OrdinalIgnoreCase);
+                if ((isRegister || isConfigResponse) &&
+                    msg.Data is Newtonsoft.Json.Linq.JObject metadata)
                 {
-                    string? name = jo["device_name"]?.ToString();
-                    if (!string.IsNullOrWhiteSpace(name)) device.DeviceName = name!;
+                    MergeReportedMetadata(device, metadata);
+                }
 
+                // REGISTER 时刷新根节点标记
+                if (isRegister && msg.Data is Newtonsoft.Json.Linq.JObject jo)
+                {
                     bool isRoot = false;
                     var rootToken = jo["is_root"];
                     if (rootToken != null && rootToken.Type != Newtonsoft.Json.Linq.JTokenType.Null)
@@ -570,6 +592,22 @@ namespace CabinetLock
             }
 
             return device;
+        }
+
+        private static void MergeReportedMetadata(
+            DeviceClient device, Newtonsoft.Json.Linq.JObject data)
+        {
+            string? name = data["device_name"]?.ToString();
+            if (!string.IsNullOrWhiteSpace(name))
+                device.DeviceName = name.Trim();
+
+            string? firmwareVersion = data["firmware_version"]?.ToString();
+            if (!string.IsNullOrWhiteSpace(firmwareVersion))
+                device.FirmwareVersion = firmwareVersion.Trim();
+
+            string? hardwareVersion = data["hardware_version"]?.ToString();
+            if (!string.IsNullOrWhiteSpace(hardwareVersion))
+                device.HardwareVersion = hardwareVersion.Trim();
         }
 
         /// <summary>规范化 MAC：AA:BB:... 大写；非 MAC 返回空。</summary>

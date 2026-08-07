@@ -7,9 +7,11 @@ namespace CabinetLock
     {
         private readonly string? _presetDeviceId;
         private readonly string? _presetUserId;
+        private readonly bool _fixedUserMode;
         private List<User> _users = new();
         private List<ClassInfo> _classes = new();
         private bool _loadingSelection;
+        private bool _dataLoaded;
         private bool _enrolling;
         private string? _lastDeviceId;
 
@@ -18,47 +20,66 @@ namespace CabinetLock
         public string? EnrolledDeviceId => _lastDeviceId;
         public string? EnrolledUserId { get; private set; }
 
-        public EnrollFingerprintWindow() : this(null, null)
+        public EnrollFingerprintWindow() : this(null, null, false)
         {
         }
 
-        public EnrollFingerprintWindow(string? presetDeviceId, string? presetUserId = null)
+        public EnrollFingerprintWindow(
+            string? presetDeviceId, string? presetUserId = null,
+            bool fixedStudentMode = false, bool fixedUserMode = false)
         {
             _presetDeviceId = presetDeviceId;
             _presetUserId = presetUserId;
+            _fixedUserMode = fixedStudentMode || fixedUserMode;
             InitializeComponent();
-            LoadData();
+            if (_fixedUserMode)
+            {
+                Height = 620;
+                SubtitleText.Text = "当前用户已锁定；采集使用柜机 0 号临时槽，验证后清空，只保存用户模板。";
+                UserSelectionPanel.Visibility = Visibility.Collapsed;
+                FixedStudentPanel.Visibility = Visibility.Visible;
+            }
+            StepHint.Text = "正在读取用户和采集设备";
+            StepDetail.Text = "窗口已打开，数据加载完成后即可录入";
+            SetSelectionEnabled(false);
+            Loaded += async (_, _) => await LoadDataAsync();
         }
 
-        private void LoadData()
+        private async Task LoadDataAsync()
         {
+            if (_dataLoaded) return;
+            _dataLoaded = true;
             _loadingSelection = true;
             try
             {
-                _users = App.UserService.GetVisibleUsers()
-                    .Where(user => DataScopeContext.Instance.CanModify(user))
-                    .OrderBy(user => user.Name)
-                    .ThenBy(user => user.UserId)
-                    .ToList();
-                _classes = App.ClassService.GetVisible()
-                    .Where(item => item.Enabled)
-                    .OrderBy(item => item.Name)
-                    .ToList();
+                SelectionData data = await Task.Run(BuildSelectionData);
+                _users = data.Users;
+                _classes = data.Classes;
                 RoleCombo.ItemsSource = FingerprintSelectionData.BuildRoles(_users);
                 ClassCombo.ItemsSource = _classes.Select(item => new FingerprintClassOption
                 {
                     ClassId = item.ClassId,
                     DisplayText = $"{item.Name} ({item.ClassId})"
                 }).ToList();
-                DeviceCombo.ItemsSource = FingerprintSelectionData.LoadOnlineCabinets();
+                DeviceCombo.ItemsSource = data.Devices;
 
                 User? preset = _users.FirstOrDefault(user =>
                     string.Equals(user.UserId, _presetUserId, StringComparison.OrdinalIgnoreCase));
+                if (!string.IsNullOrWhiteSpace(_presetUserId) && preset == null)
+                {
+                    FixedStudentNameText.Text = "学生信息不可用";
+                    FixedStudentMetaText.Text = "当前学生不存在，或没有该学生的管理权限";
+                    StepHint.Text = "无法读取当前学生";
+                    StepDetail.Text = "请关闭窗口并刷新学生详情后重试";
+                    ResultText.Text = "为了避免将指纹录入到其他学生，已停止本次录入。";
+                    return;
+                }
                 if (preset != null)
                 {
                     RoleCombo.SelectedValue = preset.Role;
                     if (string.Equals(preset.Role, "student", StringComparison.OrdinalIgnoreCase))
                         ClassCombo.SelectedValue = preset.ClassId;
+                    if (_fixedUserMode) LoadFixedStudent(preset);
                 }
                 else if (RoleCombo.Items.Count > 0)
                 {
@@ -68,14 +89,26 @@ namespace CabinetLock
                     "student", StringComparison.OrdinalIgnoreCase);
                 ClassCombo.IsEnabled = studentRole;
                 ClassCombo.Visibility = studentRole ? Visibility.Visible : Visibility.Hidden;
-                RefreshUserOptions();
-                if (preset != null) UserCombo.SelectedValue = preset.UserId;
+                if (_fixedUserMode && preset != null)
+                {
+                    UserCombo.ItemsSource = new[]
+                    {
+                        new FingerprintUserOption { User = preset }
+                    };
+                    UserCombo.SelectedIndex = 0;
+                }
+                else
+                {
+                    RefreshUserOptions();
+                    if (preset != null) UserCombo.SelectedValue = preset.UserId;
+                }
                 RefreshFingerOptions();
 
                 if (!string.IsNullOrWhiteSpace(_presetDeviceId))
                     DeviceCombo.SelectedValue = _presetDeviceId;
                 if (DeviceCombo.SelectedIndex < 0 && DeviceCombo.Items.Count > 0)
                     DeviceCombo.SelectedIndex = 0;
+                SetSelectionEnabled(true);
             }
             catch (Exception ex)
             {
@@ -87,6 +120,34 @@ namespace CabinetLock
                 _loadingSelection = false;
                 UpdateSelectionState();
             }
+        }
+
+        private SelectionData BuildSelectionData()
+        {
+            List<User> users;
+            if (!string.IsNullOrWhiteSpace(_presetUserId))
+            {
+                User? preset = App.UserService.GetUser(_presetUserId);
+                users = preset != null && DataScopeContext.Instance.CanModify(preset)
+                    ? new List<User> { preset }
+                    : new List<User>();
+            }
+            else
+            {
+                users = App.UserService.GetVisibleUsers()
+                    .Where(user => DataScopeContext.Instance.CanModify(user))
+                    .OrderBy(user => user.Name)
+                    .ThenBy(user => user.UserId)
+                    .ToList();
+            }
+
+            List<ClassInfo> classes = App.ClassService.GetVisible()
+                .Where(item => item.Enabled)
+                .OrderBy(item => item.Name)
+                .ToList();
+            List<FingerprintDeviceOption> devices =
+                FingerprintSelectionData.LoadOnlineCabinets();
+            return new SelectionData(users, classes, devices);
         }
 
         private void RoleCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -138,40 +199,112 @@ namespace CabinetLock
         private void RefreshFingerOptions()
         {
             string userId = (UserCombo.SelectedItem as FingerprintUserOption)?.UserId ?? "";
-            List<FingerprintTemplate> templates = App.FingerprintTemplateService.GetAllTemplates()
-                .Where(item => string.Equals(item.UserId, userId, StringComparison.OrdinalIgnoreCase))
-                .OrderBy(item => item.EnrollTime).ThenBy(item => item.FingerprintId).ToList();
-            FingerCombo.ItemsSource = FingerOption.All.Select(item =>
+            List<FingerprintTemplate> templates =
+                App.FingerprintTemplateService.GetTemplatesForUser(userId);
+            List<FingerOption> options = FingerOption.All.Select(item =>
             {
                 FingerprintTemplate? existing = templates.FirstOrDefault(template =>
                     template.FingerIndex == item.FingerIndex);
                 return new FingerOption
                 {
                     FingerIndex = item.FingerIndex,
+                    BaseName = item.BaseName,
                     ExistingFingerprintId = existing?.FingerprintId,
                     DisplayText = existing == null
                         ? $"{item.BaseName} · 新增"
                         : $"{item.BaseName} · 覆盖现有 #{existing.FingerprintId}"
                 };
             }).ToList();
-            int firstUnused = ((IEnumerable<FingerOption>)FingerCombo.ItemsSource)
-                .Select((item, index) => (item, index))
-                .FirstOrDefault(pair => !pair.item.ExistingFingerprintId.HasValue).index;
-            FingerCombo.SelectedIndex = firstUnused;
+            FingerCombo.ItemsSource = options;
+            if (_fixedUserMode)
+            {
+                FingerCombo.SelectedValue = 6;
+            }
+            else
+            {
+                int firstUnused = options.FindIndex(item => !item.ExistingFingerprintId.HasValue);
+                FingerCombo.SelectedIndex = firstUnused >= 0 ? firstUnused : 0;
+            }
         }
 
-        private void UpdateSelectionState()
+        private void LoadFixedStudent(User student)
+        {
+            string className = _classes.FirstOrDefault(item => string.Equals(
+                item.ClassId, student.ClassId, StringComparison.OrdinalIgnoreCase))?.Name ??
+                (string.IsNullOrWhiteSpace(student.ClassId) ? "未分班" : student.ClassId);
+            FixedStudentNameText.Text = string.IsNullOrWhiteSpace(student.Name)
+                ? student.DisplayId : student.Name;
+            FixedStudentMetaText.Text = $"学号：{student.DisplayId}  ·  班级：{className}  ·  学生信息已锁定";
+        }
+
+        private void UpdateSelectionState(bool updateMessage = true)
         {
             if (_loadingSelection || _enrolling) return;
             EnrollButton.IsEnabled = UserCombo.SelectedItem is FingerprintUserOption &&
                 DeviceCombo.SelectedItem is FingerprintDeviceOption &&
                 FingerCombo.SelectedItem is FingerOption;
-            if (UserCombo.SelectedItem is FingerprintUserOption selected)
+            if (_fixedUserMode && DeviceCombo.SelectedItem is not FingerprintDeviceOption)
             {
-                int count = App.FingerprintTemplateService.GetUsedFingerIndexes(selected.UserId).Count;
-                StepHint.Text = $"已选择 {selected.User.Name}，当前有 {count} 枚用户指纹";
+                if (updateMessage)
+                {
+                    StepHint.Text = DeviceCombo.Items.Count == 0
+                        ? "没有在线采集设备" : "请选择采集设备";
+                    StepDetail.Text = DeviceCombo.Items.Count == 0
+                        ? "请检查柜机连接状态后重试" : "学生信息已锁定，可调整要录入的手指";
+                }
+                return;
+            }
+            if (updateMessage &&
+                UserCombo.SelectedItem is FingerprintUserOption selected &&
+                FingerCombo.SelectedItem is FingerOption finger)
+            {
+                int targetId;
+                try
+                {
+                    targetId = ResolveTargetFingerprintId(selected, finger);
+                }
+                catch (InvalidOperationException ex)
+                {
+                    EnrollButton.IsEnabled = false;
+                    StepHint.Text = "没有可用的指纹 ID";
+                    StepDetail.Text = ex.Message;
+                    return;
+                }
+                StepHint.Text = finger.ExistingFingerprintId.HasValue
+                    ? $"{finger.BaseName}将覆盖指纹 ID #{targetId}"
+                    : $"{finger.BaseName}将录入到指纹 ID #{targetId}";
+                StepDetail.Text = $"{selected.User.Name} · 采集 4 次后验证 2 次，两次通过才保存";
             }
         }
+
+        private static int ResolveTargetFingerprintId(
+            FingerprintUserOption user, FingerOption finger)
+        {
+            if (finger.ExistingFingerprintId.HasValue)
+                return finger.ExistingFingerprintId.Value;
+
+            int? specifiedId = user.User.FingerprintId;
+            if (specifiedId is > 0 &&
+                App.FingerprintTemplateService.GetTemplate(specifiedId.Value) == null)
+            {
+                return specifiedId.Value;
+            }
+
+            return App.UserService.GetNextFingerprintIdLocal();
+        }
+
+        private static string FormatProgressDetail(
+            string phase, int step, int total, int targetFingerprintId) => phase switch
+        {
+            "place_1" or "lift_1" => $"采集 1/4 · 目标指纹 ID #{targetFingerprintId}",
+            "place_2" or "lift_2" => $"采集 2/4 · 目标指纹 ID #{targetFingerprintId}",
+            "place_3" or "lift_3" => $"采集 3/4 · 目标指纹 ID #{targetFingerprintId}",
+            "place_4" or "storing" => $"采集 4/4 · 目标指纹 ID #{targetFingerprintId}",
+            "verify_1" => $"验证 1/2 · 目标指纹 ID #{targetFingerprintId}",
+            "verify_2" => $"验证 2/2 · 目标指纹 ID #{targetFingerprintId}",
+            "success" => $"验证 2/2 · 模板已导出，临时槽 0 已清空",
+            _ => $"进度 {step}/{total} · 目标指纹 ID #{targetFingerprintId}"
+        };
 
         private async void EnrollButton_Click(object sender, RoutedEventArgs e)
         {
@@ -195,8 +328,9 @@ namespace CabinetLock
             try
             {
                 bool overwrite = fingerOption.ExistingFingerprintId.HasValue;
-                int targetFingerprintId = fingerOption.ExistingFingerprintId ??
-                    App.UserService.GetNextFingerprintIdLocal();
+                int targetFingerprintId = ResolveTargetFingerprintId(userOption, fingerOption);
+                StepHint.Text = $"准备录入{fingerOption.BaseName}";
+                StepDetail.Text = $"临时槽 0 采集 · 模板 ID #{targetFingerprintId} · 完成后验证 2 次";
                 FingerprintEnrollmentResult result = await App.CommandService.EnrollFingerprintAsync(
                     deviceOption.DeviceId, user.UserId, targetFingerprintId, true, 210_000,
                     (phase, step, total, hint) => Dispatcher.Invoke(() =>
@@ -204,13 +338,15 @@ namespace CabinetLock
                         EnrollProgress.Value = step;
                         EnrollProgress.Maximum = total;
                         StepHint.Text = hint;
-                        StepDetail.Text = $"步骤 {step}/{total}（{phase}）";
+                        StepDetail.Text = FormatProgressDetail(
+                            phase, step, total, targetFingerprintId);
                         StepIcon.Text = phase.StartsWith("verify") ? "\uE73E" : "\uE928";
                     }));
                 if (!result.Success)
                 {
                     StepIcon.Text = "\uE783";
                     StepHint.Text = "录入失败";
+                    StepDetail.Text = $"指纹 ID #{targetFingerprintId} · 未保存";
                     ResultText.Text = string.IsNullOrWhiteSpace(result.ErrorMessage)
                         ? "柜机未能完成指纹录入" : result.ErrorMessage;
                     return;
@@ -220,13 +356,13 @@ namespace CabinetLock
                 EnrolledTemplate = result.TemplateBytes;
                 EnrolledUserId = user.UserId;
                 string summary = overwrite
-                    ? $"覆盖成功，{fingerOption.BaseName} #{result.FingerprintId} 已更新并绑定 {user.Name}。"
-                    : $"录入成功，{fingerOption.BaseName} #{result.FingerprintId} 已新增并绑定 {user.Name}。";
+                    ? $"覆盖成功，{user.Name} 的{fingerOption.BaseName}模板 #{result.FingerprintId} 已更新。"
+                    : $"录入成功，{user.Name} 的{fingerOption.BaseName}模板 #{result.FingerprintId} 已保存。";
                 if (result.TemplateBytes == null || result.TemplateBytes.Length == 0)
                 {
                     StepIcon.Text = "\uE783";
                     StepHint.Text = "模板导出失败";
-                    ResultText.Text = summary + "\n柜机已录入，但没有取得模板，无法自动同步或测试。";
+                    ResultText.Text = summary + "\n没有取得模板，无法保存到用户模板库。";
                     return;
                 }
 
@@ -244,10 +380,6 @@ namespace CabinetLock
                     return;
                 }
 
-                user = App.UserService.GetUser(user.UserId) ?? user;
-                App.CabinetBindingService.AssignFingerprintToEmptyAssignments(
-                    user.UserId, result.FingerprintId);
-                user = App.UserService.GetUser(user.UserId) ?? user;
                 if (App.SdStorageService.IsAvailable)
                 {
                     bool uploaded = await App.FingerprintTemplateService.UploadToSdAsync(result.FingerprintId);
@@ -258,19 +390,13 @@ namespace CabinetLock
                     summary += "\nSD 当前不可用，模板暂存本机。";
                 }
 
-                StepHint.Text = "正在校验绑定柜机";
-                IReadOnlyList<UserCabinetSyncResult> sync = await App.CabinetSyncService
-                    .VerifyAndSyncUserAsync(user);
-                int changed = sync.Count(item => item.Success && item.Changed);
-                int unchanged = sync.Count(item => item.Success && !item.Changed);
-                int failed = sync.Count(item => !item.Success);
-                summary += $"\n在线绑定柜机：已更新 {changed}，无需更新 {unchanged}，失败 {failed}。";
-
-                StepIcon.Text = failed == 0 ? "\uE73E" : "\uE7BA";
-                StepHint.Text = failed == 0 ? "录入及同步完成" : "录入完成，部分柜机待重试";
-                StepDetail.Text = $"指纹 ID：{result.FingerprintId}";
+                summary += "\n柜机 0 号临时槽已清空。需要使用时，请在柜子详情中点击“绑定用户”再下发。";
+                StepIcon.Text = "\uE73E";
+                StepHint.Text = "录入完成，等待绑定";
+                StepDetail.Text = $"用户模板 ID：{result.FingerprintId} · 柜机正式槽位未写入";
                 ResultText.Text = summary;
                 TestButton.Visibility = Visibility.Visible;
+                RefreshFingerOptions();
             }
             catch (Exception ex)
             {
@@ -283,7 +409,7 @@ namespace CabinetLock
                 _enrolling = false;
                 CancelButton.Content = "关闭";
                 SetSelectionEnabled(true);
-                UpdateSelectionState();
+                UpdateSelectionState(updateMessage: false);
             }
         }
 
@@ -296,18 +422,23 @@ namespace CabinetLock
 
             public static IReadOnlyList<FingerOption> All { get; } = new[]
             {
-                new FingerOption { FingerIndex = 1, BaseName = "左手拇指", DisplayText = "左手拇指" },
-                new FingerOption { FingerIndex = 2, BaseName = "左手食指", DisplayText = "左手食指" },
-                new FingerOption { FingerIndex = 3, BaseName = "左手中指", DisplayText = "左手中指" },
-                new FingerOption { FingerIndex = 4, BaseName = "左手无名指", DisplayText = "左手无名指" },
-                new FingerOption { FingerIndex = 5, BaseName = "左手小指", DisplayText = "左手小指" },
                 new FingerOption { FingerIndex = 6, BaseName = "右手拇指", DisplayText = "右手拇指" },
                 new FingerOption { FingerIndex = 7, BaseName = "右手食指", DisplayText = "右手食指" },
                 new FingerOption { FingerIndex = 8, BaseName = "右手中指", DisplayText = "右手中指" },
                 new FingerOption { FingerIndex = 9, BaseName = "右手无名指", DisplayText = "右手无名指" },
-                new FingerOption { FingerIndex = 10, BaseName = "右手小指", DisplayText = "右手小指" }
+                new FingerOption { FingerIndex = 10, BaseName = "右手小指", DisplayText = "右手小指" },
+                new FingerOption { FingerIndex = 1, BaseName = "左手拇指", DisplayText = "左手拇指" },
+                new FingerOption { FingerIndex = 2, BaseName = "左手食指", DisplayText = "左手食指" },
+                new FingerOption { FingerIndex = 3, BaseName = "左手中指", DisplayText = "左手中指" },
+                new FingerOption { FingerIndex = 4, BaseName = "左手无名指", DisplayText = "左手无名指" },
+                new FingerOption { FingerIndex = 5, BaseName = "左手小指", DisplayText = "左手小指" }
             };
         }
+
+        private sealed record SelectionData(
+            List<User> Users,
+            List<ClassInfo> Classes,
+            List<FingerprintDeviceOption> Devices);
 
         private void SetSelectionEnabled(bool enabled)
         {

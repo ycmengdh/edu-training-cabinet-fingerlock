@@ -58,6 +58,27 @@ public class MeshBridgePresenceTests
     }
 
     [Fact]
+    public void ConfigResponse_FillsMissingVersions_WithoutClearingReportedValues()
+    {
+        var bridge = new MeshBridge();
+        Receive(bridge,
+            "{\"cmd\":\"HEARTBEAT\",\"device_id\":\"CABINET_001\",\"data\":{}}");
+
+        Receive(bridge,
+            "{\"cmd\":\"CONFIG_RESPONSE\",\"device_id\":\"CABINET_001\",\"data\":{" +
+            "\"firmware_version\":\"3.4.0-idf\",\"hardware_version\":\"cabinet-v1\"}}");
+        DeviceClient cabinet = Assert.Single(bridge.Devices);
+        Assert.Equal("3.4.0-idf", cabinet.FirmwareVersion);
+        Assert.Equal("cabinet-v1", cabinet.HardwareVersion);
+
+        Receive(bridge,
+            "{\"cmd\":\"CONFIG_RESPONSE\",\"device_id\":\"CABINET_001\",\"data\":{" +
+            "\"firmware_version\":\"\",\"hardware_version\":null}}");
+        Assert.Equal("3.4.0-idf", cabinet.FirmwareVersion);
+        Assert.Equal("cabinet-v1", cabinet.HardwareVersion);
+    }
+
+    [Fact]
     public void EspBootLog_IsMarkedAsDeviceRestart()
     {
         var bridge = new MeshBridge();

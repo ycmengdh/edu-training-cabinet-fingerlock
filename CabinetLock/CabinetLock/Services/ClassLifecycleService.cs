@@ -98,13 +98,11 @@ namespace CabinetLock
             if (!plan.ClassInfo.Enabled)
                 return ClassLifecycleResult.Succeeded("班级已经停用");
 
+            if (!App.ClassService.SetEnabled(plan.ClassInfo.ClassId, false))
+                return ClassLifecycleResult.Failed("班级停用状态保存失败，请重试");
             ClassLifecycleResult cleanup = await CleanupCabinetsAsync(
                 plan, progress, cancellationToken).ConfigureAwait(false);
             if (!cleanup.Success) return cleanup;
-
-            progress?.Report(new ClassLifecycleProgress(95, "正在提交班级停用状态"));
-            if (!App.ClassService.SetEnabled(plan.ClassInfo.ClassId, false))
-                return ClassLifecycleResult.Failed("柜机已清理，但班级停用状态保存失败，请重试");
             progress?.Report(new ClassLifecycleProgress(100, "班级已停用，柜机权限与指纹均已清理"));
             return ClassLifecycleResult.Succeeded("班级停用完成");
         }
@@ -128,30 +126,44 @@ namespace CabinetLock
                 .Where(device => device.IsOnline && !device.IsRoot)
                 .Select(device => device.DeviceId)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            string[] offline = deviceIds.Where(id => !online.Contains(id)).ToArray();
-            if (offline.Length > 0)
-                return ClassLifecycleResult.Failed("以下已分配柜机离线，无法完成恢复：" + string.Join("、", offline));
-
             var failures = new List<string>();
+            int queued = 0;
             for (int index = 0; index < deviceIds.Length; index++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 string deviceId = deviceIds[index];
+                if (!online.Contains(deviceId))
+                {
+                    App.CabinetSyncQueueService.EnqueueCabinet(
+                        deviceId, "班级启用后恢复柜机数据");
+                    queued++;
+                    progress?.Report(new ClassLifecycleProgress(
+                        10 + (index + 1) * 85 / deviceIds.Length,
+                        $"{deviceId} 离线，已加入待同步队列"));
+                    continue;
+                }
                 int basePercent = 10 + index * 85 / deviceIds.Length;
                 var deviceProgress = new Progress<string>(message => progress?.Report(
                     new ClassLifecycleProgress(basePercent, $"{deviceId}：{message}")));
                 CabinetDataSyncResult result = await App.CabinetSyncService.SyncCabinetDataAsync(
                     deviceId, deviceProgress, cancellationToken).ConfigureAwait(false);
-                if (!result.Success) failures.Add($"{deviceId}：{result.FormatForDisplay()}");
+                if (!result.Success)
+                {
+                    failures.Add($"{deviceId}：{result.FormatForDisplay()}");
+                    App.CabinetSyncQueueService.EnqueueCabinet(
+                        deviceId, "班级启用同步失败后重试");
+                    queued++;
+                }
                 progress?.Report(new ClassLifecycleProgress(
                     10 + (index + 1) * 85 / deviceIds.Length,
                     $"已处理柜机 {index + 1}/{deviceIds.Length}"));
             }
 
-            if (failures.Count > 0)
-                return ClassLifecycleResult.Failed("部分柜机恢复失败，可直接重试", failures);
+            if (queued > 0) App.CabinetSyncQueueService.Trigger();
             progress?.Report(new ClassLifecycleProgress(100, "班级已启用，全部柜机数据已校验"));
-            return ClassLifecycleResult.Succeeded("班级启用与柜机恢复完成");
+            return ClassLifecycleResult.Succeeded(queued == 0
+                ? "班级启用与柜机恢复完成"
+                : $"班级已启用，{queued} 台柜机将在在线后继续同步");
         }
 
         private async Task<ClassLifecycleResult> DeleteAsync(
@@ -159,7 +171,7 @@ namespace CabinetLock
             CancellationToken cancellationToken)
         {
             ClassLifecycleResult cleanup = await CleanupCabinetsAsync(
-                plan, progress, cancellationToken).ConfigureAwait(false);
+                plan, progress, cancellationToken, enqueueRetries: false).ConfigureAwait(false);
             if (!cleanup.Success) return cleanup;
 
             progress?.Report(new ClassLifecycleProgress(88, "正在清理学生、权限和指纹模板"));
@@ -196,13 +208,18 @@ namespace CabinetLock
             if (!App.ClassService.Delete(plan.ClassInfo.ClassId))
                 return ClassLifecycleResult.Failed("学生已清理，但班级记录删除失败，请重试");
 
+            foreach (string deviceId in plan.DeviceFingerprints.Keys)
+                App.CabinetSyncQueueService.EnqueueCabinet(
+                    deviceId, "班级删除后最终核对");
+            App.CabinetSyncQueueService.Trigger();
+
             progress?.Report(new ClassLifecycleProgress(100, "班级及关联学生数据已全部删除"));
             return ClassLifecycleResult.Succeeded("班级删除完成");
         }
 
         private static async Task<ClassLifecycleResult> CleanupCabinetsAsync(
             ClassLifecyclePlan plan, IProgress<ClassLifecycleProgress>? progress,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken, bool enqueueRetries = true)
         {
             string[] deviceIds = plan.DeviceFingerprints.Keys.OrderBy(id => id).ToArray();
             if (deviceIds.Length == 0)
@@ -212,18 +229,26 @@ namespace CabinetLock
                 .Where(device => device.IsOnline && !device.IsRoot)
                 .Select(device => device.DeviceId)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            string[] offline = deviceIds.Where(id => !online.Contains(id)).ToArray();
-            if (offline.Length > 0)
-                return ClassLifecycleResult.Failed(
-                    "必须先连接全部已分配柜机再重试。离线柜机：" + string.Join("、", offline));
-
             string[] studentIds = plan.Students.Select(user => user.UserId).ToArray();
             var failures = new List<string>();
+            var queuedDevices = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             int totalSteps = deviceIds.Sum(id => 1 + plan.DeviceFingerprints[id].Count);
             int completed = 0;
             foreach (string deviceId in deviceIds)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                if (!online.Contains(deviceId))
+                {
+                    if (enqueueRetries)
+                        App.CabinetSyncQueueService.EnqueueCabinet(
+                            deviceId, "班级停用或删除后的柜机清理");
+                    queuedDevices.Add(deviceId);
+                    completed += 1 + plan.DeviceFingerprints[deviceId].Count;
+                    progress?.Report(new ClassLifecycleProgress(
+                        completed * 85 / Math.Max(1, totalSteps),
+                        $"{deviceId} 离线，已加入待同步队列"));
+                    continue;
+                }
                 progress?.Report(new ClassLifecycleProgress(
                     completed * 85 / Math.Max(1, totalSteps), $"{deviceId}：正在撤销班级权限"));
                 BroadcastCommandResult permissionResult = await Task.Run(() =>
@@ -233,6 +258,10 @@ namespace CabinetLock
                 if (!permissionResult.Success)
                 {
                     failures.Add($"{deviceId}：权限清理失败，{permissionResult.ErrorMessage}");
+                    if (enqueueRetries)
+                        App.CabinetSyncQueueService.EnqueueCabinet(
+                            deviceId, "班级权限清理失败后重试");
+                    queuedDevices.Add(deviceId);
                     continue;
                 }
 
@@ -247,13 +276,21 @@ namespace CabinetLock
                         .ConfigureAwait(false);
                     completed++;
                     if (!deleted.Success)
+                    {
                         failures.Add($"{deviceId} / 指纹 #{fingerprintId}：{deleted.ErrorMessage}");
+                        if (enqueueRetries)
+                            App.CabinetSyncQueueService.EnqueueCabinet(
+                                deviceId, "班级指纹清理失败后核对");
+                        queuedDevices.Add(deviceId);
+                    }
                 }
             }
 
-            return failures.Count == 0
-                ? ClassLifecycleResult.Succeeded("全部柜机已确认清理")
-                : ClassLifecycleResult.Failed("部分柜机清理失败，可直接重试", failures);
+            if (enqueueRetries && queuedDevices.Count > 0)
+                App.CabinetSyncQueueService.Trigger();
+            return ClassLifecycleResult.Succeeded(queuedDevices.Count == 0
+                ? "全部柜机已确认清理"
+                : $"{queuedDevices.Count} 台柜机已加入后台清理队列");
         }
 
         private sealed record ClassLifecyclePlan(

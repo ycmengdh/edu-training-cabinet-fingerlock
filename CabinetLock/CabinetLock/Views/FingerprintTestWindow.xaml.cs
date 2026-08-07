@@ -32,6 +32,8 @@ namespace CabinetLock
             _presetFingerprintId = presetFingerprintId;
             _presetDeviceId = presetDeviceId;
             InitializeComponent();
+            MaxHeight = Math.Max(420, SystemParameters.WorkArea.Height - 24);
+            Height = Math.Min(Height, MaxHeight);
             _countdownTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
             _countdownTimer.Tick += CountdownTimer_Tick;
             App.MessageHandler.OnFingerprintTestEvent += OnFingerprintTestEvent;
@@ -43,11 +45,17 @@ namespace CabinetLock
             _loadingSelection = true;
             try
             {
+                _templates = App.FingerprintTemplateService.GetAllTemplates();
+                HashSet<string> templateUserIds = _templates
+                    .Where(template => template.FingerprintId > 0 &&
+                        !string.IsNullOrWhiteSpace(template.UserId))
+                    .Select(template => template.UserId!)
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
                 _users = App.UserService.GetVisibleUsers()
-                    .Where(user => user.FingerprintId.HasValue)
+                    .Where(user => user.FingerprintId.HasValue ||
+                        templateUserIds.Contains(user.UserId))
                     .OrderBy(user => user.Name).ThenBy(user => user.UserId).ToList();
                 _classes = App.ClassService.GetVisible().Where(item => item.Enabled).ToList();
-                _templates = App.FingerprintTemplateService.GetAllTemplates();
                 RoleCombo.ItemsSource = FingerprintSelectionData.BuildRoles(_users);
                 ClassCombo.ItemsSource = _classes.Select(item => new FingerprintClassOption
                 {
@@ -68,6 +76,16 @@ namespace CabinetLock
                     "student", StringComparison.OrdinalIgnoreCase);
                 ClassCombo.IsEnabled = studentRole;
                 ClassCombo.Visibility = studentRole ? Visibility.Visible : Visibility.Hidden;
+                if (studentRole && ClassCombo.SelectedIndex < 0)
+                {
+                    string? firstClassId = _users.FirstOrDefault(user =>
+                        string.Equals(user.Role, "student", StringComparison.OrdinalIgnoreCase) &&
+                        !string.IsNullOrWhiteSpace(user.ClassId))?.ClassId;
+                    if (!string.IsNullOrWhiteSpace(firstClassId))
+                        ClassCombo.SelectedValue = firstClassId;
+                    if (ClassCombo.SelectedIndex < 0 && ClassCombo.Items.Count > 0)
+                        ClassCombo.SelectedIndex = 0;
+                }
                 RefreshUserOptions();
                 if (preset != null) UserCombo.SelectedValue = preset.UserId;
                 RefreshFingerprintOptions();
@@ -164,16 +182,29 @@ namespace CabinetLock
         private void UpdateSelectionState()
         {
             if (_loadingSelection || _testActive) return;
-            StartButton.IsEnabled = UserCombo.SelectedItem is FingerprintUserOption &&
-                FingerprintCombo.SelectedItem is FingerprintTemplateOption &&
-                DeviceCombo.SelectedItem is FingerprintDeviceOption;
+            bool userSelected = UserCombo.SelectedItem is FingerprintUserOption;
+            bool fingerprintSelected = FingerprintCombo.SelectedItem is FingerprintTemplateOption;
+            bool deviceSelected = DeviceCombo.SelectedItem is FingerprintDeviceOption;
+            StartButton.IsEnabled = userSelected && fingerprintSelected && deviceSelected;
             if (StartButton.IsEnabled)
             {
                 var user = (FingerprintUserOption)UserCombo.SelectedItem;
                 var fp = (FingerprintTemplateOption)FingerprintCombo.SelectedItem;
                 var device = (FingerprintDeviceOption)DeviceCombo.SelectedItem;
                 TestTargetText.Text = $"{user.User.Name} · 指纹 #{fp.FingerprintId} · {device.DisplayText}";
+                StartButton.ToolTip = "将所选指纹模板下发到目标柜机临时槽并开始测试";
+                return;
             }
+
+            string reason = RoleCombo.Items.Count == 0
+                ? "没有找到已关联用户的指纹模板"
+                : !userSelected
+                    ? "请选择有指纹模板的用户"
+                    : !fingerprintSelected
+                        ? "所选用户没有可测试的指纹模板"
+                        : "没有在线柜机可用于测试";
+            TestTargetText.Text = reason;
+            StartButton.ToolTip = reason;
         }
 
         private async void StartButton_Click(object sender, RoutedEventArgs e)

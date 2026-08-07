@@ -290,6 +290,7 @@ namespace CabinetLock
             name = user.Name;
             role = user.Role;
             classId = user.ClassId;
+            bool isSystemAdministrator = SystemAdministratorPolicy.IsReserved(user);
 
             var dlg = FormWindow(owner, "编辑用户", 420, 360);
             var panel = new StackPanel { Margin = new Thickness(24, 20, 24, 20) };
@@ -300,7 +301,14 @@ namespace CabinetLock
                 Foreground = Brush("SubTextBrush")
             });
             panel.Children.Add(Label(user.IdentityLabel));
-            var codeBox = new TextBox { Text = user.DisplayId, Height = 34, Margin = new Thickness(0, 0, 0, 14) };
+            var codeBox = new TextBox
+            {
+                Text = user.DisplayId,
+                Height = 34,
+                Margin = new Thickness(0, 0, 0, 14),
+                IsReadOnly = isSystemAdministrator,
+                IsTabStop = !isSystemAdministrator
+            };
             panel.Children.Add(codeBox);
             panel.Children.Add(Label("姓名"));
             var nameBox = new TextBox { Text = user.Name, Height = 34, Margin = new Thickness(0, 0, 0, 14) };
@@ -308,13 +316,14 @@ namespace CabinetLock
 
             panel.Children.Add(Label("角色"));
             var roleCombo = BuildRoleCombo(forceStudent, user.Role);
+            if (isSystemAdministrator) roleCombo.IsEnabled = false;
             panel.Children.Add(roleCombo);
 
             panel.Children.Add(Label("班级（可选）"));
             var classCombo = BuildClassCombo(forcedClassId ?? user.ClassId);
             classCombo.Height = 34;
             classCombo.Margin = new Thickness(0, 0, 0, 18);
-            classCombo.IsEnabled = forcedClassId == null;
+            classCombo.IsEnabled = forcedClassId == null && !isSystemAdministrator;
             panel.Children.Add(classCombo);
 
             var btnPanel = ButtonRow(out Button okBtn, out Button cancelBtn);
@@ -333,9 +342,13 @@ namespace CabinetLock
                     MessageBox.Show("编号不能为空", "提示");
                     return;
                 }
-                localUserCode = codeBox.Text.Trim();
+                localUserCode = isSystemAdministrator
+                    ? SystemAdministratorPolicy.UserId
+                    : codeBox.Text.Trim();
                 localName = nameBox.Text;
-                if (roleCombo.SelectedItem is ComboBoxItem item)
+                if (isSystemAdministrator)
+                    localRole = "admin";
+                else if (roleCombo.SelectedItem is ComboBoxItem item)
                     localRole = item.Tag?.ToString() ?? user.Role;
                 localClassId = (classCombo.SelectedItem as ComboBoxItem)?.Tag as string;
                 if (forcedClassId != null) localClassId = forcedClassId;

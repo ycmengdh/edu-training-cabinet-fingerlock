@@ -41,6 +41,24 @@ namespace CabinetLock
                 .ToList();
         }
 
+        public Dictionary<string, IReadOnlyList<CabinetAssignment>> GetAssignments(
+            IReadOnlyCollection<User> users, IEnumerable<string> knownDeviceIds)
+        {
+            var result = new Dictionary<string, IReadOnlyList<CabinetAssignment>>(
+                StringComparer.OrdinalIgnoreCase);
+            if (users == null || users.Count == 0) return result;
+            string[] known = NormalizeIds(knownDeviceIds);
+            List<CabinetUserBinding> legacy = ReadLegacy();
+            foreach (User user in users)
+            {
+                if (user == null || string.IsNullOrWhiteSpace(user.UserId)) continue;
+                result[user.UserId] = ResolveAssignments(user, known, legacy)
+                    .OrderBy(item => item.DeviceId, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+            }
+            return result;
+        }
+
         public IReadOnlyList<int> GetSelectedFingerprintIds(User user, string deviceId)
             => GetSelectedFingerprintIds(user, deviceId, ReadUserTemplates(user?.UserId ?? ""));
 
@@ -84,7 +102,8 @@ namespace CabinetLock
         }
 
         public bool SetAssignmentConfiguration(
-            string userId, string deviceId, IEnumerable<int> fingerprintIds, IEnumerable<int> lockIds)
+            string userId, string deviceId, IEnumerable<int> fingerprintIds,
+            IEnumerable<int> lockIds, bool enqueueSync = true)
         {
             if (string.IsNullOrWhiteSpace(userId) || string.IsNullOrWhiteSpace(deviceId) ||
                 fingerprintIds == null || lockIds == null) return false;
@@ -115,9 +134,10 @@ namespace CabinetLock
             assignment.UpdateTime = DateTime.Now;
             ApplyAssignments(user, assignments);
             bool saved = _root.Save("users", users);
-            if (saved)
+            if (saved && enqueueSync)
             {
-                App.CabinetSyncQueueService.EnqueueUser(userId, new[] { deviceId }, "更新柜机权限与指纹");
+                // 指纹选择可能移除旧槽位，需做柜级核对以清掉快照外记录。
+                App.CabinetSyncQueueService.EnqueueCabinet(deviceId, "更新柜机权限与指纹");
                 App.CabinetSyncQueueService.Trigger();
             }
             return saved;
@@ -213,7 +233,8 @@ namespace CabinetLock
             return saved;
         }
 
-        public bool RemoveFingerprintFromCabinet(string userId, string deviceId, int fingerprintId)
+        public bool RemoveFingerprintFromCabinet(
+            string userId, string deviceId, int fingerprintId, bool enqueueSync = true)
         {
             if (string.IsNullOrWhiteSpace(userId) || string.IsNullOrWhiteSpace(deviceId) ||
                 fingerprintId <= 0) return false;
@@ -243,7 +264,7 @@ namespace CabinetLock
             }
             ApplyAssignments(user, assignments);
             bool saved = _root.Save("users", users);
-            if (saved)
+            if (saved && enqueueSync)
             {
                 App.CabinetSyncQueueService.EnqueueCabinet(deviceId, "移除柜机指纹");
                 App.CabinetSyncQueueService.Trigger();
@@ -268,6 +289,45 @@ namespace CabinetLock
 
         public bool Remove(string deviceId, string userId) =>
             SetUsersAssignment(deviceId, new[] { userId }, false);
+
+        public IReadOnlyList<User> GetAssignedStudents(string deviceId)
+        {
+            if (string.IsNullOrWhiteSpace(deviceId)) return Array.Empty<User>();
+            List<User> users = _root.Read<User>("users");
+            List<CabinetUserBinding> legacy = ReadLegacy();
+            string[] known = ReadKnownDeviceIds().Append(deviceId)
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            return users.Where(IsStudent)
+                .Where(user => ResolveAssignments(user, known, legacy).Any(item =>
+                    SameDevice(item.DeviceId, deviceId)))
+                .OrderBy(user => user.Name)
+                .ThenBy(user => user.DisplayId)
+                .ToList();
+        }
+
+        public bool RemoveDeviceAssignments(string deviceId, out int affectedStudentCount)
+        {
+            affectedStudentCount = 0;
+            if (string.IsNullOrWhiteSpace(deviceId)) return false;
+
+            List<User> users = _root.Read<User>("users");
+            List<CabinetUserBinding> legacy = ReadLegacy();
+            string[] known = ReadKnownDeviceIds().Append(deviceId)
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            foreach (User user in users.Where(IsStudent))
+            {
+                List<CabinetAssignment> assignments = ResolveAssignments(user, known, legacy);
+                if (assignments.RemoveAll(item => SameDevice(item.DeviceId, deviceId)) == 0) continue;
+                DataScopeContext.Instance.EnsureCanModify(user);
+                ApplyAssignments(user, assignments);
+                affectedStudentCount++;
+            }
+
+            if (affectedStudentCount > 0 && !_root.Save("users", users)) return false;
+            legacy.RemoveAll(item => SameDevice(item.DeviceId, deviceId));
+            SaveLegacy(legacy);
+            return true;
+        }
 
         public bool SetUsersAssignment(
             string deviceId, IEnumerable<string> userIds, bool assigned)
@@ -318,8 +378,15 @@ namespace CabinetLock
             bool saved = _root.Save("users", users);
             if (saved)
             {
-                foreach (string deviceId in requestedDevices)
-                    App.CabinetSyncQueueService.EnqueueCabinet(deviceId, assigned ? "分配学生" : "解除学生分配");
+                foreach (User user in targets)
+                {
+                    if (assigned)
+                        App.CabinetSyncQueueService.EnqueueUser(
+                            user.UserId, requestedDevices, "分配学生");
+                    else
+                        App.CabinetSyncQueueService.EnqueueUserDeletion(
+                            user.UserId, requestedDevices, "解除学生分配");
+                }
                 App.CabinetSyncQueueService.Trigger();
             }
             return saved;
@@ -344,8 +411,8 @@ namespace CabinetLock
             bool saved = _root.Save("users", users);
             if (saved)
             {
-                foreach (string deviceId in affected)
-                    App.CabinetSyncQueueService.EnqueueCabinet(deviceId, "移除学生全部柜机绑定");
+                App.CabinetSyncQueueService.EnqueueUserDeletion(
+                    userId, affected, "移除学生全部柜机绑定");
                 App.CabinetSyncQueueService.Trigger();
             }
             return saved;
@@ -360,8 +427,8 @@ namespace CabinetLock
                 item.UserId, userId, StringComparison.OrdinalIgnoreCase));
             if (user == null) return false;
             DataScopeContext.Instance.EnsureCanModify(user);
-            string[] affected = ResolveAssignments(user, knownDeviceIds, ReadLegacy())
-                .Select(item => item.DeviceId).Append(deviceId)
+            string[] previous = ResolveAssignments(user, knownDeviceIds, ReadLegacy())
+                .Select(item => item.DeviceId)
                 .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
             int? defaultFingerprintId = ResolveDefaultFingerprintId(user);
             ApplyAssignments(user, new List<CabinetAssignment>
@@ -376,8 +443,10 @@ namespace CabinetLock
             bool saved = _root.Save("users", users);
             if (saved)
             {
-                foreach (string affectedDeviceId in affected)
-                    App.CabinetSyncQueueService.EnqueueCabinet(affectedDeviceId, "调整学生柜机分配");
+                App.CabinetSyncQueueService.EnqueueUserDeletion(userId,
+                    previous.Where(id => !SameDevice(id, deviceId)), "调整学生柜机分配");
+                App.CabinetSyncQueueService.EnqueueUser(
+                    userId, new[] { deviceId }, "调整学生柜机分配");
                 App.CabinetSyncQueueService.Trigger();
             }
             return saved;
@@ -494,8 +563,7 @@ namespace CabinetLock
         {
             try
             {
-                return BusinessDatabase.ReadAllFpTemplateMetas().Where(item =>
-                    string.Equals(item.UserId, userId, StringComparison.OrdinalIgnoreCase)).ToList();
+                return BusinessDatabase.ReadFpTemplateMetasForUsers(new[] { userId });
             }
             catch
             {

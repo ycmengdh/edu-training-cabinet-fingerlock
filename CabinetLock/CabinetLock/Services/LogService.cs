@@ -68,7 +68,8 @@ namespace CabinetLock
                     visibleUsers.Select(u => u.UserId), StringComparer.OrdinalIgnoreCase);
             }
 
-            var query = ApplyUserCodes(Filter(deviceId, userId, startTime, endTime, result));
+            IEnumerable<LogEntry> query = ApplyUserCodes(
+                Filter(deviceId, userId, startTime, endTime, result));
             if (visibleUserIds != null)
             {
                 query = query.Where(l => string.IsNullOrEmpty(l.UserId) || visibleUserIds.Contains(l.UserId));
@@ -158,25 +159,23 @@ namespace CabinetLock
             catch { return value; }
         }
 
-        private static IEnumerable<LogEntry> ApplyUserCodes(IEnumerable<LogEntry> logs)
+        private static IReadOnlyList<LogEntry> ApplyUserCodes(IEnumerable<LogEntry> logs)
         {
+            List<LogEntry> entries = logs.ToList();
             Dictionary<string, string> codes;
             try
             {
-                codes = App.UserService.GetAllUsers()
-                    .Where(user => !string.IsNullOrWhiteSpace(user.UserId))
-                    .ToDictionary(user => user.UserId, user => user.DisplayId,
-                        StringComparer.OrdinalIgnoreCase);
+                codes = BusinessDatabase.ReadUserCodes(entries.Select(log => log.UserId));
             }
             catch
             {
                 codes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             }
-            foreach (LogEntry log in logs)
+            foreach (LogEntry log in entries)
             {
                 log.UserCode = codes.TryGetValue(log.UserId, out string? code) ? code : log.UserId;
-                yield return log;
             }
+            return entries;
         }
     }
 }

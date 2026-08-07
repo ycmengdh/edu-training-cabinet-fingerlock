@@ -3,23 +3,100 @@ namespace CabinetLock
     /// <summary>Combines root snapshots into operator-facing health signals.</summary>
     public sealed class SystemHealthService
     {
+        public SystemHealthSnapshot? LastSnapshot { get; private set; }
+
         public SystemHealthSnapshot LoadSnapshot()
         {
             var version = App.SdStorageService.QueryVersion()
                 ?? throw new RootDataUnavailableException("读取根节点版本信息失败");
+            return LoadSnapshot(version);
+        }
+
+        public async Task<SystemHealthSnapshot> LoadSnapshotAsync()
+        {
+            HealthScope scope = CaptureScope();
+            Task<SdVersionInfo?> versionTask = App.SdStorageService.QueryVersionAsync();
+            Task<LocalHealthData> localTask = Task.Run(() => LoadLocalData(scope));
+            await Task.WhenAll(versionTask, localTask).ConfigureAwait(false);
+            SdVersionInfo version = await versionTask.ConfigureAwait(false)
+                ?? throw new RootDataUnavailableException("读取根节点版本信息失败");
+            return CreateSnapshot(version, await localTask.ConfigureAwait(false));
+        }
+
+        public SystemHealthSnapshot LoadSnapshot(SdVersionInfo version)
+        {
+            if (version == null) throw new ArgumentNullException(nameof(version));
+            return CreateSnapshot(version, LoadLocalData(CaptureScope()));
+        }
+
+        private SystemHealthSnapshot CreateSnapshot(
+            SdVersionInfo version, LocalHealthData local)
+        {
+            var snapshot = new SystemHealthSnapshot
+            {
+                Version = version,
+                Devices = local.Devices,
+                RecentLogs = local.RecentLogs,
+                Alerts = BuildAlerts(local.Devices, version, local.RecentLogs),
+                BoundStudentCount = local.StudentBindings.BoundStudents,
+                TotalStudentCount = local.StudentBindings.TotalStudents,
+                OpenSyncCount = local.OpenSyncCount,
+                FailedSyncCount = local.FailedSyncCount,
+                ScopeUserId = local.Scope.UserId,
+                ScopeRole = local.Scope.Role,
+                RefreshedAt = DateTime.Now
+            };
+            LastSnapshot = snapshot;
+            return snapshot;
+        }
+
+        private static LocalHealthData LoadLocalData(HealthScope scope)
+        {
             var devices = App.DeviceService.GetAllDevices()
                 .Where(device => !device.IsRoot)
                 .ToList();
             var recentLogs = App.LogService.QueryLogs(limit: 12);
-            return new SystemHealthSnapshot
+            StudentBindingStatistics bindings =
+                BusinessDatabase.QueryStudentBindingStatistics(
+                    scope.Role, scope.UserId, scope.ClassIds);
+            (int open, int failed) =
+                App.CabinetSyncQueueService.CountOpenAndFailed();
+            return new LocalHealthData
             {
-                Version = version,
                 Devices = devices,
                 RecentLogs = recentLogs,
-                Alerts = BuildAlerts(devices, version, recentLogs),
-                RefreshedAt = DateTime.Now
+                StudentBindings = bindings,
+                OpenSyncCount = open,
+                FailedSyncCount = failed,
+                Scope = scope
             };
         }
+
+        private static HealthScope CaptureScope()
+        {
+            User? current = App.CurrentUser;
+            string role = current?.Role ?? "";
+            IReadOnlyCollection<string>? classIds =
+                string.Equals(role, "admin", StringComparison.OrdinalIgnoreCase)
+                    ? null
+                    : string.Equals(role, "teacher", StringComparison.OrdinalIgnoreCase)
+                        ? current?.GetResponsibleClassIds().ToArray() ?? Array.Empty<string>()
+                        : Array.Empty<string>();
+            return new HealthScope(current?.UserId ?? "", role, classIds);
+        }
+
+        private sealed class LocalHealthData
+        {
+            public List<Device> Devices { get; init; } = new();
+            public List<LogEntry> RecentLogs { get; init; } = new();
+            public StudentBindingStatistics StudentBindings { get; init; }
+            public int OpenSyncCount { get; init; }
+            public int FailedSyncCount { get; init; }
+            public HealthScope Scope { get; init; } = new("", "", Array.Empty<string>());
+        }
+
+        private sealed record HealthScope(
+            string UserId, string Role, IReadOnlyCollection<string>? ClassIds);
 
         public static List<SystemAlert> BuildAlerts(
             IReadOnlyCollection<Device> devices,

@@ -9,6 +9,7 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
         <Grid Grid.Row="0" Style="{StaticResource PageHeader}">
@@ -21,10 +22,12 @@
                 <TextBlock x:Name="PageStatusText" Text="正在读取柜子状态" Style="{StaticResource PageStatusText}"/>
             </StackPanel>
             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Bottom">
+                <Button x:Name="FirmwareUpgradeButton" Style="{StaticResource SecondaryButton}"
+                        Content="柜机升级" Click="FirmwareUpgradeButton_Click" Margin="0,0,8,0"/>
                 <Button x:Name="ResyncButton" Style="{StaticResource SecondaryButton}"
                         Content="同步全部柜子" Click="ResyncButton_Click"/>
                 <Button x:Name="RefreshButton" Style="{StaticResource IconButton}"
-                        Content="&#xE72C;" ToolTip="刷新柜子列表" Margin="8,0,0,0"
+                        Content="&#xE72C;" ToolTip="仅更新柜子数据，保留当前筛选、排序和表格布局" Margin="8,0,0,0"
                         Click="RefreshButton_Click"/>
             </StackPanel>
         </Grid>
@@ -183,7 +186,20 @@
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
                             </DataGridTemplateColumn>
-                            <DataGridTextColumn Header="版本" Binding="{Binding Status.PermissionVersion}" Width="72"
+                            <DataGridTextColumn Binding="{Binding PermissionVersionPairText}" Width="190">
+                                <DataGridTextColumn.Header>
+                                    <TextBlock Text="权限标识（柜端 / 当前）"
+                                               ToolTip="用于判断权限数据是否同步的 32 位组合标识；由用户、班级、权限和指纹相关数据版本计算，不是固件版本。"/>
+                                </DataGridTextColumn.Header>
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock" BasedOn="{StaticResource DataGridTextBlockStyle}">
+                                        <Setter Property="ToolTip" Value="{Binding PermissionVersionExplanation}"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="固件" Binding="{Binding FirmwareVersionText}" Width="100"
+                                                ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                            <DataGridTextColumn Header="硬件" Binding="{Binding HardwareVersionText}" Width="100"
                                                 ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
                             <DataGridTextColumn Header="最后在线" Binding="{Binding LastSeenTime, StringFormat={}{0:MM-dd HH:mm}}" Width="100"
                                                 ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
@@ -202,6 +218,11 @@
                                             <Button Tag="{Binding}" Click="OpenDetailButton_Click"
                                                     Style="{StaticResource IconButton}" Content="&#xE76C;"
                                                     ToolTip="打开柜子详情" Width="30" MinWidth="30"
+                                                    Height="30" MinHeight="30" Margin="0,0,4,0"/>
+                                            <Button Tag="{Binding}" Click="DeleteDeviceButton_Click"
+                                                    Style="{StaticResource IconButton}" Content="&#xE74D;"
+                                                    Foreground="{StaticResource DangerBrush}"
+                                                    ToolTip="删除柜子" Width="30" MinWidth="30"
                                                     Height="30" MinHeight="30"/>
                                         </StackPanel>
                                     </DataTemplate>
@@ -221,7 +242,13 @@
             </Grid>
         </Border>
 
-        <controls:PaginationControl x:Name="Pager" Grid.Row="3" Margin="0,10,0,0"
+        <Grid x:Name="OperationProgressPanel" Grid.Row="3" Margin="0,10,0,0"
+              Visibility="Collapsed">
+            <ProgressBar x:Name="OperationProgressBar" Height="6"
+                         IsIndeterminate="True"/>
+        </Grid>
+
+        <controls:PaginationControl x:Name="Pager" Grid.Row="4" Margin="0,10,0,0"
                                     PageRequested="Pager_PageRequested"/>
     </Grid>
 </Page>

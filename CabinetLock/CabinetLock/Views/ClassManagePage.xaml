@@ -30,7 +30,7 @@
                                    HorizontalAlignment="Left" VerticalAlignment="Center"
                                    IsHitTestVisible="False"/>
                     </Grid>
-                    <Button x:Name="AddButton" Content="添加班级" Click="AddButton_Click"/>
+                    <Button x:Name="AddButton" Content="添加班级" Foreground="White" Click="AddButton_Click"/>
                     <Button x:Name="DeleteButton" Style="{StaticResource DangerButton}" Content="删除"
                             Margin="8,0,0,0" IsEnabled="False" Click="DeleteButton_Click"/>
                     <Button x:Name="RefreshButton" Style="{StaticResource IconButton}" Content="&#xE72C;" Margin="8,0,0,0" Click="RefreshButton_Click"/>

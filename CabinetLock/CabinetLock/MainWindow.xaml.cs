@@ -32,12 +32,7 @@ namespace CabinetLock
         /// <summary>窗口加载：初始化用户信息、应用角色可见性、默认页面、订阅 Mesh 事件、启动状态刷新</summary>
         private void Window_Loaded(object sender, RoutedEventArgs e)
         {
-            // 显示当前登录用户
-            if (App.CurrentUser != null)
-            {
-                CurrentUserName.Text = App.CurrentUser.Name;
-                CurrentUserRole.Text = App.CurrentUser.Role;
-            }
+            RefreshCurrentUserDisplay();
 
             // 应用角色可见性
             ApplyRoleVisibility();
@@ -72,6 +67,12 @@ namespace CabinetLock
             _statusTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
             _statusTimer.Tick += StatusTimer_Tick;
             _statusTimer.Start();
+        }
+
+        internal void RefreshCurrentUserDisplay()
+        {
+            CurrentUserName.Text = App.CurrentUser?.Name ?? "";
+            CurrentUserRole.Text = App.CurrentUser?.Role ?? "";
         }
 
         private void StatusTimer_Tick(object? sender, EventArgs e) => UpdateStatusBar();
@@ -119,7 +120,7 @@ namespace CabinetLock
             NavigateToPage(new PermissionPage());
         }
 
-        /// <summary>角色权限页（仅 admin 可见）</summary>
+        /// <summary>角色权限页（教师只读，管理员可编辑）</summary>
         private void NavRolePermission_Click(object sender, RoutedEventArgs e)
         {
             SelectNavButton(sender);
@@ -272,7 +273,7 @@ namespace CabinetLock
                     NavUserManage.Visibility = Visibility.Collapsed;
                     NavTeacherManage.Visibility = Visibility.Collapsed;
                     NavPermission.Visibility = Visibility.Collapsed;
-                    NavRolePermission.Visibility = Visibility.Collapsed;
+                    NavRolePermission.Visibility = Visibility.Visible;
                     NavDevice.Visibility = Visibility.Collapsed;
                     NavFingerprintTemplate.Visibility = Visibility.Collapsed;
                     break;
@@ -294,6 +295,9 @@ namespace CabinetLock
         /// <summary>获取当前角色默认应打开的导航按钮（首个可见项）</summary>
         private Button? GetDefaultNavButton()
         {
+            if (string.Equals(App.CurrentUser?.Role, "teacher", StringComparison.OrdinalIgnoreCase) &&
+                NavClassManage.Visibility == Visibility.Visible)
+                return NavClassManage;
             // 按顺序返回首个可见项
             if (NavDashboard.Visibility == Visibility.Visible) return NavDashboard;
             if (NavUserManage.Visibility == Visibility.Visible) return NavUserManage;

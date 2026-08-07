@@ -14,48 +14,81 @@
 
         <StackPanel>
             <TextBlock Text="指纹录入" Style="{StaticResource TitleText}"/>
-            <TextBlock Text="选择未录入的手指将新增指纹；选择已录入的手指将覆盖原指纹，并同步已绑定柜机。"
+            <TextBlock x:Name="SubtitleText" Text="所有采集都使用柜机 0 号临时槽；验证完成后清空临时槽，只保存用户模板，不自动下发柜机。"
                        Foreground="{StaticResource SubTextBrush}" FontSize="11" Margin="0,5,0,0"/>
         </StackPanel>
 
         <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Margin="0,18,0,14">
             <StackPanel>
                 <Border Style="{StaticResource Panel}" Padding="18,16" Margin="0,0,0,12">
-                    <Grid>
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="12"/>
-                            <ColumnDefinition Width="*"/>
-                        </Grid.ColumnDefinitions>
-                        <Grid.RowDefinitions>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="Auto"/>
-                        </Grid.RowDefinitions>
-                        <TextBlock Text="角色" Style="{StaticResource LabelText}" Margin="0,0,0,6"/>
-                        <ComboBox x:Name="RoleCombo" Grid.Row="1" DisplayMemberPath="DisplayText"
-                                  SelectedValuePath="Role" SelectionChanged="RoleCombo_SelectionChanged"/>
-                        <TextBlock Grid.Column="2" Text="班级" Style="{StaticResource LabelText}" Margin="0,0,0,6"/>
-                        <ComboBox x:Name="ClassCombo" Grid.Row="1" Grid.Column="2" DisplayMemberPath="DisplayText"
-                                  SelectedValuePath="ClassId" SelectionChanged="ClassCombo_SelectionChanged"/>
-                        <TextBlock Grid.Row="2" Text="姓名" Style="{StaticResource LabelText}" Margin="0,14,0,6"/>
-                        <ComboBox x:Name="UserCombo" Grid.Row="3" DisplayMemberPath="DisplayText"
-                                  SelectedValuePath="UserId" SelectionChanged="SelectionChanged"/>
-                        <TextBlock Grid.Row="2" Grid.Column="2" Text="目标柜机" Style="{StaticResource LabelText}" Margin="0,14,0,6"/>
-                        <ComboBox x:Name="DeviceCombo" Grid.Row="3" Grid.Column="2" DisplayMemberPath="DisplayText"
-                                  SelectedValuePath="DeviceId" SelectionChanged="SelectionChanged"/>
-                        <TextBlock Grid.Row="4" Text="录入手指与保存方式" Style="{StaticResource LabelText}" Margin="0,14,0,6"/>
-                        <ComboBox x:Name="FingerCombo" Grid.Row="5" Grid.ColumnSpan="3" DisplayMemberPath="DisplayText"
-                                  SelectedValuePath="FingerIndex" SelectionChanged="SelectionChanged"/>
-                    </Grid>
+                    <StackPanel>
+                        <Grid x:Name="FixedStudentPanel" Visibility="Collapsed" Margin="0,0,0,16">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="46"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Border Width="36" Height="36" CornerRadius="6" VerticalAlignment="Center"
+                                    Background="{StaticResource PrimaryLightBrush}">
+                                <TextBlock Text="&#xE77B;" FontFamily="{StaticResource AppIconFont}" FontSize="18"
+                                           Foreground="{StaticResource PrimaryDarkBrush}"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                <TextBlock x:Name="FixedStudentNameText" FontSize="15" FontWeight="SemiBold"/>
+                                <TextBlock x:Name="FixedStudentMetaText" Margin="0,3,0,0" FontSize="11"
+                                           Foreground="{StaticResource SubTextBrush}" TextWrapping="Wrap"/>
+                            </StackPanel>
+                        </Grid>
+
+                        <Grid x:Name="UserSelectionPanel">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="12"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <TextBlock Text="角色" Style="{StaticResource LabelText}" Margin="0,0,0,6"/>
+                            <ComboBox x:Name="RoleCombo" Grid.Row="1" DisplayMemberPath="DisplayText"
+                                      SelectedValuePath="Role" SelectionChanged="RoleCombo_SelectionChanged"/>
+                            <TextBlock Grid.Column="2" Text="班级" Style="{StaticResource LabelText}" Margin="0,0,0,6"/>
+                            <ComboBox x:Name="ClassCombo" Grid.Row="1" Grid.Column="2" DisplayMemberPath="DisplayText"
+                                      SelectedValuePath="ClassId" SelectionChanged="ClassCombo_SelectionChanged"/>
+                            <TextBlock Grid.Row="2" Text="姓名" Style="{StaticResource LabelText}" Margin="0,14,0,6"/>
+                            <ComboBox x:Name="UserCombo" Grid.Row="3" Grid.ColumnSpan="3" DisplayMemberPath="DisplayText"
+                                      SelectedValuePath="UserId" SelectionChanged="SelectionChanged"/>
+                        </Grid>
+
+                        <Grid Margin="0,14,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="12"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                                <TextBlock Text="采集设备（临时槽 0）" Style="{StaticResource LabelText}" Margin="0,0,0,6"/>
+                            <ComboBox x:Name="DeviceCombo" Grid.Row="1" DisplayMemberPath="DisplayText"
+                                      SelectedValuePath="DeviceId" SelectionChanged="SelectionChanged"/>
+
+                            <StackPanel x:Name="FingerSelectionPanel" Grid.Column="2" Grid.RowSpan="2">
+                                <TextBlock Text="录入手指与保存方式" Style="{StaticResource LabelText}" Margin="0,0,0,6"/>
+                                <ComboBox x:Name="FingerCombo" DisplayMemberPath="DisplayText"
+                                          SelectedValuePath="FingerIndex" SelectionChanged="SelectionChanged"/>
+                            </StackPanel>
+                        </Grid>
+                    </StackPanel>
                 </Border>
 
                 <Border Style="{StaticResource Panel}" Padding="18,16">
                     <StackPanel>
-                        <ProgressBar x:Name="EnrollProgress" Height="22" Minimum="0" Maximum="7" Value="0"/>
+                        <ProgressBar x:Name="EnrollProgress" Height="22" Minimum="0" Maximum="6" Value="0"/>
                         <Border Background="{StaticResource BackgroundBrush}" CornerRadius="6" Padding="16,18" Margin="0,14,0,0">
                             <StackPanel HorizontalAlignment="Center">
                                 <TextBlock x:Name="StepIcon" Text="&#xE928;" FontFamily="{StaticResource AppIconFont}"

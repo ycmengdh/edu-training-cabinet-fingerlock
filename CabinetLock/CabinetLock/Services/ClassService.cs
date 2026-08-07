@@ -21,6 +21,21 @@ namespace CabinetLock
                 : all.Where(c => visibleIds.Contains(c.ClassId, StringComparer.OrdinalIgnoreCase)).ToList();
         }
 
+        public PagedResult<ClassInfo> QueryVisiblePage(
+            int pageIndex, int pageSize, string? keyword = null)
+        {
+            return BusinessDatabase.QueryClasses(new ClassPageQuery
+            {
+                PageIndex = pageIndex,
+                PageSize = pageSize,
+                Keyword = keyword,
+                VisibleClassIds = DataScopeContext.Instance.GetVisibleClassIds()
+            });
+        }
+
+        public Dictionary<string, string> GetVisibleClassNames() =>
+            BusinessDatabase.ReadClassNames(DataScopeContext.Instance.GetVisibleClassIds());
+
         public ClassInfo? Get(string classId)
         {
             if (string.IsNullOrWhiteSpace(classId)) return null;

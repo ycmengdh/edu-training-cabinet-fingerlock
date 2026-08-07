@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -8,12 +9,18 @@ namespace CabinetLock
     {
         private System.Windows.Threading.DispatcherTimer? _refreshTimer;
         private List<Device> _allCabinets = new();
+        private readonly ObservableCollection<Device> _visibleCabinets = new();
         private readonly ListPager _pager = new(20);
+        private readonly HashSet<string> _metadataQueried =
+            new(StringComparer.OrdinalIgnoreCase);
+        private CancellationTokenSource? _metadataQueryCts;
+        private bool _metadataQueryRunning;
         private bool _loading;
 
         public CabinetManagePage()
         {
             InitializeComponent();
+            CabinetDataGrid.ItemsSource = _visibleCabinets;
             Loaded += CabinetManagePage_Loaded;
             Unloaded += CabinetManagePage_Unloaded;
         }
@@ -22,6 +29,10 @@ namespace CabinetLock
         {
             App.MeshBridge.DeviceConnected += OnDevicePresenceChanged;
             App.MeshBridge.DeviceDisconnected += OnDevicePresenceChanged;
+            _metadataQueried.Clear();
+            _metadataQueryCts?.Cancel();
+            _metadataQueryCts?.Dispose();
+            _metadataQueryCts = new CancellationTokenSource();
             await LoadCabinetsAsync();
 
             _refreshTimer = new System.Windows.Threading.DispatcherTimer
@@ -36,6 +47,9 @@ namespace CabinetLock
         {
             App.MeshBridge.DeviceConnected -= OnDevicePresenceChanged;
             App.MeshBridge.DeviceDisconnected -= OnDevicePresenceChanged;
+            _metadataQueryCts?.Cancel();
+            _metadataQueryCts?.Dispose();
+            _metadataQueryCts = null;
             if (_refreshTimer != null)
             {
                 _refreshTimer.Stop();
@@ -84,14 +98,14 @@ namespace CabinetLock
                 foreach (var cabinet in cabinets)
                     cabinet.RootPermissionVersion = globalVersion;
 
-                _allCabinets = cabinets;
+                MergeCabinetData(cabinets);
                 ApplyFilter();
                 UpdateOverview();
+                StartMissingMetadataQueries();
             }
             catch (Exception ex)
             {
-                _allCabinets.Clear();
-                ApplyFilter();
+                if (_allCabinets.Count == 0) ApplyFilter();
                 PageStatusText.Text = $"柜子列表读取失败：{ex.Message}";
             }
             finally
@@ -100,6 +114,102 @@ namespace CabinetLock
                 _loading = false;
             }
         }
+
+        private void MergeCabinetData(IReadOnlyList<Device> refreshed)
+        {
+            var unmatched = new List<Device>(_allCabinets);
+            var merged = new List<Device>(refreshed.Count);
+            foreach (Device source in refreshed)
+            {
+                Device? target = unmatched.FirstOrDefault(candidate =>
+                    IsSameCabinet(candidate, source));
+                if (target == null)
+                {
+                    merged.Add(source);
+                    continue;
+                }
+
+                unmatched.Remove(target);
+                CopyCabinetData(target, source);
+                merged.Add(target);
+            }
+            _allCabinets = merged;
+        }
+
+        private static bool IsSameCabinet(Device left, Device right)
+        {
+            if (!string.IsNullOrWhiteSpace(left.MeshMac) &&
+                !string.IsNullOrWhiteSpace(right.MeshMac) &&
+                string.Equals(left.MeshMac, right.MeshMac, StringComparison.OrdinalIgnoreCase))
+                return true;
+            return !string.IsNullOrWhiteSpace(left.DeviceId) &&
+                   string.Equals(left.DeviceId, right.DeviceId,
+                       StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static void CopyCabinetData(Device target, Device source)
+        {
+            target.DeviceId = source.DeviceId;
+            target.DeviceName = source.DeviceName;
+            target.DeviceNumber = source.DeviceNumber;
+            target.IpAddress = source.IpAddress;
+            target.IsOnline = source.IsOnline;
+            target.RegisterTime = source.RegisterTime;
+            target.LastOnlineTime = source.LastOnlineTime;
+            target.LastSeenUnix = source.LastSeenUnix;
+            target.OfflineTimeUnix = source.OfflineTimeUnix;
+            target.MeshMac = source.MeshMac;
+            target.IsRoot = source.IsRoot;
+            target.FirmwareVersion = source.FirmwareVersion;
+            target.HardwareVersion = source.HardwareVersion;
+            target.Status = source.Status;
+            target.RootPermissionVersion = source.RootPermissionVersion;
+        }
+
+        private void StartMissingMetadataQueries()
+        {
+            if (_metadataQueryRunning || _metadataQueryCts == null ||
+                _metadataQueryCts.IsCancellationRequested)
+                return;
+
+            _metadataQueryRunning = true;
+            _ = QueryMissingMetadataAsync(_metadataQueryCts.Token);
+        }
+
+        private async Task QueryMissingMetadataAsync(CancellationToken cancellationToken)
+        {
+            try
+            {
+                while (!cancellationToken.IsCancellationRequested)
+                {
+                    Device? device = _allCabinets.FirstOrDefault(candidate =>
+                        candidate.IsOnline &&
+                        (!string.IsNullOrWhiteSpace(candidate.DeviceId)) &&
+                        (string.IsNullOrWhiteSpace(candidate.FirmwareVersion) ||
+                         string.IsNullOrWhiteSpace(candidate.HardwareVersion)) &&
+                        !_metadataQueried.Contains(MetadataQueryKey(candidate)));
+                    if (device == null) break;
+
+                    string key = MetadataQueryKey(device);
+                    _metadataQueried.Add(key);
+                    App.MeshBridge.SendToDevice(device.DeviceId,
+                        Message.Create(Protocol.CmdReadConfig, device.DeviceId));
+                    await Task.Delay(200, cancellationToken);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            finally
+            {
+                _metadataQueryRunning = false;
+            }
+        }
+
+        private static string MetadataQueryKey(Device device) =>
+            string.IsNullOrWhiteSpace(device.MeshMac)
+                ? device.DeviceId.Trim()
+                : device.MeshMac.Trim();
 
         private void UpdateOverview()
         {
@@ -151,12 +261,33 @@ namespace CabinetLock
                 return keywordMatched && statusMatched;
             }).ToList();
 
-            var page = _pager.Slice(visible);
-            CabinetDataGrid.ItemsSource = page;
+            IReadOnlyList<Device> page = _pager.Slice(visible);
+            UpdateVisibleCabinets(page);
             _pager.BindChrome(Pager, "台柜子");
             VisibleCountText.Text = $"{visible.Count} 台";
             EmptyStatePanel.Visibility = visible.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             EmptyStateText.Text = _allCabinets.Count == 0 ? "尚未发现柜子" : "没有符合条件的柜子";
+        }
+
+        private void UpdateVisibleCabinets(IReadOnlyList<Device> page)
+        {
+            for (int index = 0; index < page.Count; index++)
+            {
+                Device desired = page[index];
+                if (index < _visibleCabinets.Count &&
+                    ReferenceEquals(_visibleCabinets[index], desired)) continue;
+
+                int existingIndex = _visibleCabinets.IndexOf(desired);
+                if (existingIndex >= 0)
+                    _visibleCabinets.Move(existingIndex, index);
+                else
+                    _visibleCabinets.Insert(index, desired);
+            }
+
+            while (_visibleCabinets.Count > page.Count)
+                _visibleCabinets.RemoveAt(_visibleCabinets.Count - 1);
+
+            CabinetDataGrid.Items.Refresh();
         }
 
         private void Pager_PageRequested(object sender, Controls.PaginationRequestedEventArgs e)
@@ -166,30 +297,36 @@ namespace CabinetLock
         }
 
         private async void RefreshButton_Click(object sender, RoutedEventArgs e) =>
-            await LoadCabinetsAsync();
+            await LoadCabinetsAsync(quiet: true);
+
+        private void FirmwareUpgradeButton_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                var window = new CabinetOtaWindow { Owner = Window.GetWindow(this) };
+                window.ShowDialog();
+            }
+            catch (Exception ex)
+            {
+                AppToast.Error("固件升级页面打开失败");
+                MessageBox.Show($"固件升级页面加载失败：{ex.Message}",
+                    "页面加载失败", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
 
         private async void ResyncButton_Click(object sender, RoutedEventArgs e)
         {
-            SetBusy(true, "正在同步全部在线柜子的权限");
             try
             {
-                var result = await Task.Run(App.CabinetSyncService.SyncAllPermissions);
-                string summary = CabinetSyncService.FormatSyncResult(result,
-                    "所有在线柜子均已确认权限同步",
-                    "权限同步未全部完成");
-                if (result.Success) AppToast.Success("全部在线柜权限已同步");
-                else AppToast.Warning("部分柜子未确认，详见提示");
-                if (!result.Success)
-                    MessageBox.Show(summary, "同步提示", MessageBoxButton.OK, MessageBoxImage.Warning);
+                var window = new CabinetPermissionSyncWindow { Owner = Window.GetWindow(this) };
+                window.ShowDialog();
                 await LoadCabinetsAsync(quiet: true);
             }
-            catch (RootDataUnavailableException ex)
+            catch (Exception ex)
             {
-                AppToast.Error(ex.Message);
-            }
-            finally
-            {
-                SetBusy(false);
+                AppToast.Error("柜机权限同步页面打开失败");
+                MessageBox.Show($"柜机权限同步页面加载失败：{ex.Message}",
+                    "页面加载失败", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
 
@@ -212,8 +349,10 @@ namespace CabinetLock
             SetBusy(true, $"正在同步 {device.DisplayIdentity}…");
             try
             {
+                var progress = new Progress<string>(stage =>
+                    PageStatusText.Text = $"{device.DisplayIdentity}：{stage}");
                 CabinetDataSyncResult result = await App.CabinetSyncService
-                    .SyncCabinetDataAsync(device.DeviceId);
+                    .SyncCabinetDataAsync(device.DeviceId, progress);
                 if (result.Success)
                     AppToast.Success($"{device.DisplayIdentity} 已同步");
                 else
@@ -227,6 +366,70 @@ namespace CabinetLock
             catch (Exception ex)
             {
                 AppToast.Error($"同步失败：{ex.Message}");
+            }
+            finally
+            {
+                SetBusy(false);
+            }
+        }
+
+        private async void DeleteDeviceButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not Button { Tag: Device device }) return;
+
+            IReadOnlyList<User> assignedStudents;
+            SetBusy(true, $"正在检查 {device.DisplayIdentity} 的学生绑定");
+            try
+            {
+                assignedStudents = await Task.Run(() =>
+                    App.CabinetBindingService.GetAssignedStudents(device.DeviceId));
+            }
+            catch (Exception ex)
+            {
+                AppToast.Error($"学生绑定读取失败：{ex.Message}");
+                return;
+            }
+            finally
+            {
+                SetBusy(false);
+            }
+
+            if (assignedStudents.Count > 0)
+            {
+                string studentList = string.Join("\n", assignedStudents.Select((student, index) =>
+                    $"{index + 1}. {student.Name}（学号：{student.DisplayId}）"));
+                string message =
+                    $"柜子「{device.DisplayIdentity}」已绑定以下 {assignedStudents.Count} 名学生：\n\n" +
+                    $"{studentList}\n\n删除柜子会同时解除以上学生与该柜子的绑定。确认继续删除？";
+                if (MessageBox.Show(message, "删除柜子", MessageBoxButton.YesNo,
+                        MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes)
+                    return;
+            }
+
+            SetBusy(true, $"正在删除 {device.DisplayIdentity}");
+            try
+            {
+                (bool saved, int affectedStudents, string error) result = await Task.Run(() =>
+                {
+                    bool saved = App.DeviceService.DeleteDevice(
+                        device, out int affectedStudents, out string error);
+                    return (saved, affectedStudents, error);
+                });
+                if (!result.saved)
+                {
+                    AppToast.Error(string.IsNullOrWhiteSpace(result.error)
+                        ? "柜机删除失败" : result.error);
+                    return;
+                }
+
+                AppToast.Success(result.affectedStudents > 0
+                    ? $"柜机已删除，并解除 {result.affectedStudents} 名学生的绑定"
+                    : "柜机已删除");
+                await LoadCabinetsAsync(quiet: true);
+            }
+            catch (Exception ex)
+            {
+                AppToast.Error($"柜机删除失败：{ex.Message}");
             }
             finally
             {
@@ -309,8 +512,12 @@ namespace CabinetLock
                 }
                 dialog.DialogResult = true;
             };
-            nameInput.SelectAll();
-            nameInput.Focus();
+            dialog.ContentRendered += (_, _) =>
+            {
+                nameInput.Focus();
+                Keyboard.Focus(nameInput);
+                nameInput.SelectAll();
+            };
 
             if (dialog.ShowDialog() != true) return;
 
@@ -363,6 +570,11 @@ namespace CabinetLock
         {
             RefreshButton.IsEnabled = !busy;
             ResyncButton.IsEnabled = !busy;
+            FirmwareUpgradeButton.IsEnabled = !busy;
+            CabinetDataGrid.IsEnabled = !busy;
+            OperationProgressPanel.Visibility = busy
+                ? Visibility.Visible
+                : Visibility.Collapsed;
             if (!string.IsNullOrWhiteSpace(status)) PageStatusText.Text = status;
         }
     }

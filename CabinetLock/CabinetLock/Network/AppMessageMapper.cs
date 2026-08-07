@@ -8,11 +8,13 @@ namespace CabinetLock
     /// 统一协议模型：
     ///   传输层 A5/5A 帧 → 应用层 B1/0F 二进制信封(cmd_id/msg_id/device_id) → payload。
     /// 简单命令（CONTROL_LOCK/ACK/ERROR/HEARTBEAT）用定长二进制 payload；
-    /// 复杂命令（SD_*/SYNC_*/CONFIG/* 等）payload 仍为 UTF-8 JSON 对象字节。
+    /// 复杂命令通常使用 UTF-8 JSON；SD_SNAPSHOT_* 使用原始二进制负载。
     /// 不再使用“整包 JSON 消息”作为主路径。
     /// </summary>
     public static class AppMessageMapper
     {
+        public static ushort SessionId { get; } = CreateSessionId();
+
         private static readonly HashSet<ushort> NeedsAckCmds = new()
         {
             CmdIds.ControlLock,
@@ -31,6 +33,7 @@ namespace CabinetLock
             CmdIds.SyncPermission,
             CmdIds.CommitPermissionSync,
             CmdIds.ClearPermissions,
+            CmdIds.DeleteUserPermission,
             CmdIds.SyncPermissions,
             CmdIds.WriteConfig,
             CmdIds.Reboot,
@@ -40,8 +43,19 @@ namespace CabinetLock
             CmdIds.DeleteFpTemplate,
             CmdIds.ReadConfig,
             CmdIds.ReadStatus,
+            CmdIds.FingerprintListRequest,
             CmdIds.SdQuery,
             CmdIds.SdQueryVersion,
+            CmdIds.SdSnapshotManifest,
+            CmdIds.SdSnapshotBegin,
+            CmdIds.SdSnapshotCommit,
+            CmdIds.SdSnapshotDownload,
+            CmdIds.CabinetOtaBegin,
+            CmdIds.CabinetOtaChunk,
+            CmdIds.CabinetOtaCommit,
+            CmdIds.CabinetOtaStart,
+            CmdIds.CabinetOtaStatus,
+            CmdIds.CabinetOtaNodes,
         };
 
         public static AppMessage ToApp(Message msg)
@@ -63,7 +77,7 @@ namespace CabinetLock
                 Flags = flags,
                 CmdId = cmdId,
                 MsgId = msgId,
-                CorrId = 0,
+                CorrId = msg.CorrId == 0 ? SessionId : msg.CorrId,
                 DeviceId = msg.DeviceId ?? "",
                 SourceDeviceId = msg.SourceDeviceId ?? "",
                 TimestampUnix = (uint)DateTimeOffset.Now.ToUnixTimeSeconds(),
@@ -96,6 +110,7 @@ namespace CabinetLock
             return new Message
             {
                 MsgId = app.MsgId == 0 ? "" : app.MsgId.ToString(),
+                CorrId = app.CorrId,
                 Cmd = cmd,
                 DeviceId = deviceId,
                 SourceDeviceId = sourceId,
@@ -116,8 +131,21 @@ namespace CabinetLock
             return v == 0 ? (ushort)1 : v;
         }
 
+        private static ushort CreateSessionId()
+        {
+            ushort sessionId;
+            do
+            {
+                sessionId = (ushort)System.Security.Cryptography.RandomNumberGenerator.GetInt32(1, 65536);
+            } while (sessionId == 0);
+            return sessionId;
+        }
+
         private static byte[] BuildPayload(ushort cmdId, object? data)
         {
+            if (IsSnapshotCommand(cmdId) && data is byte[] raw)
+                return raw;
+
             switch (cmdId)
             {
                 case CmdIds.ControlLock:
@@ -177,6 +205,9 @@ namespace CabinetLock
         private static object? UnpackPayload(ushort cmdId, byte[]? payload)
         {
             payload ??= Array.Empty<byte>();
+            if (IsSnapshotCommand(cmdId))
+                return payload;
+
             switch (cmdId)
             {
                 case CmdIds.ControlLock:
@@ -218,6 +249,7 @@ namespace CabinetLock
                     }
                     break;
                 case CmdIds.StatusResponse:
+                case CmdIds.StatusReport:
                     if (BinaryMessageCodec.CabinetStatusPayload.TryUnpack(payload, out var status) &&
                         status != null)
                     {
@@ -240,6 +272,7 @@ namespace CabinetLock
                             ["fp_poll_max_ms"] = status.FingerprintPollMaxMs,
                             ["work_mode"] = (status.Flags & 0x02) != 0 ? "mesh" : "debug",
                             ["time_synced"] = (status.Flags & 0x01) != 0,
+                            ["fingerprint_ready"] = (status.Flags & 0x04) != 0,
                         };
                     }
                     break;
@@ -247,7 +280,7 @@ namespace CabinetLock
                 case CmdIds.HeartbeatAck:
                     if (BinaryMessageCodec.HeartbeatPayload.TryUnpack(payload,
                             out uint freeHeap, out uint freePsram, out ushort minFree,
-                            out byte layer, out _, out ushort sendFail, out ushort qFull, out ushort recoveries))
+                            out byte layer, out byte topology, out ushort sendFail, out ushort qFull, out ushort recoveries))
                     {
                         return new JObject
                         {
@@ -255,6 +288,8 @@ namespace CabinetLock
                             ["free_psram"] = freePsram,
                             ["min_free_heap"] = minFree,
                             ["mesh_layer"] = layer,
+                            ["mesh_node_type"] = (topology >> 3) & 0x07,
+                            ["child_count"] = topology & 0x07,
                             ["mesh_send_failures"] = sendFail,
                             ["mesh_queue_full"] = qFull,
                             ["mesh_recoveries"] = recoveries,
@@ -282,5 +317,9 @@ namespace CabinetLock
             try { return JObject.FromObject(data); }
             catch { return null; }
         }
+
+        private static bool IsSnapshotCommand(ushort cmdId) =>
+            cmdId >= CmdIds.SdSnapshotManifest &&
+            cmdId <= CmdIds.SdSnapshotDownloadPart;
     }
 }

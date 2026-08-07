@@ -51,12 +51,12 @@
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
                         <StackPanel>
-                            <TextBlock Text="柜机权限配置" Style="{StaticResource SectionTitleText}"/>
-                            <TextBlock Text="每台实训柜可独立设置柜门权限和使用指纹" Style="{StaticResource PageStatusText}" Margin="0,3,0,0"/>
+                            <TextBlock Text="开锁授权（按实训柜）" Style="{StaticResource SectionTitleText}"/>
+                            <TextBlock Text="每台实训柜分别选择指纹模板和柜门权限，互不影响" Style="{StaticResource PageStatusText}" Margin="0,3,0,0"/>
                         </StackPanel>
                         <ComboBox x:Name="CabinetCombo" Grid.Column="1" Width="220" Height="36"
                                   DisplayMemberPath="DisplayText" SelectedValuePath="DeviceId" Margin="10,0,8,0"/>
-                        <Button x:Name="BindCabinetButton" Grid.Column="2" Content="添加配置"
+                        <Button x:Name="BindCabinetButton" Grid.Column="2" Content="添加授权"
                                 Click="BindCabinetButton_Click"/>
                     </Grid>
                     <DataGrid x:Name="CabinetGrid" Grid.Row="1" BorderThickness="0" IsReadOnly="True"
@@ -75,13 +75,13 @@
                                                 ElementStyle="{StaticResource DataGridLeftTextBlockStyle}"/>
                             <DataGridTextColumn Header="使用指纹" Binding="{Binding SelectedFingerprintText}" Width="1.2*"
                                                  ElementStyle="{StaticResource DataGridLeftTextBlockStyle}"/>
-                            <DataGridTextColumn Header="同步" Binding="{Binding SyncStatusText}" Width="72"
+                            <DataGridTextColumn Header="授权状态" Binding="{Binding SyncStatusText}" Width="78"
                                                  ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
                             <DataGridTemplateColumn Header="操作" Width="142">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
                                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
-                                            <Button Content="配置" Tag="{Binding}" Width="58" MinWidth="58"
+                                            <Button Content="修改" Tag="{Binding}" Width="58" MinWidth="58"
                                                     Height="30" MinHeight="30" Margin="0,0,6,0"
                                                     Click="ConfigureCabinetButton_Click"/>
                                             <Button Content="解除" Tag="{Binding}" Width="58" MinWidth="58"

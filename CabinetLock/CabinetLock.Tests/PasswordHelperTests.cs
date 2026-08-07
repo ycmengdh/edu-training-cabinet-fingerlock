@@ -28,9 +28,22 @@ public class PasswordHelperTests
 
     [Theory]
     [InlineData("")]
-    [InlineData("1234567")]
-    public void PasswordPolicy_RejectsShortValues(string password)
+    [InlineData("12345")]
+    public void PasswordPolicy_RejectsValuesShorterThanSixCharacters(string password)
     {
         Assert.False(PasswordHelper.IsPasswordAcceptable(password));
+    }
+
+    [Fact]
+    public void PasswordPolicy_AcceptsSixThroughOneHundredTwentyEightCharacters()
+    {
+        Assert.True(PasswordHelper.IsPasswordAcceptable("123456"));
+        Assert.True(PasswordHelper.IsPasswordAcceptable(new string('a', 128)));
+    }
+
+    [Fact]
+    public void PasswordPolicy_RejectsValuesLongerThanOneHundredTwentyEightCharacters()
+    {
+        Assert.False(PasswordHelper.IsPasswordAcceptable(new string('a', 129)));
     }
 }

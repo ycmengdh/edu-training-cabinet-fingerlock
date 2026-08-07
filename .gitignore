@@ -52,6 +52,7 @@ __pycache__/
 .artifacts/
 .build-check/
 .zcode/
+CabinetLock/.verify/
 debug/output/
 通讯日志_*.xls
 esp32_firmware/cabinet_node/src/Untitled-*.txt

@@ -54,6 +54,16 @@ namespace CabinetLock
             return result.OrderByDescending(m => m.EnrollTime).ToList();
         }
 
+        /// <summary>只读取指定用户的指纹元数据，供详情和录入窗口使用。</summary>
+        public List<FingerprintTemplate> GetTemplatesForUser(string userId)
+        {
+            if (string.IsNullOrWhiteSpace(userId)) return new List<FingerprintTemplate>();
+            return BusinessDatabase.ReadFpTemplateMetasForUsers(new[] { userId })
+                .OrderBy(template => template.EnrollTime)
+                .ThenBy(template => template.FingerprintId)
+                .ToList();
+        }
+
         /// <summary>获取指定指纹 ID 的模板元数据；不存在返回 null</summary>
         public FingerprintTemplate? GetTemplate(int fingerprintId)
         {
@@ -155,8 +165,7 @@ namespace CabinetLock
         public IReadOnlyList<int> GetUsedFingerIndexes(string userId)
         {
             if (string.IsNullOrWhiteSpace(userId)) return Array.Empty<int>();
-            return BusinessDatabase.ReadAllFpTemplateMetas()
-                .Where(item => string.Equals(item.UserId, userId, StringComparison.OrdinalIgnoreCase))
+            return BusinessDatabase.ReadFpTemplateMetasForUsers(new[] { userId })
                 .Select(item => item.FingerIndex)
                 .Where(index => index is >= 1 and <= 10)
                 .Distinct()
@@ -345,31 +354,82 @@ namespace CabinetLock
         // ===== 设备指纹清单查询 =====
 
         /// <summary>
-        /// 查询指定柜子当前的指纹清单。
-        /// 由于固件 READ_PERMISSIONS 仅返回 count/version（不返回用户列表），
-        /// 这里通过 READ_STATUS 确认设备在线并获取实际指纹数，
-        /// 再用本地 users 表构造"应该在该柜子上的指纹"清单。
-        /// 用户表读取与 READ_STATUS 并行，且都在后台线程执行，避免卡 UI。
+        /// 查询指定柜子传感器的实际占用槽位，并关联本地用户与模板元数据。
+        /// 旧固件不支持槽位清单时，回退为本地绑定推算结果。
         /// </summary>
         public async Task<DeviceFingerprintListResult> GetDeviceFingerprintListAsync(
-            string deviceId, int statusTimeoutMs = 2500)
+            string deviceId, int statusTimeoutMs = 2500, bool queryRuntimeStatus = true)
         {
             var result = new List<DeviceFingerprintInfo>();
             if (string.IsNullOrWhiteSpace(deviceId))
                 return new DeviceFingerprintListResult(result, null);
 
-            Task<DeviceRuntimeStatus?> statusTask = QueryDeviceRuntimeStatusAsync(
-                deviceId, statusTimeoutMs);
+            Task<DeviceRuntimeStatus?> statusTask = queryRuntimeStatus
+                ? QueryDeviceRuntimeStatusAsync(deviceId, statusTimeoutMs)
+                : Task.FromResult<DeviceRuntimeStatus?>(null);
+            Task<IReadOnlyList<FingerprintSlotRecord>?> slotsTask =
+                App.CommandService.GetFingerprintSlotsAsync(deviceId);
             Task<List<User>> usersTask = Task.Run(() =>
             {
                 try { return _userService.GetAllUsers(); }
                 catch { return new List<User>(); }
             });
+            Task<List<FingerprintTemplate>> templatesTask = Task.Run(() =>
+            {
+                try { return GetAllTemplates(); }
+                catch { return new List<FingerprintTemplate>(); }
+            });
 
-            await Task.WhenAll(statusTask, usersTask).ConfigureAwait(false);
+            await Task.WhenAll(statusTask, slotsTask, usersTask, templatesTask)
+                .ConfigureAwait(false);
             DeviceRuntimeStatus? reportedStatus = statusTask.Result;
             int deviceFpCount = reportedStatus?.FingerprintCount ?? -1;
             List<User> users = usersTask.Result;
+            IReadOnlyList<FingerprintSlotRecord>? slots = slotsTask.Result;
+            Dictionary<string, User> usersById = users
+                .Where(user => !string.IsNullOrWhiteSpace(user.UserId))
+                .ToDictionary(user => user.UserId, StringComparer.OrdinalIgnoreCase);
+            Dictionary<int, FingerprintTemplate> templatesById = templatesTask.Result
+                .Where(template => template.FingerprintId > 0)
+                .GroupBy(template => template.FingerprintId)
+                .ToDictionary(group => group.Key, group => group.Last());
+
+            if (slots != null)
+            {
+                foreach (FingerprintSlotRecord slot in slots.Where(item => item.Slot >= 0))
+                {
+                    usersById.TryGetValue(slot.UserId, out User? user);
+                    templatesById.TryGetValue(slot.FingerprintId, out FingerprintTemplate? template);
+                    string role = !slot.Bound ? "" : user?.Role ?? slot.Role switch
+                    {
+                        0 => "admin",
+                        1 => "teacher",
+                        _ => "student"
+                    };
+                    result.Add(new DeviceFingerprintInfo
+                    {
+                        SlotId = slot.Slot,
+                        FingerprintId = slot.FingerprintId,
+                        UserId = slot.UserId,
+                        UserCode = user?.DisplayId ?? slot.UserId,
+                        UserName = user?.Name ?? slot.Name,
+                        FingerName = template?.FingerDisplayName ?? "",
+                        Role = role,
+                        IsEnabled = user?.Enabled ?? true,
+                        IsBound = slot.Bound,
+                        IsBackup = slot.IsBackup,
+                        HasPermission = slot.LockMask != 0,
+                        Lock0Allowed = (slot.LockMask & 0x01) != 0,
+                        Lock1Allowed = (slot.LockMask & 0x02) != 0,
+                        Lock2Allowed = (slot.LockMask & 0x04) != 0,
+                        Lock3Allowed = (slot.LockMask & 0x08) != 0,
+                        DeviceReportedCount = deviceFpCount >= 0
+                            ? deviceFpCount : slots.Count
+                    });
+                }
+                return new DeviceFingerprintListResult(result, reportedStatus);
+            }
+
             HashSet<string> excluded = App.CabinetBindingService.GetExcludedUserIds(deviceId);
 
             foreach (var u in users)
@@ -395,12 +455,14 @@ namespace CabinetLock
                 {
                     result.Add(new DeviceFingerprintInfo
                     {
+                        SlotId = fingerprintId,
                         FingerprintId = fingerprintId,
                         UserId = u.UserId,
                         UserCode = u.DisplayId,
                         UserName = u.Name,
                         Role = u.Role,
                         IsEnabled = u.Enabled,
+                        IsBound = true,
                         HasPermission = permissions.Any(allowed => allowed),
                         Lock0Allowed = permissions.Length > 0 && permissions[0],
                         Lock1Allowed = permissions.Length > 1 && permissions[1],
@@ -474,19 +536,28 @@ namespace CabinetLock
             try
             {
                 var msg = Message.Create(Protocol.CmdReadStatus, routeId);
-                bool sent = App.MeshBridge.SendToDevice(routeId, msg);
-                if (!sent && !string.Equals(routeId, targetId, StringComparison.OrdinalIgnoreCase))
+                int[] retryDelaysMs = { 250, 500, 1000 };
+                DateTime deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+                for (int attempt = 0; attempt <= retryDelaysMs.Length; attempt++)
                 {
-                    // 路由键失败时回退原始 ID 再试一次
-                    msg = Message.Create(Protocol.CmdReadStatus, targetId);
-                    sent = App.MeshBridge.SendToDevice(targetId, msg);
-                }
-                if (!sent) return null;
+                    App.MeshBridge.SendToDevice(routeId, msg);
+                    if (!string.Equals(routeId, targetId, StringComparison.OrdinalIgnoreCase))
+                        App.MeshBridge.SendToDevice(targetId, msg);
 
-                Task completed = await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs)).ConfigureAwait(false);
-                if (completed == tcs.Task)
-                    return await tcs.Task.ConfigureAwait(false);
-                return null;
+                    int remainingMs = (int)Math.Max(0,
+                        (deadline - DateTime.UtcNow).TotalMilliseconds);
+                    if (remainingMs == 0) break;
+                    int waitMs = attempt < retryDelaysMs.Length
+                        ? Math.Min(retryDelaysMs[attempt], remainingMs)
+                        : remainingMs;
+                    Task completed = await Task.WhenAny(tcs.Task, Task.Delay(waitMs))
+                        .ConfigureAwait(false);
+                    if (completed == tcs.Task)
+                        return await tcs.Task.ConfigureAwait(false);
+                }
+                return tcs.Task.IsCompleted
+                    ? await tcs.Task.ConfigureAwait(false)
+                    : null;
             }
             finally
             {
@@ -523,12 +594,16 @@ namespace CabinetLock
     /// <summary>设备指纹清单条目</summary>
     public class DeviceFingerprintInfo
     {
+        public int SlotId { get; set; }
         public int FingerprintId { get; set; }
         public string? UserId { get; set; }
         public string? UserCode { get; set; }
         public string? UserName { get; set; }
+        public string FingerName { get; set; } = "";
         public string? Role { get; set; }
         public bool IsEnabled { get; set; } = true;
+        public bool IsBound { get; set; }
+        public bool IsBackup { get; set; }
         public bool HasPermission { get; set; }
         public bool Lock0Allowed { get; set; }
         public bool Lock1Allowed { get; set; }
@@ -545,16 +620,23 @@ namespace CabinetLock
             _ => string.IsNullOrWhiteSpace(Role) ? "-" : Role
         };
 
+        public string FingerprintIdText => FingerprintId > 0
+            ? FingerprintId.ToString() : "-";
+        public string UserCodeText => string.IsNullOrWhiteSpace(UserCode) ? "-" : UserCode;
+        public string UserNameText => string.IsNullOrWhiteSpace(UserName) ? "未绑定用户" : UserName;
+        public string FingerNameText => string.IsNullOrWhiteSpace(FingerName) ? "-" : FingerName;
         public string UserStatusText => IsEnabled ? "启用" : "停用";
-        public string BindingStatusText => "已绑定";
-        public string Lock0Text => IsEnabled && Lock0Allowed ? "允许" : "-";
-        public string Lock1Text => IsEnabled && Lock1Allowed ? "允许" : "-";
-        public string Lock2Text => IsEnabled && Lock2Allowed ? "允许" : "-";
-        public string Lock3Text => IsEnabled && Lock3Allowed ? "允许" : "-";
+        public string BindingStatusText => SlotId == 0 ? "临时槽" :
+            IsBackup ? "本机副指纹" : IsBound ? "正式绑定" : "未绑定残留";
+        public string Lock0Text => IsBound && IsEnabled && Lock0Allowed ? "允许" : "-";
+        public string Lock1Text => IsBound && IsEnabled && Lock1Allowed ? "允许" : "-";
+        public string Lock2Text => IsBound && IsEnabled && Lock2Allowed ? "允许" : "-";
+        public string Lock3Text => IsBound && IsEnabled && Lock3Allowed ? "允许" : "-";
         public string PermissionSummaryText
         {
             get
             {
+                if (!IsBound) return "未绑定";
                 if (!IsEnabled) return "已停用";
                 int count = new[] { Lock0Allowed, Lock1Allowed, Lock2Allowed, Lock3Allowed }
                     .Count(allowed => allowed);

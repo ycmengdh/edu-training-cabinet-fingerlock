@@ -4,14 +4,11 @@ namespace CabinetLock
     /// 登录认证服务。账号和密码哈希从本机 business.db（users 表）读取，
     /// 启动时已从 SD 同步或以本地数据为准。
     /// 规则：
-    /// 1) 用户表为空（或完全读不到数据源）时，允许 admin/admin123，并尽量自动创建该账户；
-    /// 2) 一旦已有任意账户，一律按账户表严格校验，不再使用内置口令旁路。
+    /// 1) 用户表为空或系统管理员缺失时，允许 admin/admin123 初始化保留账户；
+    /// 2) 系统管理员一旦存在，一律按保存的密码哈希严格校验。
     /// </summary>
     public class AuthService
     {
-        private const string BuiltInAdministratorUserId = "admin";
-        private const string BuiltInAdministratorPassword = "admin123";
-
         public User? Login(string userId, string password)
         {
             if (string.IsNullOrWhiteSpace(userId) || string.IsNullOrEmpty(password)) return null;
@@ -30,8 +27,10 @@ namespace CabinetLock
                 throw;
             }
 
-            // 没有任何用户：引导创建默认管理员。
-            if (users.Count == 0)
+            // 空库或异常快照缺少保留管理员时，补建恢复账户。
+            if (users.Count == 0 ||
+                (!users.Any(SystemAdministratorPolicy.IsReserved) &&
+                 IsBuiltInAdministratorCredentials(userId, password)))
                 return BootstrapBuiltInAdministrator(userId, password);
 
             // 已有账户：严格按表验证。
@@ -60,8 +59,10 @@ namespace CabinetLock
         }
 
         public bool IsBuiltInAdministratorCredentials(string userId, string password) =>
-            string.Equals(userId?.Trim(), BuiltInAdministratorUserId, StringComparison.Ordinal) &&
-            string.Equals(password, BuiltInAdministratorPassword, StringComparison.Ordinal);
+            string.Equals(userId?.Trim(), SystemAdministratorPolicy.UserId,
+                StringComparison.Ordinal) &&
+            string.Equals(password, SystemAdministratorPolicy.InitialPassword,
+                StringComparison.Ordinal);
 
         /// <summary>
         /// 用户表为空时：校验内置口令，写入 admin 账户后返回；
@@ -71,25 +72,20 @@ namespace CabinetLock
         {
             if (!IsBuiltInAdministratorCredentials(userId, password)) return null;
 
-            var admin = new User
-            {
-                UserId = BuiltInAdministratorUserId,
-                UserCode = BuiltInAdministratorUserId,
-                Name = "超级管理员",
-                Role = "admin",
-                Enabled = true,
-                CreateTime = DateTime.Now
-            };
+            User admin = SystemAdministratorPolicy.CreateDefault();
 
             try
             {
-                if (App.UserService.AddUser(admin, BuiltInAdministratorPassword))
+                if (App.UserService.AddUser(admin,
+                        SystemAdministratorPolicy.InitialPassword))
                 {
-                    return App.UserService.GetUserByCode(BuiltInAdministratorUserId) ?? BuildEphemeralAdministrator();
+                    return App.UserService.GetUserByCode(SystemAdministratorPolicy.UserId) ??
+                        BuildEphemeralAdministrator();
                 }
 
                 // 可能是并发创建成功：再读一次并严格校验。
-                var existing = App.UserService.GetUserByCode(BuiltInAdministratorUserId);
+                var existing = App.UserService.GetUserByCode(
+                    SystemAdministratorPolicy.UserId);
                 if (existing != null && existing.Enabled &&
                     PasswordHelper.VerifyPassword(
                         password, existing.PasswordSalt, existing.PasswordHash))
@@ -115,15 +111,8 @@ namespace CabinetLock
             return BuildEphemeralAdministrator();
         }
 
-        private static User BuildEphemeralAdministrator() => new User
-        {
-            UserId = BuiltInAdministratorUserId,
-            UserCode = BuiltInAdministratorUserId,
-            Name = "超级管理员",
-            Role = "admin",
-            Enabled = true,
-            CreateTime = DateTime.Now
-        };
+        private static User BuildEphemeralAdministrator() =>
+            SystemAdministratorPolicy.CreateDefault();
 
         public bool ChangePassword(string userId, string oldPassword, string newPassword)
         {

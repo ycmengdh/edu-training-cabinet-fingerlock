@@ -3,9 +3,39 @@
          xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
          xmlns:local="clr-namespace:CabinetLock"
          xmlns:controls="clr-namespace:CabinetLock.Controls"
-         Title="班级信息" Width="560" Height="310"
+         Title="班级信息" Width="560" Height="382"
         WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
         Background="{StaticResource BackgroundBrush}">
+    <local:BorderlessWindow.Resources>
+        <Style x:Key="ClassStatusSegment" TargetType="RadioButton">
+            <Setter Property="Height" Value="34"/>
+            <Setter Property="Foreground" Value="{StaticResource SubTextBrush}"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="RadioButton">
+                        <Border x:Name="Segment" Background="Transparent" CornerRadius="6"
+                                Padding="12,0">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"
+                                              TextElement.Foreground="{TemplateBinding Foreground}"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Segment" Property="Background"
+                                        Value="{StaticResource PrimaryBrush}"/>
+                                <Setter Property="Foreground"
+                                        Value="{StaticResource PrimaryForegroundBrush}"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Segment" Property="Opacity" Value="0.88"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </local:BorderlessWindow.Resources>
     <Grid Margin="24,20,24,22">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -30,13 +60,24 @@
         <StackPanel Grid.Row="1" Margin="0,16,0,0">
             <TextBlock Text="负责教师" Style="{StaticResource LabelText}" Margin="0,0,0,7"/>
             <controls:SearchableMultiSelect x:Name="TeacherPicker"/>
+            <StackPanel x:Name="StatusSection" Margin="0,16,0,0">
+                <TextBlock Text="班级状态" Style="{StaticResource LabelText}" Margin="0,0,0,7"/>
+                <Border Background="{StaticResource HintBrush}" CornerRadius="7" Padding="3">
+                    <UniformGrid Columns="2">
+                        <RadioButton x:Name="EnabledStatusButton" GroupName="ClassStatus"
+                                     Content="启用" Style="{StaticResource ClassStatusSegment}"/>
+                        <RadioButton x:Name="DisabledStatusButton" GroupName="ClassStatus"
+                                     Content="停用" Style="{StaticResource ClassStatusSegment}"/>
+                    </UniformGrid>
+                </Border>
+            </StackPanel>
         </StackPanel>
         <Grid Grid.Row="2" Margin="0,16,0,0">
             <TextBlock x:Name="SelectionText" VerticalAlignment="Center"
                        Foreground="{StaticResource SubTextBrush}"/>
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                 <Button Content="取消" Style="{StaticResource SecondaryButton}" Click="CancelButton_Click"/>
-                <Button Content="保存" Margin="8,0,0,0" Click="SaveButton_Click"/>
+                <Button Content="保存" Margin="8,0,0,0" Click="SaveButton_Click" Foreground="White"/>
             </StackPanel>
         </Grid>
     </Grid>

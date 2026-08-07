@@ -20,31 +20,64 @@
                 <TextBlock x:Name="PageStatusText" Text="管理教师账号及负责班级" Style="{StaticResource PageStatusText}"/>
             </StackPanel>
             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Bottom">
+                <Button x:Name="AddTeacherButton" Click="AddTeacherButton_Click">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE710;" FontFamily="{StaticResource AppIconFont}"
+                                   Foreground="{StaticResource PrimaryForegroundBrush}" Margin="0,0,8,0"/>
+                        <TextBlock Text="添加教师" Foreground="{StaticResource PrimaryForegroundBrush}"/>
+                    </StackPanel>
+                </Button>
+                <Button x:Name="ImportTeachersButton" Style="{StaticResource SecondaryButton}"
+                        Content="导入教师" Margin="8,0,0,0" Click="ImportTeachersButton_Click"/>
                 <Button x:Name="FingerprintSyncButton" Style="{StaticResource SecondaryButton}"
-                        Content="教师指纹同步" Margin="0,0,8,0" Click="FingerprintSyncButton_Click"/>
-                <Button x:Name="EnrollTeacherFingerprintButton" Style="{StaticResource SecondaryButton}"
-                        Content="录入教师指纹" Margin="0,0,8,0" Click="EnrollTeacherFingerprintButton_Click"/>
-                <Button x:Name="AddTeacherButton" Content="添加教师" Click="AddTeacherButton_Click"/>
-                <Button x:Name="EditTeacherButton" Style="{StaticResource SecondaryButton}" Content="编辑" Margin="8,0,0,0" Click="EditTeacherButton_Click"/>
-                <Button x:Name="ResetPasswordButton" Style="{StaticResource SecondaryButton}" Content="重置密码" Margin="8,0,0,0" Click="ResetPasswordButton_Click"/>
-                <Button x:Name="ToggleTeacherButton" Style="{StaticResource SecondaryButton}" Content="启用 / 停用" Margin="8,0,0,0" Click="ToggleTeacherButton_Click"/>
-                <Button x:Name="DeleteTeacherButton" Style="{StaticResource DangerButton}" Content="删除" Margin="8,0,0,0" Click="DeleteTeacherButton_Click"/>
+                         Content="教师指纹同步" Margin="8,0,0,0" Click="FingerprintSyncButton_Click"/>
+                <Button x:Name="DeleteSelectedTeachersButton" Style="{StaticResource DangerButton}"
+                        Margin="8,0,0,0" IsEnabled="False"
+                        ToolTip="请先勾选教师" Click="DeleteSelectedTeachersButton_Click">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE74D;" FontFamily="{StaticResource AppIconFont}"
+                                   Foreground="{StaticResource DangerBrush}" Margin="0,0,8,0"/>
+                        <TextBlock Text="删除所选" Foreground="{StaticResource DangerBrush}"/>
+                    </StackPanel>
+                </Button>
                 <Button x:Name="RefreshButton" Style="{StaticResource IconButton}" Content="&#xE72C;" ToolTip="刷新教师" Margin="8,0,0,0" Click="RefreshButton_Click"/>
             </StackPanel>
         </Grid>
 
         <Border Grid.Row="1" Style="{StaticResource Panel}">
-            <DataGrid x:Name="TeacherDataGrid" BorderThickness="0" IsReadOnly="True" SelectionMode="Single">
+            <DataGrid x:Name="TeacherDataGrid" BorderThickness="0" IsReadOnly="True" SelectionMode="Extended">
                 <DataGrid.Resources>
                     <Style TargetType="TextBlock" BasedOn="{StaticResource DataGridTextBlockStyle}"/>
                 </DataGrid.Resources>
                 <DataGrid.Columns>
+                    <DataGridTemplateColumn Width="48">
+                        <DataGridTemplateColumn.HeaderTemplate>
+                            <DataTemplate>
+                                <CheckBox ToolTip="选择本页全部教师"
+                                          Checked="SelectPageCheckBox_Changed"
+                                          Unchecked="SelectPageCheckBox_Changed"/>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.HeaderTemplate>
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                          HorizontalAlignment="Center"
+                                          Checked="TeacherSelectionCheckBox_Changed"
+                                          Unchecked="TeacherSelectionCheckBox_Changed"/>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
                     <DataGridTextColumn Header="教师 ID" Binding="{Binding DisplayId}" Width="180"
                                         ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
                     <DataGridTextColumn Header="姓名" Binding="{Binding Name}" Width="160"
                                         ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                    <DataGridTextColumn Header="负责班级" Binding="{Binding ResponsibleClassText}" Width="2.2*"
-                                        ElementStyle="{StaticResource DataGridLeftTextBlockStyle}"/>
+                    <DataGridTextColumn Header="负责班级" Binding="{Binding ResponsibleClassText}" Width="2.2*">
+                        <DataGridTextColumn.ElementStyle>
+                            <Style TargetType="TextBlock" BasedOn="{StaticResource DataGridLeftTextBlockStyle}">
+                                <Setter Property="Padding" Value="14,0,8,0"/>
+                            </Style>
+                        </DataGridTextColumn.ElementStyle>
+                    </DataGridTextColumn>
                     <DataGridTextColumn Header="班级数" Binding="{Binding ResponsibleClassCount}" Width="76"
                                         ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
                     <DataGridTextColumn Header="指纹 ID" Binding="{Binding FingerprintId}" Width="100"
@@ -53,22 +86,22 @@
                                         ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
                     <DataGridTextColumn Header="创建时间" Binding="{Binding CreateTime, StringFormat=yyyy-MM-dd HH:mm}" Width="180"
                                         ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                    <DataGridTemplateColumn Header="操作" Width="124">
+                    <DataGridTemplateColumn Header="操作" Width="118">
                         <DataGridTemplateColumn.CellTemplate>
                             <DataTemplate>
-                                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
                                     <Button Content="&#xE70F;" FontFamily="{StaticResource AppIconFont}" Tag="{Binding}"
                                             Style="{StaticResource IconButton}" ToolTip="编辑教师及负责班级"
                                             Width="32" MinWidth="32" Height="30" MinHeight="30" Margin="0,0,6,0"
                                             Click="EditRowButton_Click"/>
-                                    <Button Content="&#xE72E;" FontFamily="{StaticResource AppIconFont}" Tag="{Binding}"
-                                            Style="{StaticResource IconButton}" ToolTip="重置教师密码"
+                                    <Button Content="&#xE928;" FontFamily="{StaticResource AppIconFont}" Tag="{Binding}"
+                                            Style="{StaticResource IconButton}" ToolTip="录入教师指纹"
                                             Width="32" MinWidth="32" Height="30" MinHeight="30" Margin="0,0,6,0"
-                                            Click="ResetPasswordRowButton_Click"/>
-                                    <Button Content="&#xE74D;" FontFamily="{StaticResource AppIconFont}" Tag="{Binding}"
-                                            Style="{StaticResource IconButton}" ToolTip="删除教师"
+                                            Click="EnrollFingerprintRowButton_Click"/>
+                                    <Button Content="&#xE712;" FontFamily="{StaticResource AppIconFont}" Tag="{Binding}"
+                                            Style="{StaticResource IconButton}" ToolTip="更多操作"
                                             Width="32" MinWidth="32" Height="30" MinHeight="30"
-                                            Click="DeleteRowButton_Click"/>
+                                            Click="MoreRowButton_Click"/>
                                 </StackPanel>
                             </DataTemplate>
                         </DataGridTemplateColumn.CellTemplate>

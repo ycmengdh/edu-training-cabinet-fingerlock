@@ -36,6 +36,8 @@ namespace CabinetLock
         /// <summary>SD 卡集中存储服务（通过 Mesh 与根节点 SD 卡通信）</summary>
         public static SdStorageService SdStorageService { get; } = new SdStorageService();
 
+        public static CabinetOtaService CabinetOtaService { get; } = new CabinetOtaService();
+
         /// <summary>SD ↔ 本机业务库同步</summary>
         public static SdBusinessSyncService SdBusinessSyncService { get; } = new SdBusinessSyncService();
 
@@ -48,6 +50,7 @@ namespace CabinetLock
         private readonly CancellationTokenSource _shutdownCts = new();
         private SingleInstanceGuard? _singleInstanceGuard;
         private int _exitStarted;
+        private int _cabinetBackgroundServicesStarted;
         private static int _exitPromptOpen;
 
         public static bool ExitApproved { get; private set; }
@@ -126,7 +129,6 @@ namespace CabinetLock
                 BusinessDatabase.MigrateFingerprintsFromLocalCacheIfEmpty();
                 LogDatabase.MigrateOperationLogsFromJsonIfEmpty();
                 LogDatabase.MigrateUnlockLogsFromCacheIfEmpty();
-                _ = CabinetSyncQueueService.RunAsync(_shutdownCts.Token);
             }
             catch (Exception ex)
             {
@@ -148,6 +150,20 @@ namespace CabinetLock
             var startup = new StartupWindow();
             startup.Show();
         }
+
+        /// <summary>
+        /// 启动同步会用临时库原子替换主业务库，所有可能访问业务库的后台任务
+        /// 必须等替换结束后再启动，避免 SQLite 连接池重新占用主库文件。
+        /// </summary>
+        internal void StartCabinetBackgroundServicesOnce()
+        {
+            if (Interlocked.Exchange(ref _cabinetBackgroundServicesStarted, 1) != 0) return;
+            _ = CabinetSyncQueueService.RunAsync(_shutdownCts.Token);
+            CabinetSyncQueueService.Trigger();
+        }
+
+        private bool CabinetBackgroundServicesStarted =>
+            Volatile.Read(ref _cabinetBackgroundServicesStarted) != 0;
 
         /// <summary>
         /// 应用退出：业务数据上传校验已在主窗口 Closing 阶段完成，
@@ -187,11 +203,20 @@ namespace CabinetLock
             MessageHandler.OnFingerprintEnrollmentResult += OnFingerprintEnrollmentResult;
             MessageHandler.OnPermissionSyncResult += OnPermissionSyncResult;
             MessageHandler.OnConfigSaved += OnConfigSavedHandler;
+            MessageHandler.OnConfigResponse += OnConfigResponse;
         }
 
         private void OnDeviceConnected(DeviceClient device)
         {
-            CabinetSyncQueueService.Trigger();
+            if (CabinetBackgroundServicesStarted)
+            {
+                _ = Task.Run(() =>
+                {
+                    try { DeviceService.GetAllDevices(); }
+                    catch { }
+                });
+                CabinetSyncQueueService.Trigger();
+            }
         }
 
         private void OnDeviceDisconnected(DeviceClient device)
@@ -222,7 +247,15 @@ namespace CabinetLock
         private void OnDeviceRegistered(string deviceId, string deviceName)
         {
             System.Diagnostics.Debug.WriteLine($"[APP] device registered: {deviceId} {deviceName}");
-            CabinetSyncQueueService.Trigger();
+            if (CabinetBackgroundServicesStarted)
+            {
+                _ = Task.Run(() =>
+                {
+                    try { DeviceService.GetAllDevices(); }
+                    catch { }
+                });
+                CabinetSyncQueueService.Trigger();
+            }
         }
 
         private DateTime _lastTimeSyncAt = DateTime.MinValue;
@@ -258,8 +291,8 @@ namespace CabinetLock
         }
 
         /// <summary>
-        /// 日志上报：始终写入本机 logs.db 便于查询；
-        /// SD 在线时根节点自身也会落盘。
+        /// 日志上报：上位机在线时直接写入本机 logs.db；
+        /// 根节点只暂存上位机离线期间的日志，并在下次启动时补传。
         /// </summary>
         private void OnLogReport(string deviceId, string logJson)
         {
@@ -378,12 +411,23 @@ namespace CabinetLock
             if (connected)
             {
                 MeshBridge.Send("", Protocol.CmdRegister);
-                CabinetSyncQueueService.Trigger();
+                if (CabinetBackgroundServicesStarted)
+                    CabinetSyncQueueService.Trigger();
             }
         }
 
         private void OnConfigSavedHandler(string deviceId)
         {
+        }
+
+        private void OnConfigResponse(string deviceId, string configJson)
+        {
+            if (!CabinetBackgroundServicesStarted) return;
+            _ = Task.Run(() =>
+            {
+                try { DeviceService.GetAllDevices(); }
+                catch { }
+            });
         }
     }
 }

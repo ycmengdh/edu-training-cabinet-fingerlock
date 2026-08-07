@@ -141,6 +141,66 @@ public sealed class MultiFingerprintBindingTests
     }
 
     [Fact]
+    public void RemoveDeviceAssignments_OnlyRemovesStudentsFromTheDeletedCabinet()
+    {
+        string originalPath = BusinessDatabase.ActiveDbPath;
+        User? originalUser = App.CurrentUser;
+        string tempPath = Path.Combine(Path.GetTempPath(), $"fingerlock-{Guid.NewGuid():N}.db");
+        try
+        {
+            BusinessDatabase.SetActivePath(tempPath);
+            BusinessDatabase.Initialize();
+            BusinessDatabase.ReplaceTable("users", JArray.Parse("""
+            [
+              {
+                "user_id":"S001","user_code":"001","name":"学生一","role":"student",
+                "assigned_device_ids":["CAB_01","CAB_02"],
+                "cabinet_assignments":[
+                  {"device_id":"CAB_01","fingerprint_ids":[11]},
+                  {"device_id":"CAB_02","fingerprint_ids":[12]}
+                ]
+              },
+              {
+                "user_id":"S002","user_code":"002","name":"学生二","role":"student",
+                "assigned_device_ids":["CAB_01"],
+                "cabinet_assignments":[{"device_id":"CAB_01","fingerprint_ids":[21]}]
+              },
+              {"user_id":"T001","name":"教师","role":"teacher"},
+              {"user_id":"A001","name":"管理员","role":"admin"}
+            ]
+            """), 1);
+            BusinessDatabase.ReplaceTable("devices", JArray.Parse("""
+            [
+              {"device_id":"CAB_01","device_name":"一号柜","is_root":false},
+              {"device_id":"CAB_02","device_name":"二号柜","is_root":false}
+            ]
+            """), 1);
+            App.CurrentUser = new User { UserId = "admin", Role = "admin" };
+
+            var service = new CabinetBindingService();
+            Assert.Equal(new[] { "S001", "S002" }, service.GetAssignedStudents("cab_01")
+                .Select(user => user.UserId).OrderBy(userId => userId));
+
+            Assert.True(service.RemoveDeviceAssignments("CAB_01", out int affected));
+            Assert.Equal(2, affected);
+
+            Dictionary<string, User> stored = BusinessDatabase.ReadArray("users")
+                .Select(item => item.ToObject<User>()!)
+                .ToDictionary(user => user.UserId);
+            Assert.Equal(new[] { "CAB_02" }, stored["S001"].AssignedDeviceIds);
+            Assert.Empty(stored["S002"].AssignedDeviceIds!);
+            Assert.Null(stored["T001"].CabinetAssignments);
+            Assert.Null(stored["A001"].CabinetAssignments);
+        }
+        finally
+        {
+            App.CurrentUser = originalUser;
+            BusinessDatabase.SetActivePath(originalPath);
+            DeleteDatabaseFiles(tempPath);
+        }
+    }
+
+    [Fact]
     public void Snapshot_DefaultFingerprint_DoesNotUseAnotherUsersMatchingLegacyId()
     {
         var user = new User

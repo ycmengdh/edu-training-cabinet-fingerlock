@@ -17,6 +17,29 @@ namespace CabinetLock
             return users.OrderBy(u => u.Role).ThenBy(u => u.UserId).ToList();
         }
 
+        public PagedResult<User> QueryVisibleUsersPage(
+            int pageIndex, int pageSize, string? role = null, string? keyword = null,
+            string? classId = null, string? className = null,
+            UserPageSort sort = UserPageSort.RoleThenId)
+        {
+            User? current = Scope.CurrentUser;
+            PagedResult<User> result = BusinessDatabase.QueryUsers(new UserPageQuery
+            {
+                PageIndex = pageIndex,
+                PageSize = pageSize,
+                Role = role,
+                Keyword = keyword,
+                ClassId = classId,
+                ClassName = className,
+                ScopeRole = current?.Role ?? "",
+                ScopeUserId = current?.UserId ?? "",
+                ScopeClassIds = Scope.GetVisibleClassIds(),
+                Sort = sort
+            });
+            foreach (User user in result.Items) NormalizeClassAssignments(user);
+            return result;
+        }
+
         /// <summary>
         /// V2.7：获取当前用户可见范围内的用户列表。
         /// Admin 全部；Teacher 本班学生 + 自己 + 管理员（只读）；Student 仅自己。
@@ -42,11 +65,19 @@ namespace CabinetLock
             return GetVisibleUsers().Where(u => u.Role == role).ToList();
         }
 
+        public StudentBindingStatistics GetVisibleStudentBindingStatistics()
+        {
+            User? current = Scope.CurrentUser;
+            return BusinessDatabase.QueryStudentBindingStatistics(
+                current?.Role ?? "", current?.UserId ?? "", Scope.GetVisibleClassIds());
+        }
+
         public User? GetUser(string userId)
         {
             if (string.IsNullOrWhiteSpace(userId)) return null;
-            return _root.Read<User>("users")
-                .FirstOrDefault(u => u.UserId == userId);
+            User? user = BusinessDatabase.ReadUser(userId);
+            if (user != null) NormalizeClassAssignments(user);
+            return user;
         }
 
         public User? GetUserByCode(string userCode)
@@ -67,6 +98,8 @@ namespace CabinetLock
         public bool AddUser(User user, string password)
         {
             if (user == null) return false;
+            if (SystemAdministratorPolicy.IsReserved(user))
+                SystemAdministratorPolicy.Normalize(user);
             PrepareNewIdentity(user);
             if (string.IsNullOrWhiteSpace(user.UserId) || string.IsNullOrWhiteSpace(user.UserCode)) return false;
 
@@ -104,6 +137,8 @@ namespace CabinetLock
         public bool AddUser(User user)
         {
             if (user == null) return false;
+            if (SystemAdministratorPolicy.IsReserved(user))
+                SystemAdministratorPolicy.Normalize(user);
             PrepareNewIdentity(user);
             if (string.IsNullOrWhiteSpace(user.UserId) || string.IsNullOrWhiteSpace(user.UserCode)) return false;
             if (Scope.CurrentUser != null) Scope.EnsureCanCreate(user);
@@ -155,8 +190,23 @@ namespace CabinetLock
             var users = _root.Read<User>("users");
             var existing = users.FirstOrDefault(u => u.UserId == user.UserId);
             if (existing == null) return false;
-            user.UserCode = string.IsNullOrWhiteSpace(user.UserCode)
-                ? existing.DisplayId : user.UserCode.Trim();
+            if (SystemAdministratorPolicy.IsReserved(existing))
+            {
+                // Profile edits must not be able to rename the recovery login,
+                // change its role, or overwrite its password outside the password flow.
+                user.UserId = SystemAdministratorPolicy.UserId;
+                user.UserCode = SystemAdministratorPolicy.UserId;
+                user.Role = "admin";
+                user.PasswordSalt = existing.PasswordSalt;
+                user.PasswordHash = existing.PasswordHash;
+                if (user.CreateTime == default) user.CreateTime = existing.CreateTime;
+                SystemAdministratorPolicy.Normalize(user);
+            }
+            else
+            {
+                user.UserCode = string.IsNullOrWhiteSpace(user.UserCode)
+                    ? existing.DisplayId : user.UserCode.Trim();
+            }
             if (users.Any(item => !string.Equals(item.UserId, user.UserId, StringComparison.OrdinalIgnoreCase) &&
                     string.Equals(item.DisplayId, user.UserCode, StringComparison.OrdinalIgnoreCase))) return false;
 
@@ -178,8 +228,8 @@ namespace CabinetLock
             int index = users.IndexOf(existing);
             users[index] = user;
             bool saved = _root.Save("users", users);
-            if (saved && existing.Enabled != user.Enabled)
-                QueueCabinetRefresh(user, "用户启用状态变化");
+            if (saved)
+                QueueCabinetRefresh(user, user.Enabled ? "修改用户资料" : "停用用户");
             return saved;
         }
 
@@ -189,6 +239,7 @@ namespace CabinetLock
             var users = _root.Read<User>("users");
             var existing = users.FirstOrDefault(u => u.UserId == userId);
             if (existing == null) return false;
+            if (SystemAdministratorPolicy.IsReserved(existing)) return false;
 
             // V2.7：教师只能删除本班学生
             Scope.EnsureCanModify(existing);
@@ -211,8 +262,8 @@ namespace CabinetLock
             var permissions = _root.Read<UserPermission>("permissions");
             permissions.RemoveAll(p => p.UserId == userId);
             _root.Save("permissions", permissions);
-            foreach (string deviceId in affectedDevices)
-                App.CabinetSyncQueueService.EnqueueCabinet(deviceId, "删除用户并清理柜机数据");
+            App.CabinetSyncQueueService.EnqueueUserDeletion(
+                userId, affectedDevices, "删除用户并清理柜机数据");
             App.CabinetSyncQueueService.Trigger();
             return true;
         }
@@ -232,7 +283,23 @@ namespace CabinetLock
 
             user.FingerprintId = fingerprintId;
             user.UpdateTime = DateTime.Now;
-            return _root.Save("users", users);
+            bool saved = _root.Save("users", users);
+            if (saved)
+            {
+                try
+                {
+                    string[] known = App.DeviceService.GetAllDevices()
+                        .Where(device => !DeviceService.IsTrueRoot(device))
+                        .Select(device => device.DeviceId).ToArray();
+                    foreach (string deviceId in App.CabinetBindingService
+                                 .GetAssignedDeviceIds(user, known))
+                        App.CabinetSyncQueueService.EnqueueCabinet(
+                            deviceId, "更新用户主指纹并清理旧槽位");
+                    App.CabinetSyncQueueService.Trigger();
+                }
+                catch { }
+            }
+            return saved;
         }
 
         /// <summary>清除用户主指纹编号；柜子模板清理由调用方负责。</summary>
@@ -340,6 +407,12 @@ namespace CabinetLock
         {
             user.UserCode = string.IsNullOrWhiteSpace(user.UserCode)
                 ? user.UserId?.Trim() ?? "" : user.UserCode.Trim();
+            if (SystemAdministratorPolicy.IsReserved(user))
+            {
+                user.UserId = SystemAdministratorPolicy.UserId;
+                user.UserCode = SystemAdministratorPolicy.UserId;
+                return;
+            }
             if (string.IsNullOrWhiteSpace(user.UserId) ||
                 string.Equals(user.UserId, user.UserCode, StringComparison.OrdinalIgnoreCase))
                 user.UserId = CreateInternalUserId();
@@ -353,9 +426,12 @@ namespace CabinetLock
                 string[] known = App.DeviceService.GetAllDevices()
                     .Where(device => !DeviceService.IsTrueRoot(device))
                     .Select(device => device.DeviceId).ToArray();
-                foreach (string deviceId in App.CabinetBindingService
-                             .GetAssignedDeviceIds(user, known))
-                    App.CabinetSyncQueueService.EnqueueCabinet(deviceId, reason);
+                HashSet<string> assigned = App.CabinetBindingService
+                    .GetAssignedDeviceIds(user, known);
+                if (user.Enabled)
+                    App.CabinetSyncQueueService.EnqueueUser(user.UserId, assigned, reason);
+                else
+                    App.CabinetSyncQueueService.EnqueueUserDeletion(user.UserId, assigned, reason);
                 App.CabinetSyncQueueService.Trigger();
             }
             catch { }
@@ -379,26 +455,7 @@ namespace CabinetLock
             var used = new HashSet<int>();
             try
             {
-                foreach (FingerprintTemplate meta in BusinessDatabase.ReadAllFpTemplateMetas())
-                    used.Add(meta.FingerprintId);
-            }
-            catch
-            {
-                // 忽略
-            }
-
-            try
-            {
-                // 本机业务库 users 表
-                var users = BusinessDatabase.ReadArray("users");
-                if (users != null)
-                {
-                    foreach (var token in users.OfType<Newtonsoft.Json.Linq.JObject>())
-                    {
-                        var fpId = token.Value<int?>("fingerprint_id");
-                        if (fpId.HasValue) used.Add(fpId.Value);
-                    }
-                }
+                used = BusinessDatabase.ReadUsedFingerprintIds();
             }
             catch
             {

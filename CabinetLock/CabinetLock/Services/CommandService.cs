@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using Newtonsoft.Json.Linq;
 
 namespace CabinetLock
 {
@@ -9,9 +10,11 @@ namespace CabinetLock
         private readonly ConcurrentDictionary<string, TaskCompletionSource<FingerprintEnrollmentResult>>
             _pendingEnrollments = new();
         private readonly ConcurrentDictionary<string, BroadcastPending> _pendingBroadcasts = new();
+        private readonly ConcurrentDictionary<string, SemaphoreSlim> _deviceCommandGates =
+            new(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>
-        /// 发送命令并等待 ACK。超时后以相同 msg_id 重试，间隔 250/500/1000ms，最多发送 4 次。
+        /// 发送命令并等待 ACK。以相同 msg_id 在 250/500/1000/2000ms 后重试，最多发送 5 次。
         /// </summary>
         public async Task<CommandResult> SendAsync(
             string deviceId, Message message, int timeoutMs = 5000)
@@ -19,14 +22,33 @@ namespace CabinetLock
             if (string.IsNullOrWhiteSpace(deviceId) || message == null)
                 return CommandResult.Failed("参数无效");
 
+            string routeKey = deviceId.Trim();
+            SemaphoreSlim gate = _deviceCommandGates.GetOrAdd(
+                routeKey, static _ => new SemaphoreSlim(1, 1));
+            await gate.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                return await SendCoreAsync(routeKey, message, timeoutMs)
+                    .ConfigureAwait(false);
+            }
+            finally
+            {
+                gate.Release();
+            }
+        }
+
+        private async Task<CommandResult> SendCoreAsync(
+            string deviceId, Message message, int timeoutMs)
+        {
+
             var tcs = new TaskCompletionSource<CommandResult>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
             if (!_pending.TryAdd(message.MsgId, tcs))
                 return CommandResult.Failed("消息编号冲突");
 
             // 同 msg_id 最多发送 4 次；柜机按 msg_id 重放响应，不重复执行业务。
-            int[] retryDelaysMs = { 250, 500, 1000 };
-            const int maxAttempts = 4;
+            int[] retryDelaysMs = { 250, 500, 1000, 2000 };
+            int maxAttempts = retryDelaysMs.Length + 1;
             int attempt = 0;
             DateTime deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
 
@@ -35,15 +57,9 @@ namespace CabinetLock
                 while (true)
                 {
                     attempt++;
-                    if (!App.MeshBridge.SendToDevice(deviceId, message))
-                    {
-                        // 首次发送失败直接返回；后续重试发送失败则继续等 ACK 或下一轮
-                        if (attempt == 1)
-                        {
-                            _pending.TryRemove(message.MsgId, out _);
-                            return CommandResult.Failed("设备链路不可用");
-                        }
-                    }
+                    // 队列满、路由重建和串口瞬时写失败都可能只影响首包。
+                    // 保持相同 msg_id 进入后续重试，由柜机响应缓存保证业务不重复执行。
+                    App.MeshBridge.SendToDevice(deviceId, message);
 
                     if (tcs.Task.IsCompleted)
                         return await tcs.Task;
@@ -98,9 +114,16 @@ namespace CabinetLock
 
         public void HandleError(string msgId, string errorCode, string message)
         {
+            if (IsTransientError(errorCode)) return;
             if (_pending.TryRemove(msgId, out var pending))
                 pending.TrySetResult(CommandResult.Failed(message, errorCode));
         }
+
+        public static bool IsTransientError(string? errorCode) =>
+            string.Equals(errorCode, Protocol.ErrMeshForwardFailed,
+                StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(errorCode, Protocol.ErrDeviceNotRegistered,
+                StringComparison.OrdinalIgnoreCase);
 
         public void HandleConnectionChanged(bool connected)
         {
@@ -132,8 +155,10 @@ namespace CabinetLock
             int timeoutMs = 180_000,
             Action<string, int, int, string>? onProgress = null)
         {
-            // 新流程：fingerprint_id=0 表示由柜子自动分配（录入到临时槽 ID=0，
-            // 检测通过后迁移到 allocLocalFpId() 分配的真实 ID 并回报）。
+            // fingerprint_id 只是用户模板库中的逻辑 ID；柜机采集始终使用临时槽 0。
+            // 验证后固件导出模板并清空槽 0，不分配或迁移到正式槽位。
+            if (fingerprintId <= 0)
+                return FingerprintEnrollmentResult.Failed("录入前必须分配有效的用户模板 ID");
             var message = Message.Create(Protocol.CmdAddFingerprint, deviceId, new
             {
                 fingerprint_id = fingerprintId,
@@ -308,6 +333,83 @@ namespace CabinetLock
             }
         }
 
+        public async Task<IReadOnlyList<FingerprintSlotRecord>?> GetFingerprintSlotsAsync(
+            string deviceId, int timeoutMs = 10_000)
+        {
+            const int pageSize = 20;
+            var slots = new List<FingerprintSlotRecord>();
+            for (int page = 0; page < 32; page++)
+            {
+                FingerprintSlotPage? response = await GetFingerprintSlotPageAsync(
+                    deviceId, page, pageSize, timeoutMs).ConfigureAwait(false);
+                if (response == null) return null;
+                slots.AddRange(response.Items);
+                if (slots.Count >= response.Total || response.Items.Count == 0)
+                    return slots.OrderBy(item => item.Slot).ToArray();
+            }
+            return slots.OrderBy(item => item.Slot).ToArray();
+        }
+
+        private async Task<FingerprintSlotPage?> GetFingerprintSlotPageAsync(
+            string deviceId, int page, int pageSize, int timeoutMs)
+        {
+            var message = Message.Create(Protocol.CmdFingerprintListRequest, deviceId,
+                new { page, page_size = pageSize });
+            var completion = new TaskCompletionSource<FingerprintSlotPage>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+
+            void Handler(string responseDeviceId, string msgId, string json)
+            {
+                if (!string.Equals(msgId, message.MsgId, StringComparison.Ordinal) ||
+                    !string.Equals(responseDeviceId, deviceId,
+                        StringComparison.OrdinalIgnoreCase)) return;
+                try
+                {
+                    JObject root = JObject.Parse(json);
+                    var result = new FingerprintSlotPage
+                    {
+                        Page = root.Value<int?>("page") ?? page,
+                        PageSize = root.Value<int?>("page_size") ?? pageSize,
+                        Total = root.Value<int?>("total") ?? 0,
+                        Capacity = root.Value<int?>("capacity") ?? 0
+                    };
+                    foreach (JToken item in root["items"] as JArray ?? new JArray())
+                    {
+                        result.Items.Add(new FingerprintSlotRecord
+                        {
+                            Slot = item.Value<int?>("slot") ?? -1,
+                            Bound = item.Value<bool?>("bound") ?? false,
+                            FingerprintId = item.Value<int?>("fingerprint_id") ?? -1,
+                            UserId = item.Value<string>("user_id") ?? "",
+                            Name = item.Value<string>("name") ?? "",
+                            Role = item.Value<int?>("role") ?? 2,
+                            LockMask = item.Value<int?>("lock_mask") ?? 0,
+                            IsBackup = item.Value<bool?>("is_backup") ?? false
+                        });
+                    }
+                    completion.TrySetResult(result);
+                }
+                catch
+                {
+                }
+            }
+
+            App.MessageHandler.OnFingerprintListResponse += Handler;
+            try
+            {
+                CommandResult accepted = await SendAsync(deviceId, message, timeoutMs)
+                    .ConfigureAwait(false);
+                if (!accepted.Success) return null;
+                Task completed = await Task.WhenAny(
+                    completion.Task, Task.Delay(timeoutMs)).ConfigureAwait(false);
+                return completed == completion.Task ? await completion.Task : null;
+            }
+            finally
+            {
+                App.MessageHandler.OnFingerprintListResponse -= Handler;
+            }
+        }
+
         public Task<CommandResult> UpsertPermissionAsync(
             string deviceId, User user, bool[] permissions, uint version,
             int timeoutMs = 8_000)
@@ -329,6 +431,19 @@ namespace CabinetLock
                 version
             });
             return SendAsync(deviceId, message, timeoutMs);
+        }
+
+        public Task<CommandResult> DeleteUserPermissionAsync(
+            string deviceId, string userId, uint version, int timeoutMs = 8_000)
+        {
+            if (string.IsNullOrWhiteSpace(userId))
+                return Task.FromResult(CommandResult.Failed("用户 ID 不能为空"));
+            return SendAsync(deviceId,
+                Message.Create(Protocol.CmdDeleteUserPermission, deviceId, new
+                {
+                    user_id = userId.Trim(),
+                    version
+                }), timeoutMs);
         }
 
         public static uint ComputeTemplateCrc32(byte[] bytes)
@@ -618,6 +733,27 @@ namespace CabinetLock
         public bool Matches { get; init; }
         public uint ExpectedCrc32 { get; init; }
         public uint ActualCrc32 { get; init; }
+    }
+
+    public sealed class FingerprintSlotPage
+    {
+        public int Page { get; init; }
+        public int PageSize { get; init; }
+        public int Total { get; init; }
+        public int Capacity { get; init; }
+        public List<FingerprintSlotRecord> Items { get; } = new();
+    }
+
+    public sealed class FingerprintSlotRecord
+    {
+        public int Slot { get; init; }
+        public bool Bound { get; init; }
+        public int FingerprintId { get; init; }
+        public string UserId { get; init; } = "";
+        public string Name { get; init; } = "";
+        public int Role { get; init; }
+        public int LockMask { get; init; }
+        public bool IsBackup { get; init; }
     }
 
     public sealed class BroadcastCommandResult

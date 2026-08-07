@@ -12,7 +12,8 @@ namespace CabinetLock
         private const int SaltBytes = 16;
         private const int HashBytes = 32;
         private const int Pbkdf2Iterations = 210_000;
-        private const int MinimumPasswordLength = 8;
+        public const int MinimumPasswordLength = 6;
+        public const int MaximumPasswordLength = 128;
         private const string Pbkdf2Prefix = "pbkdf2-sha256";
 
         /// <summary>
@@ -105,9 +106,12 @@ namespace CabinetLock
         }
 
         public static bool IsPasswordAcceptable(string? password) =>
-            !string.IsNullOrWhiteSpace(password) && password.Length >= MinimumPasswordLength;
+            !string.IsNullOrWhiteSpace(password) &&
+            password.Length >= MinimumPasswordLength &&
+            password.Length <= MaximumPasswordLength;
 
-        public static string PasswordRequirement => $"密码至少需要 {MinimumPasswordLength} 个字符";
+        public static string PasswordRequirement =>
+            $"密码长度需要为 {MinimumPasswordLength}-{MaximumPasswordLength} 个字符";
 
         private static bool TryDecodeSalt(string? salt, out byte[] bytes)
         {

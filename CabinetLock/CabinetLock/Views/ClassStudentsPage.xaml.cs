@@ -40,14 +40,9 @@ namespace CabinetLock
                 AssignedCountText.Text = _rows.Count(row => row.BoundCabinetIds.Count > 0).ToString();
                 ReadyCountText.Text = _rows.Count(row => row.IsReady).ToString();
                 PendingCountText.Text = _rows.Count(row => !row.IsReady).ToString();
-                var teachers = await Task.Run(() => App.UserService.GetAllUsers()
-                    .Where(user => string.Equals(user.Role, "teacher", StringComparison.OrdinalIgnoreCase)
-                        && user.IsResponsibleForClass(_classId))
-                    .Select(user => string.IsNullOrWhiteSpace(user.Name) ? user.DisplayId : user.Name)
-                    .ToList());
-                TeacherText.Text = teachers.Count == 0
+                TeacherText.Text = workspace.TeacherNames.Count == 0
                     ? "教师：未分配"
-                    : "教师：" + string.Join("、", teachers);
+                    : "教师：" + string.Join("、", workspace.TeacherNames);
                 int pageCount = (StudentDataGrid.ItemsSource as System.Collections.ICollection)?.Count ?? 0;
                 PageStatusText.Text =
                     $"{_studentPager.StatusText(pageCount)} · 可使用 {_rows.Count(row => row.IsReady)} · 待处理 {_rows.Count(row => !row.IsReady)}";
@@ -83,34 +78,64 @@ namespace CabinetLock
 
         private ClassWorkspaceSnapshot BuildWorkspace()
         {
-            var users = App.UserService.GetAllUsers()
-                .Where(user => string.Equals(user.Role, "student", StringComparison.OrdinalIgnoreCase)
-                    && string.Equals(user.ClassId, _classId, StringComparison.OrdinalIgnoreCase))
-                .OrderBy(user => user.DisplayId)
-                .ToList();
+            List<User> users = App.UserService.QueryVisibleUsersPage(
+                    0, 500, role: "student", classId: _classId)
+                .Items.OrderBy(user => user.DisplayId).ToList();
             var devices = App.DeviceService.GetAllDevices()
                 .Where(device => !DeviceService.IsTrueRoot(device) && !string.IsNullOrWhiteSpace(device.DeviceId))
                 .ToList();
-            var templates = BusinessDatabase.ReadAllFpTemplateMetas();
-            IReadOnlyList<CabinetSyncJob> syncJobs = App.CabinetSyncQueueService.GetAll();
+            string[] deviceIds = devices.Select(device => device.DeviceId).ToArray();
+            string[] userIds = users.Select(user => user.UserId).ToArray();
+            var devicesById = devices.ToDictionary(device => device.DeviceId,
+                StringComparer.OrdinalIgnoreCase);
+            Dictionary<string, IReadOnlyList<CabinetAssignment>> assignmentsByUser =
+                App.CabinetBindingService.GetAssignments(users, deviceIds);
+            Dictionary<string, bool[]> permissionsByUser =
+                App.PermissionService.GetFinalPermissions(users);
+            Dictionary<string, List<FingerprintTemplate>> templatesByUser =
+                BusinessDatabase.ReadFpTemplateMetasForUsers(userIds)
+                    .Where(template => !string.IsNullOrWhiteSpace(template.UserId))
+                    .GroupBy(template => template.UserId!, StringComparer.OrdinalIgnoreCase)
+                    .ToDictionary(group => group.Key,
+                        group => group.OrderBy(template => template.FingerIndex).ToList(),
+                        StringComparer.OrdinalIgnoreCase);
+            IReadOnlyList<CabinetSyncJob> syncJobs =
+                App.CabinetSyncQueueService.GetRelevant(userIds, deviceIds);
+            Dictionary<string, List<CabinetSyncJob>> userJobs = syncJobs
+                .Where(job => job.JobKind == "user" && !string.IsNullOrWhiteSpace(job.UserId))
+                .GroupBy(job => job.UserId, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(group => group.Key, group => group.ToList(),
+                    StringComparer.OrdinalIgnoreCase);
+            Dictionary<string, List<CabinetSyncJob>> cabinetJobs = syncJobs
+                .Where(job => job.JobKind == "cabinet" && !string.IsNullOrWhiteSpace(job.DeviceId))
+                .GroupBy(job => job.DeviceId, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(group => group.Key, group => group.ToList(),
+                    StringComparer.OrdinalIgnoreCase);
 
             List<ClassStudentRow> students = users.Select(user =>
             {
-                IReadOnlyList<CabinetAssignment> assignments = App.CabinetBindingService
-                    .GetAssignments(user, devices.Select(device => device.DeviceId));
-                var bound = devices.Where(device => assignments.Any(item => string.Equals(
-                    item.DeviceId, device.DeviceId, StringComparison.OrdinalIgnoreCase))).ToList();
-                List<FingerprintTemplate> userTemplates = templates.Where(template =>
-                        string.Equals(template.UserId, user.UserId, StringComparison.OrdinalIgnoreCase))
-                    .OrderBy(template => template.FingerIndex)
+                IReadOnlyList<CabinetAssignment> assignments = assignmentsByUser.TryGetValue(
+                    user.UserId, out IReadOnlyList<CabinetAssignment>? assigned)
+                    ? assigned : Array.Empty<CabinetAssignment>();
+                List<Device> bound = assignments
+                    .Select(assignment => devicesById.GetValueOrDefault(assignment.DeviceId))
+                    .Where(device => device != null)
+                    .Cast<Device>()
                     .ToList();
+                List<FingerprintTemplate> userTemplates = templatesByUser.GetValueOrDefault(
+                    user.UserId) ?? new List<FingerprintTemplate>();
+                var relevantJobs = new List<CabinetSyncJob>();
+                if (userJobs.TryGetValue(user.UserId, out List<CabinetSyncJob>? ownJobs))
+                    relevantJobs.AddRange(ownJobs);
+                foreach (CabinetAssignment assignment in assignments)
+                {
+                    if (cabinetJobs.TryGetValue(assignment.DeviceId,
+                            out List<CabinetSyncJob>? assignedCabinetJobs))
+                        relevantJobs.AddRange(assignedCabinetJobs);
+                }
+                bool[] permissions = permissionsByUser.GetValueOrDefault(user.UserId) ?? new bool[4];
                 return new ClassStudentRow(user, bound, userTemplates, assignments,
-                    syncJobs.Where(job =>
-                        (job.JobKind == "user" && string.Equals(
-                            job.UserId, user.UserId, StringComparison.OrdinalIgnoreCase)) ||
-                        (job.JobKind == "cabinet" && assignments.Any(assignment => string.Equals(
-                            assignment.DeviceId, job.DeviceId, StringComparison.OrdinalIgnoreCase))))
-                    .ToList());
+                    relevantJobs, permissions);
             }).ToList();
 
             List<ClassCabinetOverviewRow> cabinets = devices
@@ -120,7 +145,9 @@ namespace CabinetLock
                 .ThenBy(row => row.DeviceNumber)
                 .ThenBy(row => row.DeviceName)
                 .ToList();
-            return new ClassWorkspaceSnapshot(students, cabinets);
+            IReadOnlyList<string> teacherNames =
+                BusinessDatabase.ReadTeacherNamesForClass(_classId);
+            return new ClassWorkspaceSnapshot(students, cabinets, teacherNames);
         }
 
         private async void RefreshButton_Click(object sender, RoutedEventArgs e) => await LoadAsync();
@@ -297,7 +324,6 @@ namespace CabinetLock
                 }
                 App.CabinetBindingService.RemoveFromAll(row.UserId);
                 try { await App.SdStorageService.DeleteTemplateAsync(row.UserId); } catch { }
-                try { await Task.Run(App.CabinetSyncService.SyncAllPermissions); } catch { }
                 await LoadAsync();
                 if (!string.IsNullOrWhiteSpace(cleanupWarning)) PageStatusText.Text = cleanupWarning;
             }
@@ -494,7 +520,8 @@ namespace CabinetLock
         public ClassStudentRow(User user, IReadOnlyList<Device> cabinets,
             IReadOnlyList<FingerprintTemplate> templates,
             IReadOnlyList<CabinetAssignment> assignments,
-            IReadOnlyList<CabinetSyncJob> syncJobs)
+            IReadOnlyList<CabinetSyncJob> syncJobs,
+            IReadOnlyList<bool> defaultPermissions)
         {
             User = user;
             Templates = templates;
@@ -509,10 +536,9 @@ namespace CabinetLock
                 ? "未录入"
                 : $"{templates.Count} 枚 · " + string.Join("、", templates.Take(2).Select(item => item.FingerDisplayName)) +
                   (templates.Count > 2 ? "…" : "");
-            bool[] defaultPermissions = App.PermissionService.GetFinalPermissions(user.UserId);
             HasCompleteCabinetPermissions = assignments.Count > 0 && assignments.All(assignment =>
-                App.CabinetBindingService.GetLockPermissions(
-                    user, assignment.DeviceId, defaultPermissions).Skip(1).Any(value => value));
+                ResolveLockPermissions(user.Role, assignment, defaultPermissions)
+                    .Skip(1).Any(value => value));
             IsReady = user.Enabled && templates.Any(item => item.Enabled) && assignments.Count > 0 &&
                 HasCompleteCabinetPermissions &&
                 assignments.All(assignment => SelectedIds(assignment).Any(id => templates.Any(item =>
@@ -596,6 +622,21 @@ namespace CabinetLock
             return assignment.FingerprintIds.Where(id => id > 0).Distinct().ToArray();
         }
 
+        private static bool[] ResolveLockPermissions(string role,
+            CabinetAssignment assignment, IReadOnlyList<bool> defaults)
+        {
+            bool[] permissions = defaults.Take(4).ToArray();
+            Array.Resize(ref permissions, 4);
+            if (assignment.LockIds != null)
+            {
+                permissions = new bool[4];
+                foreach (int lockId in assignment.LockIds.Where(id => id >= 0 && id < 4))
+                    permissions[lockId] = true;
+            }
+            PermissionPolicy.Enforce(role, permissions);
+            return permissions;
+        }
+
         private string ResolveSyncStatus(string deviceId, Device? device)
         {
             CabinetSyncJob? job = SyncJobs.FirstOrDefault(item => string.Equals(
@@ -653,5 +694,6 @@ namespace CabinetLock
 
     public sealed record ClassWorkspaceSnapshot(
         List<ClassStudentRow> Students,
-        List<ClassCabinetOverviewRow> Cabinets);
+        List<ClassCabinetOverviewRow> Cabinets,
+        IReadOnlyList<string> TeacherNames);
 }

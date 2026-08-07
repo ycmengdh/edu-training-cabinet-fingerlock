@@ -67,7 +67,7 @@
         <Border Grid.Row="2" Style="{StaticResource Panel}" Padding="0">
             <DataGrid x:Name="LogGrid" BorderThickness="0" Background="Transparent"
                       RowHeaderWidth="0" AutoGenerateColumns="False" IsReadOnly="True"
-                      GridLinesVisibility="None" HeadersVisibility="Column"
+                      GridLinesVisibility="All" HeadersVisibility="Column"
                       AlternatingRowBackground="{StaticResource GridAlternateBrush}" RowBackground="{StaticResource CardBrush}"
                       ScrollViewer.HorizontalScrollBarVisibility="Auto"
                       ScrollViewer.VerticalScrollBarVisibility="Auto"
