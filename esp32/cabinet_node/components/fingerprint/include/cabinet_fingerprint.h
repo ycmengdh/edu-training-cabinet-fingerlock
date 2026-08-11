@@ -22,8 +22,12 @@ typedef enum {
     CAB_FP_ENROLL_LIFT_3,
     CAB_FP_ENROLL_PLACE_4,
     CAB_FP_ENROLL_STORE,
-    CAB_FP_ENROLL_VERIFY_1,
-    CAB_FP_ENROLL_VERIFY_2,
+    CAB_FP_ENROLL_VERIFY_LIFT_1,
+    CAB_FP_ENROLL_VERIFY_PLACE_1,
+    CAB_FP_ENROLL_VERIFY_RETRY_LIFT_1,
+    CAB_FP_ENROLL_VERIFY_LIFT_2,
+    CAB_FP_ENROLL_VERIFY_PLACE_2,
+    CAB_FP_ENROLL_VERIFY_RETRY_LIFT_2,
     CAB_FP_ENROLL_DONE_OK,
     CAB_FP_ENROLL_DONE_FAIL,
 } cab_fp_enroll_phase_t;
@@ -50,6 +54,7 @@ const char *cab_fp_enroll_hint(void);
 int cab_fp_enroll_step(void);
 
 int cab_fp_verify_once(void);
+bool cab_fp_finger_present(void);
 int cab_fp_verify_slot(int fingerprint_id, bool *finger_detected,
                        int *confidence);
 bool cab_fp_delete(int fingerprint_id);

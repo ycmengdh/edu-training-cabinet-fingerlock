@@ -48,15 +48,12 @@
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
                         <StackPanel>
                             <TextBlock Text="开锁授权（按实训柜）" Style="{StaticResource SectionTitleText}"/>
-                            <TextBlock Text="每台实训柜分别选择指纹模板和柜门权限，互不影响" Style="{StaticResource PageStatusText}" Margin="0,3,0,0"/>
+                            <TextBlock Text="添加授权后选择柜子，再配置指纹模板和柜门权限" Style="{StaticResource PageStatusText}" Margin="0,3,0,0"/>
                         </StackPanel>
-                        <ComboBox x:Name="CabinetCombo" Grid.Column="1" Width="220" Height="36"
-                                  DisplayMemberPath="DisplayText" SelectedValuePath="DeviceId" Margin="10,0,8,0"/>
-                        <Button x:Name="BindCabinetButton" Grid.Column="2" Content="添加授权"
+                        <Button x:Name="BindCabinetButton" Grid.Column="1" Content="添加授权" Margin="12,0,0,0"
                                 Click="BindCabinetButton_Click"/>
                     </Grid>
                     <DataGrid x:Name="CabinetGrid" Grid.Row="1" BorderThickness="0" IsReadOnly="True"
@@ -118,14 +115,14 @@
                                 <TextBlock Text="用户指纹" Style="{StaticResource SectionTitleText}"/>
                                 <TextBlock Text="可录入多枚；每台柜机可下发一枚或多枚，默认使用第一枚" Style="{StaticResource PageStatusText}" Margin="0,3,0,0"/>
                             </StackPanel>
-                            <StackPanel Grid.Column="1" Orientation="Horizontal">
-                                <Button x:Name="EnrollFingerprintButton" Content="录入指纹" Click="EnrollFingerprintButton_Click"/>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top">
+                                <Button x:Name="EnrollFingerprintButton" Content="录入指纹" Height="36" Click="EnrollFingerprintButton_Click"/>
                                 <Button x:Name="TestFingerprintButton" Content="测试" Style="{StaticResource SecondaryButton}"
-                                        Margin="8,0,0,0" Click="TestFingerprintButton_Click"/>
+                                        Height="36" Margin="8,0,0,0" Click="TestFingerprintButton_Click"/>
                                 <Button x:Name="RestoreFingerprintButton" Content="下发到柜子" Style="{StaticResource SecondaryButton}"
-                                        Margin="8,0,0,0" Click="RestoreFingerprintButton_Click"/>
+                                        Height="36" Margin="8,0,0,0" Click="RestoreFingerprintButton_Click"/>
                                 <Button x:Name="DeleteFingerprintButton" Content="删除" Style="{StaticResource DangerButton}"
-                                        Margin="8,0,0,0" Click="DeleteFingerprintButton_Click"/>
+                                        Height="36" Margin="8,0,0,0" Click="DeleteFingerprintButton_Click"/>
                             </StackPanel>
                         </Grid>
                         <DataGrid x:Name="FingerprintGrid" Grid.Row="1" BorderThickness="0" IsReadOnly="True"
@@ -167,12 +164,10 @@
                                 <RowDefinition Height="48"/>
                                 <RowDefinition Height="48"/>
                                 <RowDefinition Height="48"/>
-                                <RowDefinition Height="48"/>
                             </Grid.RowDefinitions>
-                            <CheckBox x:Name="Lock0CheckBox" Grid.Row="0" Content="Lock 1 · 系统锁" VerticalAlignment="Center"/>
-                            <CheckBox x:Name="Lock1CheckBox" Grid.Row="1" Content="Lock 2 · 柜门 1" VerticalAlignment="Center"/>
-                            <CheckBox x:Name="Lock2CheckBox" Grid.Row="2" Content="Lock 3 · 柜门 2" VerticalAlignment="Center"/>
-                            <CheckBox x:Name="Lock3CheckBox" Grid.Row="3" Content="Lock 4 · 柜门 3" VerticalAlignment="Center"/>
+                            <CheckBox x:Name="Lock1CheckBox" Grid.Row="0" Content="柜门 1" VerticalAlignment="Center"/>
+                            <CheckBox x:Name="Lock2CheckBox" Grid.Row="1" Content="柜门 2" VerticalAlignment="Center"/>
+                            <CheckBox x:Name="Lock3CheckBox" Grid.Row="2" Content="柜门 3" VerticalAlignment="Center"/>
                         </Grid>
                         <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
                             <Button x:Name="VerifySyncButton" Content="校验并同步" Style="{StaticResource SecondaryButton}"

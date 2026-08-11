@@ -53,6 +53,10 @@ namespace CabinetLock
         public const ushort Reboot = 0x0038;
         public const ushort RebootAck = 0x0039;
         public const ushort ClearLogs = 0x003A;
+        public const ushort SyncMaintenanceConfig = 0x003B;
+        public const ushort EnterMaintenance = 0x003C;
+        public const ushort ExitMaintenance = 0x003D;
+        public const ushort MaintenanceEvent = 0x003E;
 
         public const ushort SdQuery = 0x0040;
         public const ushort SdQueryResponse = 0x0041;
@@ -151,6 +155,10 @@ namespace CabinetLock
             { Reboot, Protocol.CmdReboot },
             { RebootAck, Protocol.CmdRebootAck },
             { ClearLogs, Protocol.CmdClearLogs },
+            { SyncMaintenanceConfig, Protocol.CmdSyncMaintenanceConfig },
+            { EnterMaintenance, Protocol.CmdEnterMaintenance },
+            { ExitMaintenance, Protocol.CmdExitMaintenance },
+            { MaintenanceEvent, Protocol.CmdMaintenanceEvent },
             { SdQuery, Protocol.CmdSdQuery },
             { SdQueryResponse, Protocol.CmdSdQueryResponse },
             { SdQueryPart, Protocol.CmdSdQueryPart },

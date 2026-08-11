@@ -23,6 +23,22 @@ static uint32_t s_time_base;
 static int64_t s_time_base_us;
 static bool s_time_synced;
 
+typedef struct {
+    char device_id[25];
+    char device_name[33];
+    uint8_t work_mode;
+    uint8_t mesh_channel;
+    uint8_t fingerprint_count;
+    uint32_t permission_version;
+} legacy_device_config_t;
+
+static bool maintenance_pin_valid(const char *pin) {
+    for (size_t index = 0; index < CAB_MAINTENANCE_PIN_LENGTH; ++index) {
+        if (pin[index] < '1' || pin[index] > '4') return false;
+    }
+    return pin[CAB_MAINTENANCE_PIN_LENGTH] == '\0';
+}
+
 static uint16_t read_be16(const uint8_t *value) {
     return ((uint16_t)value[0] << 8) | value[1];
 }
@@ -217,6 +233,17 @@ bool cab_storage_init(const char *default_device_id, bool is_root) {
         config.mesh_channel = 6;
         nvs_get_u8(s_nvs, "fp_count", &config.fingerprint_count);
         nvs_get_u32(s_nvs, "perm_ver", &config.permission_version);
+        snprintf(config.maintenance_pin, sizeof(config.maintenance_pin), "%s",
+                 CAB_DEFAULT_MAINTENANCE_PIN);
+        config.maintenance_config_version = 1;
+        cab_storage_save_config(&config);
+    }
+    if (!maintenance_pin_valid(config.maintenance_pin)) {
+        snprintf(config.maintenance_pin, sizeof(config.maintenance_pin), "%s",
+                 CAB_DEFAULT_MAINTENANCE_PIN);
+        if (config.maintenance_config_version == 0) {
+            config.maintenance_config_version = 1;
+        }
         cab_storage_save_config(&config);
     }
     return true;
@@ -224,9 +251,28 @@ bool cab_storage_init(const char *default_device_id, bool is_root) {
 
 bool cab_storage_load_config(cab_device_config_t *config) {
     if (!s_initialized || config == NULL) return false;
-    size_t length = sizeof(*config);
-    return nvs_get_blob(s_nvs, "config", config, &length) == ESP_OK &&
-           length == sizeof(*config);
+    size_t length = 0;
+    if (nvs_get_blob(s_nvs, "config", NULL, &length) != ESP_OK) return false;
+    if (length == sizeof(*config)) {
+        return nvs_get_blob(s_nvs, "config", config, &length) == ESP_OK;
+    }
+    if (length != sizeof(legacy_device_config_t)) return false;
+
+    legacy_device_config_t legacy;
+    if (nvs_get_blob(s_nvs, "config", &legacy, &length) != ESP_OK) {
+        return false;
+    }
+    memset(config, 0, sizeof(*config));
+    memcpy(config->device_id, legacy.device_id, sizeof(legacy.device_id));
+    memcpy(config->device_name, legacy.device_name, sizeof(legacy.device_name));
+    config->work_mode = legacy.work_mode;
+    config->mesh_channel = legacy.mesh_channel;
+    config->fingerprint_count = legacy.fingerprint_count;
+    config->permission_version = legacy.permission_version;
+    snprintf(config->maintenance_pin, sizeof(config->maintenance_pin), "%s",
+             CAB_DEFAULT_MAINTENANCE_PIN);
+    config->maintenance_config_version = 1;
+    return cab_storage_save_config(config);
 }
 
 bool cab_storage_save_config(const cab_device_config_t *config) {

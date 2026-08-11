@@ -98,6 +98,11 @@ namespace CabinetLock
         /// <summary>清除本地日志（上位机 -> 下位机）</summary>
         ClearLogs,
 
+        SyncMaintenanceConfig,
+        EnterMaintenance,
+        ExitMaintenance,
+        MaintenanceEvent,
+
         /// <summary>重启设备（上位机 -> 下位机）</summary>
         Reboot,
 

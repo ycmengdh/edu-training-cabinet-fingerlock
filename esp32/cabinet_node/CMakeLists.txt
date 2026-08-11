@@ -9,6 +9,6 @@ add_compile_definitions(
 )
 
 set(EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/../common_components")
-set(PROJECT_VER "26080701-cab")
+set(PROJECT_VER "26081007-cab")
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(cabinet_node_idf)

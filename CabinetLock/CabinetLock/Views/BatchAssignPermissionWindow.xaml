@@ -65,7 +65,7 @@
                     <CheckBox x:Name="Lock0Check" Content="Lock 1  系统锁" Margin="0,0,0,10"/>
                     <CheckBox x:Name="Lock1Check" Content="Lock 2  实训柜 1" IsChecked="True" Margin="0,0,0,10"/>
                     <CheckBox x:Name="Lock2Check" Content="Lock 3  实训柜 2" IsChecked="True" Margin="0,0,0,10"/>
-                    <CheckBox x:Name="Lock3Check" Content="Lock 4  实训柜 3" Margin="0,0,0,4"/>
+                    <CheckBox x:Name="Lock3Check" Content="Lock 4  实训柜 3" IsChecked="True" Margin="0,0,0,4"/>
                     <TextBlock Text="系统锁仅管理员可勾选。绑定后每柜只为该用户占用 1 个指纹槽。"
                                Foreground="{StaticResource SubTextBrush}" FontSize="11" Margin="0,14,0,0"
                                TextWrapping="Wrap"/>

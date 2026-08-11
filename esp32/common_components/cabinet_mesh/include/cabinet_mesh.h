@@ -41,10 +41,12 @@ int cab_mesh_link_rssi(void);
 void cab_mesh_self_mac(uint8_t output[6]);
 void cab_mesh_ap_mac(uint8_t output[6]);
 bool cab_mesh_parent_bssid(uint8_t output[6]);
+void cab_mesh_request_parent_search(void);
 esp_err_t cab_mesh_send_root(const uint8_t *data, size_t length);
 esp_err_t cab_mesh_send_root_best_effort(const uint8_t *data, size_t length);
 esp_err_t cab_mesh_send_node(const uint8_t destination[6], const uint8_t *data,
                              size_t length);
+esp_err_t cab_mesh_send_all(const uint8_t *data, size_t length);
 int cab_mesh_routes(uint8_t (*output)[6], size_t capacity);
 cab_mesh_stats_t cab_mesh_stats(void);
 void cab_mesh_note_root_response(bool heartbeat_ack);

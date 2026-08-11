@@ -18,43 +18,125 @@ namespace CabinetLock
             ArgumentNullException.ThrowIfNull(device);
             _device = device;
             CabinetMetaText.Text = $"{device.DisplayIdentity} · {device.DeviceId}";
-            LoadUsers();
+            LoadClasses();
         }
 
         public bool BindingCompleted { get; private set; }
+
+        private void LoadClasses()
+        {
+            _loading = true;
+            try
+            {
+                List<ClassOption> classes = App.ClassService.GetVisible()
+                    .Where(item => item.Enabled)
+                    .OrderBy(item => item.Name)
+                    .ThenBy(item => item.ClassId)
+                    .Select(item => ClassOption.ForClass(item.ClassId, item.Name))
+                    .ToList();
+                if (DataScopeContext.Instance.IsAdmin)
+                    classes.Add(ClassOption.Management());
+                ClassCombo.ItemsSource = classes;
+                ClassCombo.SelectedIndex = -1;
+                ResetUserSelection(classes.Count == 0
+                    ? "没有可选择的班级"
+                    : "请先选择班级，再选择学生");
+            }
+            catch (Exception ex)
+            {
+                ClassCombo.ItemsSource = null;
+                ResetUserSelection($"班级读取失败：{ex.Message}");
+            }
+            finally
+            {
+                _loading = false;
+                SetActionState();
+            }
+        }
+
+        private void ClassCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (!_loading) LoadUsers();
+        }
 
         private void LoadUsers(string? selectedUserId = null)
         {
             _loading = true;
             try
             {
-                _users = App.UserService.GetVisibleUsers()
+                if (ClassCombo.SelectedItem is not ClassOption selectedClass)
+                {
+                    ResetUserSelection("请先选择班级，再选择学生");
+                    return;
+                }
+
+                IEnumerable<User> users = selectedClass.IsManagement
+                    ? ReadManagementUsers()
+                    : ReadUsers("student", selectedClass.ClassId);
+                _users = users
                     .Where(user => user.Enabled && DataScopeContext.Instance.CanModify(user))
-                    .OrderBy(user => RoleOrder(user.Role))
-                    .ThenBy(user => user.Name)
+                    .OrderBy(user => user.Name)
                     .ThenBy(user => user.DisplayId)
                     .Select(user => new UserOption(user))
                     .ToList();
                 UserCombo.ItemsSource = _users;
+                UserCombo.IsEnabled = _users.Count > 0;
+                UserCombo.SelectedIndex = -1;
                 if (!string.IsNullOrWhiteSpace(selectedUserId))
                     UserCombo.SelectedValue = selectedUserId;
-                if (UserCombo.SelectedIndex < 0 && _users.Count > 0)
-                    UserCombo.SelectedIndex = 0;
+                ClearSelectedUser(_users.Count == 0
+                    ? "当前班级没有可绑定的学生"
+                    : "请选择学生");
             }
             catch (Exception ex)
             {
-                StatusText.Text = $"用户读取失败：{ex.Message}";
+                ResetUserSelection($"学生读取失败：{ex.Message}");
             }
             finally
             {
                 _loading = false;
-                RefreshSelectedUser();
+                if (UserCombo.SelectedItem is UserOption)
+                    RefreshSelectedUserSafely();
+                else
+                    SetActionState();
+            }
+        }
+
+        private static IEnumerable<User> ReadManagementUsers()
+        {
+            return ReadUsers("teacher").Concat(ReadUsers("admin"));
+        }
+
+        private static IReadOnlyList<User> ReadUsers(string role, string? classId = null)
+        {
+            var users = new List<User>();
+            int pageIndex = 1;
+            while (true)
+            {
+                PagedResult<User> page = App.UserService.QueryVisibleUsersPage(
+                    pageIndex, 500, role: role, classId: classId,
+                    sort: UserPageSort.RoleThenName);
+                users.AddRange(page.Items);
+                if (users.Count >= page.TotalCount || page.Items.Count == 0) return users;
+                pageIndex++;
             }
         }
 
         private void UserCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
-            if (!_loading) RefreshSelectedUser();
+            if (!_loading) RefreshSelectedUserSafely();
+        }
+
+        private void RefreshSelectedUserSafely()
+        {
+            try
+            {
+                RefreshSelectedUser();
+            }
+            catch (Exception ex)
+            {
+                ClearSelectedUser($"用户绑定数据读取失败：{ex.Message}");
+            }
         }
 
         private void RefreshSelectedUser()
@@ -71,9 +153,10 @@ namespace CabinetLock
             }
 
             User user = option.User;
+            List<FingerprintTemplate> allTemplates = App.FingerprintTemplateService.GetAllTemplates();
             HashSet<int> selectedIds = App.CabinetBindingService
-                .GetSelectedFingerprintIds(user, _device.DeviceId).ToHashSet();
-            _templates = App.FingerprintTemplateService.GetAllTemplates()
+                .GetSelectedFingerprintIds(user, _device.DeviceId, allTemplates).ToHashSet();
+            _templates = allTemplates
                 .Where(template => template.Enabled && template.FingerprintId > 0 &&
                     string.Equals(template.UserId, user.UserId, StringComparison.OrdinalIgnoreCase))
                 .GroupBy(template => template.FingerprintId)
@@ -99,10 +182,9 @@ namespace CabinetLock
             Lock1CheckBox.IsChecked = permissions.ElementAtOrDefault(1);
             Lock2CheckBox.IsChecked = permissions.ElementAtOrDefault(2);
             Lock3CheckBox.IsChecked = permissions.ElementAtOrDefault(3);
-            Lock0CheckBox.IsEnabled = PermissionPolicy.CanGrant(user.Role, 0);
+            SetPermissionControlState(user, enabled: true);
             Lock0CheckBox.ToolTip = Lock0CheckBox.IsEnabled
                 ? "允许使用管理员系统锁" : "系统锁仅管理员可用";
-            if (!Lock0CheckBox.IsEnabled) Lock0CheckBox.IsChecked = false;
             StatusText.Text = _templates.Count == 0
                 ? "请先录入。采集结束后 0 号临时槽会被清空。"
                 : "点击“绑定并下发”后，才会写入柜机正式槽位。";
@@ -203,11 +285,8 @@ namespace CabinetLock
             TemplateList.IsEnabled = !busy;
             EnrollButton.IsEnabled = !busy && UserCombo.SelectedItem is UserOption;
             CancelButton.IsEnabled = !busy;
-            Lock0CheckBox.IsEnabled = !busy && UserCombo.SelectedItem is UserOption option &&
-                PermissionPolicy.CanGrant(option.User.Role, 0);
-            Lock1CheckBox.IsEnabled = !busy;
-            Lock2CheckBox.IsEnabled = !busy;
-            Lock3CheckBox.IsEnabled = !busy;
+            SetPermissionControlState(
+                (UserCombo.SelectedItem as UserOption)?.User, enabled: !busy);
             SyncProgress.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
             if (!string.IsNullOrWhiteSpace(status)) StatusText.Text = status;
             SetActionState();
@@ -220,15 +299,49 @@ namespace CabinetLock
                 _templates.Any(template => template.IsSelected);
         }
 
-        private void CancelButton_Click(object sender, RoutedEventArgs e) => DialogResult = false;
-
-        private static int RoleOrder(string? role) => role?.ToLowerInvariant() switch
+        private void SetPermissionControlState(User? user, bool enabled)
         {
-            "student" => 0,
-            "teacher" => 1,
-            "admin" => 2,
-            _ => 3
-        };
+            CheckBox[] controls =
+            {
+                Lock0CheckBox, Lock1CheckBox, Lock2CheckBox, Lock3CheckBox
+            };
+            for (int lockId = 0; lockId < controls.Length; lockId++)
+            {
+                bool canGrant = user != null && PermissionPolicy.CanGrant(user.Role, lockId);
+                controls[lockId].IsEnabled = enabled && canGrant;
+                if (!canGrant && user != null) controls[lockId].IsChecked = false;
+            }
+        }
+
+        private void ResetUserSelection(string status)
+        {
+            _users = new List<UserOption>();
+            UserCombo.ItemsSource = null;
+            UserCombo.SelectedIndex = -1;
+            UserCombo.IsEnabled = false;
+            ClearSelectedUser(status);
+        }
+
+        private void ClearSelectedUser(string status)
+        {
+            _templates = new List<TemplateOption>();
+            TemplateList.ItemsSource = null;
+            TemplateCountText.Text = "0 枚";
+            TemplateStatusText.Text = status;
+            NoTemplatePanel.Visibility = Visibility.Visible;
+            Lock0CheckBox.IsChecked = false;
+            Lock1CheckBox.IsChecked = false;
+            Lock2CheckBox.IsChecked = false;
+            Lock3CheckBox.IsChecked = false;
+            Lock0CheckBox.IsEnabled = false;
+            Lock1CheckBox.IsEnabled = false;
+            Lock2CheckBox.IsEnabled = false;
+            Lock3CheckBox.IsEnabled = false;
+            StatusText.Text = status;
+            SetActionState();
+        }
+
+        private void CancelButton_Click(object sender, RoutedEventArgs e) => DialogResult = false;
 
         private sealed class UserOption
         {
@@ -237,6 +350,30 @@ namespace CabinetLock
             public string UserId => User.UserId;
             public string DisplayText => $"{User.Name} ({User.DisplayId}) · " +
                 FingerprintSelectionData.RoleText(User.Role);
+        }
+
+        private sealed class ClassOption
+        {
+            private const string ManagementKey = "__management__";
+
+            private ClassOption(string key, string classId, string displayText, bool management)
+            {
+                Key = key;
+                ClassId = classId;
+                DisplayText = displayText;
+                IsManagement = management;
+            }
+
+            public string Key { get; }
+            public string ClassId { get; }
+            public string DisplayText { get; }
+            public bool IsManagement { get; }
+
+            public static ClassOption ForClass(string classId, string name) => new(
+                classId, classId, $"{name} ({classId})", false);
+
+            public static ClassOption Management() => new(
+                ManagementKey, "", "管理员与教师", true);
         }
 
         private sealed class TemplateOption : INotifyPropertyChanged

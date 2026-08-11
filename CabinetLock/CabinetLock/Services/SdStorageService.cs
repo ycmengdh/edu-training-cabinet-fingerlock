@@ -345,6 +345,7 @@ namespace CabinetLock
                     PermissionsVersion = data["permissions_version"]?.Value<uint>() ?? 0,
                     DevicesVersion = data["devices_version"]?.Value<uint>() ?? 0,
                     FpVersion = data["fp_version"]?.Value<uint>() ?? 0,
+                    SettingsVersion = data["settings_version"]?.Value<uint>() ?? 0,
                     LogsVersion = data["logs_version"]?.Value<uint>() ?? 0,
                     SdTotalBytes = data["sd_total_bytes"]?.Value<ulong>() ?? 0,
                     SdUsedBytes = data["sd_used_bytes"]?.Value<ulong>() ?? 0
@@ -1131,10 +1132,10 @@ namespace CabinetLock
 
         internal static SnapshotTransferResult Failed(string? error,
             bool unsupported = false) => new()
-        {
-            Unsupported = unsupported,
-            Error = error ?? ""
-        };
+            {
+                Unsupported = unsupported,
+                Error = error ?? ""
+            };
 
         internal static SnapshotTransferResult UnsupportedResult(string? error) =>
             Failed(error, unsupported: true);
@@ -1149,6 +1150,7 @@ namespace CabinetLock
         public uint PermissionsVersion { get; set; }
         public uint DevicesVersion { get; set; }
         public uint FpVersion { get; set; }
+        public uint SettingsVersion { get; set; }
         public uint LogsVersion { get; set; }
         public ulong SdTotalBytes { get; set; }
         public ulong SdUsedBytes { get; set; }
@@ -1176,6 +1178,9 @@ namespace CabinetLock
                 case "fp":
                     FpVersion++;
                     break;
+                case "system_settings":
+                    SettingsVersion++;
+                    break;
                 case "logs":
                     LogsVersion++;
                     break;
@@ -1185,7 +1190,7 @@ namespace CabinetLock
         public override string ToString()
         {
             return $"全局版本={GlobalVersion}, 用户={UsersVersion}, 班级={ClassesVersion}, " +
-                   $"权限={PermissionsVersion}, 设备={DevicesVersion}, 指纹={FpVersion}, " +
+                   $"权限={PermissionsVersion}, 设备={DevicesVersion}, 指纹={FpVersion}, 设置={SettingsVersion}, " +
                    $"SD卡={SdUsedBytes / 1024 / 1024}MB/{SdTotalBytes / 1024 / 1024}MB";
         }
     }

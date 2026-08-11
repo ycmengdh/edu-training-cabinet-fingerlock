@@ -6,6 +6,25 @@ namespace CabinetLock.Tests;
 public sealed class MultiFingerprintBindingTests
 {
     [Fact]
+    public void LegacyAssignment_WithNullFingerprintList_DoesNotCrashBindingRead()
+    {
+        var user = new User
+        {
+            UserId = "S001",
+            Role = "student",
+            CabinetAssignments = new List<CabinetAssignment>
+            {
+                new() { DeviceId = "CAB_01", FingerprintIds = null! }
+            }
+        };
+
+        IReadOnlyList<int> selected = new CabinetBindingService()
+            .GetSelectedFingerprintIds(user, "CAB_01", Array.Empty<FingerprintTemplate>());
+
+        Assert.Empty(selected);
+    }
+
+    [Fact]
     public void SetSelectedFingerprints_PersistsMultipleFingerprintsPerCabinet()
     {
         string originalPath = BusinessDatabase.ActiveDbPath;

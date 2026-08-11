@@ -152,7 +152,7 @@ namespace CabinetLock
             {
                 "admin" => new RolePermission { Role = "admin", Lock0 = true, Lock1 = true, Lock2 = true, Lock3 = true, UpdateTime = DateTime.Now },
                 "teacher" => new RolePermission { Role = "teacher", Lock0 = false, Lock1 = true, Lock2 = true, Lock3 = true, UpdateTime = DateTime.Now },
-                _ => new RolePermission { Role = "student", Lock0 = false, Lock1 = false, Lock2 = false, Lock3 = false, UpdateTime = DateTime.Now }
+                _ => new RolePermission { Role = "student", Lock0 = false, Lock1 = true, Lock2 = true, Lock3 = true, UpdateTime = DateTime.Now }
             };
         }
     }

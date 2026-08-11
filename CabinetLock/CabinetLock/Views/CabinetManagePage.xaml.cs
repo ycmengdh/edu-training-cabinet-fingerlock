@@ -23,12 +23,19 @@ namespace CabinetLock
             CabinetDataGrid.ItemsSource = _visibleCabinets;
             Loaded += CabinetManagePage_Loaded;
             Unloaded += CabinetManagePage_Unloaded;
+            bool isAdmin = string.Equals(App.CurrentUser?.Role, "admin",
+                StringComparison.OrdinalIgnoreCase);
+            MaintenancePasswordButton.Visibility = isAdmin ? Visibility.Visible : Visibility.Collapsed;
+            MaintenanceModeButton.Visibility = isAdmin ? Visibility.Visible : Visibility.Collapsed;
+            MaintenanceSelectionColumn.Visibility = isAdmin
+                ? Visibility.Visible : Visibility.Collapsed;
         }
 
         private async void CabinetManagePage_Loaded(object sender, RoutedEventArgs e)
         {
             App.MeshBridge.DeviceConnected += OnDevicePresenceChanged;
             App.MeshBridge.DeviceDisconnected += OnDevicePresenceChanged;
+            App.MaintenanceService.StateChanged += OnMaintenanceStateChanged;
             _metadataQueried.Clear();
             _metadataQueryCts?.Cancel();
             _metadataQueryCts?.Dispose();
@@ -47,6 +54,7 @@ namespace CabinetLock
         {
             App.MeshBridge.DeviceConnected -= OnDevicePresenceChanged;
             App.MeshBridge.DeviceDisconnected -= OnDevicePresenceChanged;
+            App.MaintenanceService.StateChanged -= OnMaintenanceStateChanged;
             _metadataQueryCts?.Cancel();
             _metadataQueryCts?.Dispose();
             _metadataQueryCts = null;
@@ -56,6 +64,14 @@ namespace CabinetLock
                 _refreshTimer.Tick -= RefreshTimer_Tick;
                 _refreshTimer = null;
             }
+        }
+
+        private void OnMaintenanceStateChanged(string deviceId)
+        {
+            Dispatcher.BeginInvoke(new Action(async () =>
+            {
+                if (IsLoaded && !_loading) await LoadCabinetsAsync(quiet: true);
+            }));
         }
 
         private async void RefreshTimer_Tick(object? sender, EventArgs e)
@@ -96,7 +112,10 @@ namespace CabinetLock
                 }
 
                 foreach (var cabinet in cabinets)
+                {
                     cabinet.RootPermissionVersion = globalVersion;
+                    App.MaintenanceService.ApplyState(cabinet);
+                }
 
                 MergeCabinetData(cabinets);
                 ApplyFilter();
@@ -114,6 +133,39 @@ namespace CabinetLock
                 _loading = false;
             }
         }
+
+        private void MaintenancePasswordButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (!string.Equals(App.CurrentUser?.Role, "admin", StringComparison.OrdinalIgnoreCase)) return;
+            new MaintenancePasswordWindow { Owner = Window.GetWindow(this) }.ShowDialog();
+        }
+
+        private void MaintenanceModeButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (!string.Equals(App.CurrentUser?.Role, "admin", StringComparison.OrdinalIgnoreCase)) return;
+            Device[] devices = _allCabinets
+                .Where(device => device.IsSelected && device.IsOnline)
+                .ToArray();
+            if (devices.Length == 0)
+            {
+                MessageBox.Show("请先勾选至少一台在线柜机", "维护模式",
+                    MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+            new MaintenanceModeWindow(devices) { Owner = Window.GetWindow(this) }.ShowDialog();
+        }
+
+        private void SelectAllMaintenanceCheckBox_Click(object sender, RoutedEventArgs e)
+        {
+            bool selected = SelectAllMaintenanceCheckBox.IsChecked == true;
+            foreach (Device device in _visibleCabinets.Where(device => device.IsOnline))
+                device.IsSelected = selected;
+            CabinetDataGrid.Items.Refresh();
+            UpdateMaintenanceSelectionState();
+        }
+
+        private void CabinetSelectionCheckBox_Click(object sender, RoutedEventArgs e) =>
+            UpdateMaintenanceSelectionState();
 
         private void MergeCabinetData(IReadOnlyList<Device> refreshed)
         {
@@ -164,6 +216,10 @@ namespace CabinetLock
             target.HardwareVersion = source.HardwareVersion;
             target.Status = source.Status;
             target.RootPermissionVersion = source.RootPermissionVersion;
+            target.MaintenanceActive = source.MaintenanceActive;
+            target.MaintenanceLockMask = source.MaintenanceLockMask;
+            target.MaintenanceSource = source.MaintenanceSource;
+            if (!target.IsOnline) target.IsSelected = false;
         }
 
         private void StartMissingMetadataQueries()
@@ -267,6 +323,21 @@ namespace CabinetLock
             VisibleCountText.Text = $"{visible.Count} 台";
             EmptyStatePanel.Visibility = visible.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             EmptyStateText.Text = _allCabinets.Count == 0 ? "尚未发现柜子" : "没有符合条件的柜子";
+            UpdateMaintenanceSelectionState();
+        }
+
+        private void UpdateMaintenanceSelectionState()
+        {
+            if (SelectAllMaintenanceCheckBox == null) return;
+            Device[] pageOnline = _visibleCabinets.Where(device => device.IsOnline).ToArray();
+            int pageSelected = pageOnline.Count(device => device.IsSelected);
+            SelectAllMaintenanceCheckBox.IsChecked = pageOnline.Length == 0 || pageSelected == 0
+                ? false
+                : pageSelected == pageOnline.Length ? true : null;
+
+            int selectedCount = _allCabinets.Count(device => device.IsOnline && device.IsSelected);
+            MaintenanceModeButton.Content = selectedCount == 0
+                ? "维护模式" : $"维护模式 ({selectedCount})";
         }
 
         private void UpdateVisibleCabinets(IReadOnlyList<Device> page)
@@ -571,6 +642,8 @@ namespace CabinetLock
             RefreshButton.IsEnabled = !busy;
             ResyncButton.IsEnabled = !busy;
             FirmwareUpgradeButton.IsEnabled = !busy;
+            MaintenancePasswordButton.IsEnabled = !busy;
+            MaintenanceModeButton.IsEnabled = !busy;
             CabinetDataGrid.IsEnabled = !busy;
             OperationProgressPanel.Visibility = busy
                 ? Visibility.Visible

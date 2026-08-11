@@ -734,6 +734,8 @@
         <Setter Property="SelectionUnit" Value="FullRow"/>
         <Setter Property="SelectionMode" Value="Single"/>
         <Setter Property="AutoGenerateColumns" Value="False"/>
+        <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto"/>
+        <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/>
         <Setter Property="RowHeight" Value="42"/>
         <Setter Property="ColumnHeaderHeight" Value="40"/>
         <Setter Property="FontFamily" Value="{StaticResource AppFont}"/>

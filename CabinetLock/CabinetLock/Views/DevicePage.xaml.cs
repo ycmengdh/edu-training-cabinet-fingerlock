@@ -334,14 +334,19 @@ namespace CabinetLock
         {
             if (_selectedDevice == null) return;
             if (!EnsureDeviceOnline("绑定用户指纹")) return;
-            var window = new CabinetFingerprintBindingWindow(_selectedDevice)
+            try
             {
-                Owner = Window.GetWindow(this)
-            };
-            if (window.ShowDialog() == true && window.BindingCompleted)
-            {
+                var window = new CabinetFingerprintBindingWindow(_selectedDevice)
+                {
+                    Owner = Window.GetWindow(this)
+                };
+                if (window.ShowDialog() != true || !window.BindingCompleted) return;
                 await LoadDeviceFpListAsync(_selectedDevice.DeviceId);
                 await LoadCabinetAsync(quiet: true);
+            }
+            catch (Exception ex)
+            {
+                AppToast.Error($"用户绑定窗口打开失败：{ex.Message}");
             }
         }
 

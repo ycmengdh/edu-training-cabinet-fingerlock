@@ -193,10 +193,26 @@ namespace CabinetLock
             JObject? versions = root["versions"] as JObject;
             foreach (string table in BusinessDatabase.DailySyncTables)
             {
-                if (tables[table] is not JArray rows)
+                if (tables[table] is JArray rows)
+                {
+                    result.Tables[table] = (JArray)rows.DeepClone();
+                    result.Versions[table] = versions?[table]?.Value<uint>() ?? 0;
+                }
+                else if (string.Equals(table, "system_settings", StringComparison.OrdinalIgnoreCase))
+                {
+                    result.Tables[table] = new JArray(new JObject
+                    {
+                        ["setting_key"] = "maintenance_pin",
+                        ["setting_value"] = MaintenanceSettings.DefaultPin,
+                        ["config_version"] = 1,
+                        ["update_time"] = DateTime.Now.ToString("o")
+                    });
+                    result.Versions[table] = 1;
+                }
+                else
+                {
                     throw new InvalidDataException($"Business snapshot table is missing: {table}");
-                result.Tables[table] = (JArray)rows.DeepClone();
-                result.Versions[table] = versions?[table]?.Value<uint>() ?? 0;
+                }
             }
             return result;
         }

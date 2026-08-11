@@ -43,6 +43,9 @@ namespace CabinetLock
             CmdIds.DeleteFpTemplate,
             CmdIds.ReadConfig,
             CmdIds.ReadStatus,
+            CmdIds.SyncMaintenanceConfig,
+            CmdIds.EnterMaintenance,
+            CmdIds.ExitMaintenance,
             CmdIds.FingerprintListRequest,
             CmdIds.SdQuery,
             CmdIds.SdQueryVersion,
@@ -149,56 +152,56 @@ namespace CabinetLock
             switch (cmdId)
             {
                 case CmdIds.ControlLock:
-                {
-                    var jo = AsJObject(data);
-                    byte lockId = (byte)(jo?["lock_id"]?.Value<int>() ?? 0);
-                    string action = jo?["action"]?.Value<string>() ?? "open";
-                    byte act = action.Equals("close", StringComparison.OrdinalIgnoreCase) ? (byte)1 : (byte)0;
-                    return BinaryMessageCodec.ControlLockPayload.Pack(lockId, act);
-                }
+                    {
+                        var jo = AsJObject(data);
+                        byte lockId = (byte)(jo?["lock_id"]?.Value<int>() ?? 0);
+                        string action = jo?["action"]?.Value<string>() ?? "open";
+                        byte act = action.Equals("close", StringComparison.OrdinalIgnoreCase) ? (byte)1 : (byte)0;
+                        return BinaryMessageCodec.ControlLockPayload.Pack(lockId, act);
+                    }
                 case CmdIds.TimeSync:
-                {
-                    var jo = AsJObject(data);
-                    uint ts = jo?["timestamp"]?.Value<uint>()
-                              ?? (uint)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-                    // 4-byte LE timestamp (no dedicated packer class required)
-                    byte[] buf = new byte[4];
-                    buf[0] = (byte)(ts & 0xFF);
-                    buf[1] = (byte)((ts >> 8) & 0xFF);
-                    buf[2] = (byte)((ts >> 16) & 0xFF);
-                    buf[3] = (byte)((ts >> 24) & 0xFF);
-                    return buf;
-                }
+                    {
+                        var jo = AsJObject(data);
+                        uint ts = jo?["timestamp"]?.Value<uint>()
+                                  ?? (uint)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                        // 4-byte LE timestamp (no dedicated packer class required)
+                        byte[] buf = new byte[4];
+                        buf[0] = (byte)(ts & 0xFF);
+                        buf[1] = (byte)((ts >> 8) & 0xFF);
+                        buf[2] = (byte)((ts >> 16) & 0xFF);
+                        buf[3] = (byte)((ts >> 24) & 0xFF);
+                        return buf;
+                    }
                 case CmdIds.Ack:
-                {
-                    var jo = AsJObject(data);
-                    ushort refId = (ushort)(jo?["ref_msg_id"]?.Value<int>() ?? 0);
-                    string tag = jo?["result"]?.Value<string>() ?? "ok";
-                    return BinaryMessageCodec.AckPayload.Pack(refId, 0, tag);
-                }
+                    {
+                        var jo = AsJObject(data);
+                        ushort refId = (ushort)(jo?["ref_msg_id"]?.Value<int>() ?? 0);
+                        string tag = jo?["result"]?.Value<string>() ?? "ok";
+                        return BinaryMessageCodec.AckPayload.Pack(refId, 0, tag);
+                    }
                 case CmdIds.Error:
-                {
-                    var jo = AsJObject(data);
-                    ushort refId = (ushort)(jo?["ref_msg_id"]?.Value<int>() ?? 0);
-                    ushort code = (ushort)(jo?["error_code"]?.Value<int>() ?? 0);
-                    string message = jo?["message"]?.Value<string>() ?? "";
-                    return BinaryMessageCodec.ErrorPayload.Pack(refId, code, message);
-                }
+                    {
+                        var jo = AsJObject(data);
+                        ushort refId = (ushort)(jo?["ref_msg_id"]?.Value<int>() ?? 0);
+                        ushort code = (ushort)(jo?["error_code"]?.Value<int>() ?? 0);
+                        string message = jo?["message"]?.Value<string>() ?? "";
+                        return BinaryMessageCodec.ErrorPayload.Pack(refId, code, message);
+                    }
                 case CmdIds.Heartbeat:
                 case CmdIds.HeartbeatAck:
                     return Array.Empty<byte>();
                 default:
-                {
-                    if (data == null) return Encoding.UTF8.GetBytes("{}");
-                    if (data is string s)
                     {
-                        if (string.IsNullOrWhiteSpace(s)) return Encoding.UTF8.GetBytes("{}");
-                        return Encoding.UTF8.GetBytes(s);
+                        if (data == null) return Encoding.UTF8.GetBytes("{}");
+                        if (data is string s)
+                        {
+                            if (string.IsNullOrWhiteSpace(s)) return Encoding.UTF8.GetBytes("{}");
+                            return Encoding.UTF8.GetBytes(s);
+                        }
+                        string json = JsonHelper.Serialize(data);
+                        if (string.IsNullOrEmpty(json)) json = "{}";
+                        return Encoding.UTF8.GetBytes(json);
                     }
-                    string json = JsonHelper.Serialize(data);
-                    if (string.IsNullOrEmpty(json)) json = "{}";
-                    return Encoding.UTF8.GetBytes(json);
-                }
             }
         }
 

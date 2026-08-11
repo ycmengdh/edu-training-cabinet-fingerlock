@@ -1,0 +1,80 @@
+<local:BorderlessWindow x:Class="CabinetLock.StudentCabinetPickerWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:CabinetLock"
+        Title="选择授权柜子" Width="920" Height="610" MinWidth="760" MinHeight="520"
+        WindowStartupLocation="CenterOwner" Background="{StaticResource BackgroundBrush}">
+    <Grid Margin="24,20,24,22">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <StackPanel>
+            <TextBlock Text="选择授权柜子" Style="{StaticResource TitleText}"/>
+            <TextBlock Text="查看柜子基础信息和在线状态；点击列标题可排序"
+                       Style="{StaticResource PageStatusText}" Margin="0,5,0,0"/>
+        </StackPanel>
+
+        <Grid Grid.Row="1" Margin="0,16,0,12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="150"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBox x:Name="SearchBox" Height="36" Margin="0,0,10,0"
+                     ToolTip="按设备编号、柜子名称、设备 ID、IP 或版本筛选"
+                     TextChanged="FilterChanged"/>
+            <ComboBox x:Name="OnlineFilterCombo" Grid.Column="1" Height="36" Margin="0,0,12,0"
+                      SelectionChanged="FilterChanged">
+                <ComboBoxItem Content="全部在线状态" Tag="all"/>
+                <ComboBoxItem Content="仅在线" Tag="online"/>
+                <ComboBoxItem Content="仅离线" Tag="offline"/>
+            </ComboBox>
+            <CheckBox x:Name="AvailableOnlyCheckBox" Grid.Column="2" Content="只看未授权"
+                      IsChecked="False" VerticalAlignment="Center"
+                      Checked="FilterChanged" Unchecked="FilterChanged"/>
+        </Grid>
+
+        <Border Grid.Row="2" Style="{StaticResource Panel}" Padding="8">
+            <DataGrid x:Name="CabinetGrid" BorderThickness="0" IsReadOnly="True"
+                      SelectionMode="Single" SelectionUnit="FullRow"
+                      CanUserSortColumns="True" AutoGenerateColumns="False">
+                <DataGrid.Resources>
+                    <Style TargetType="TextBlock" BasedOn="{StaticResource DataGridTextBlockStyle}"/>
+                </DataGrid.Resources>
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="设备编号" Binding="{Binding DeviceNumber}" Width="100"
+                                        ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                    <DataGridTextColumn Header="柜子名称" Binding="{Binding DeviceName}" Width="135"
+                                        ElementStyle="{StaticResource DataGridLeftTextBlockStyle}"/>
+                    <DataGridTextColumn Header="设备 ID" Binding="{Binding DeviceId}" Width="150"
+                                        ElementStyle="{StaticResource DataGridLeftTextBlockStyle}"/>
+                    <DataGridTextColumn Header="在线状态" Binding="{Binding OnlineText}" Width="82"
+                                        SortMemberPath="IsOnline"
+                                        ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                    <DataGridTextColumn Header="IP 地址" Binding="{Binding IpAddress}" Width="110"
+                                        ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                    <DataGridTextColumn Header="固件版本" Binding="{Binding FirmwareVersion}" Width="100"
+                                        ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                    <DataGridTextColumn Header="授权状态" Binding="{Binding AssignmentText}" Width="90"
+                                        SortMemberPath="IsAssigned"
+                                        ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                </DataGrid.Columns>
+            </DataGrid>
+        </Border>
+
+        <Grid Grid.Row="3" Margin="0,14,0,0">
+            <TextBlock x:Name="ResultCountText" VerticalAlignment="Center"
+                       Foreground="{StaticResource SubTextBrush}"/>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button Content="取消" Style="{StaticResource SecondaryButton}"
+                        Click="CancelButton_Click"/>
+                <Button Content="确认选择" Width="100" Margin="8,0,0,0"
+                        Click="ConfirmButton_Click"/>
+            </StackPanel>
+        </Grid>
+    </Grid>
+</local:BorderlessWindow>

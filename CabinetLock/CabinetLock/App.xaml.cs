@@ -31,6 +31,7 @@ namespace CabinetLock
         public static CabinetBindingService CabinetBindingService { get; } = new CabinetBindingService();
         public static CabinetSyncQueueService CabinetSyncQueueService { get; } = new CabinetSyncQueueService();
         public static CommandService CommandService { get; } = new CommandService();
+        public static MaintenanceService MaintenanceService { get; } = new MaintenanceService();
         public static SystemHealthService SystemHealthService { get; } = new SystemHealthService();
 
         /// <summary>SD 卡集中存储服务（通过 Mesh 与根节点 SD 卡通信）</summary>
@@ -160,6 +161,7 @@ namespace CabinetLock
             if (Interlocked.Exchange(ref _cabinetBackgroundServicesStarted, 1) != 0) return;
             _ = CabinetSyncQueueService.RunAsync(_shutdownCts.Token);
             CabinetSyncQueueService.Trigger();
+            _ = MaintenanceService.SyncOnlineDevicesAsync(_shutdownCts.Token);
         }
 
         private bool CabinetBackgroundServicesStarted =>
@@ -204,6 +206,7 @@ namespace CabinetLock
             MessageHandler.OnPermissionSyncResult += OnPermissionSyncResult;
             MessageHandler.OnConfigSaved += OnConfigSavedHandler;
             MessageHandler.OnConfigResponse += OnConfigResponse;
+            MessageHandler.OnMaintenanceStatus += MaintenanceService.HandleReported;
         }
 
         private void OnDeviceConnected(DeviceClient device)
@@ -255,6 +258,10 @@ namespace CabinetLock
                     catch { }
                 });
                 CabinetSyncQueueService.Trigger();
+                DeviceClient? registered = MeshBridge.GetOnlineDevices().FirstOrDefault(device =>
+                    string.Equals(device.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase));
+                if (registered?.IsRoot != true)
+                    _ = MaintenanceService.SyncDeviceAsync(deviceId);
             }
         }
 

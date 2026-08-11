@@ -30,12 +30,14 @@
                     Content="&#xE72C;" ToolTip="刷新权限" Click="RefreshButton_Click" VerticalAlignment="Bottom"/>
         </Grid>
 
-        <Grid Grid.Row="1">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="5*" MinWidth="560"/>
-                <ColumnDefinition Width="12"/>
-                <ColumnDefinition Width="4*" MinWidth="500"/>
-            </Grid.ColumnDefinitions>
+        <ScrollViewer Grid.Row="1" HorizontalScrollBarVisibility="Auto"
+                      VerticalScrollBarVisibility="Disabled" PanningMode="HorizontalOnly">
+            <Grid MinWidth="1072">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="5*" MinWidth="560"/>
+                    <ColumnDefinition Width="12"/>
+                    <ColumnDefinition Width="4*" MinWidth="500"/>
+                </Grid.ColumnDefinitions>
 
             <Border Grid.Column="0" Style="{StaticResource Panel}">
                 <Grid>
@@ -70,7 +72,7 @@
                                                 ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
                             <DataGridTextColumn Header="角色" Binding="{Binding RoleText}" Width="72"
                                                 ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                            <DataGridTextColumn Header="班级" Binding="{Binding ClassText}" Width="*"
+                            <DataGridTextColumn Header="班级" Binding="{Binding ClassText}" Width="*" MinWidth="110"
                                                 ElementStyle="{StaticResource PermissionGridLeftTextBlockStyle}"/>
                             <DataGridTextColumn Header="权限更新" Binding="{Binding PermissionUpdateText}" Width="155"
                                                 ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
@@ -161,9 +163,9 @@
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Header="实训柜" Binding="{Binding DeviceText}" Width="110"
                                                         ElementStyle="{StaticResource PermissionGridLeftTextBlockStyle}"/>
-                                    <DataGridTextColumn Header="指纹模板" Binding="{Binding FingerprintText}" Width="1.25*"
+                                    <DataGridTextColumn Header="指纹模板" Binding="{Binding FingerprintText}" Width="1.25*" MinWidth="150"
                                                         ElementStyle="{StaticResource PermissionGridLeftTextBlockStyle}"/>
-                                    <DataGridTextColumn Header="柜门权限" Binding="{Binding LockPermissionText}" Width="1*"
+                                    <DataGridTextColumn Header="柜门权限" Binding="{Binding LockPermissionText}" Width="1*" MinWidth="120"
                                                         ElementStyle="{StaticResource PermissionGridLeftTextBlockStyle}"/>
                                     <DataGridTextColumn Header="授权状态" Binding="{Binding AuthorizationStatusText}" Width="76"
                                                         ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
@@ -195,7 +197,8 @@
                     </Border>
                 </Grid>
             </Border>
-        </Grid>
+            </Grid>
+        </ScrollViewer>
 
         <controls:PaginationControl x:Name="Pager" Grid.Row="2" Margin="0,10,0,0"
                                     PageRequested="Pager_PageRequested"/>

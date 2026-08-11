@@ -24,6 +24,15 @@
 #define CAB_MESH_RAW_DOWN 0x43414202U
 #define CAB_MESH_DIRECTION_UP 1
 #define CAB_MESH_DIRECTION_DOWN 2
+#define CAB_MESH_PARENT_RETRY_INTERVAL_SECONDS 2U
+#define CAB_MESH_PARENT_RETRY_COUNT 1U
+#define CAB_MESH_RESCAN_INTERVAL_SECONDS 3U
+#define CAB_MESH_SEARCH_WATCHDOG_INTERVAL_MS 5000U
+#define CAB_MESH_SEARCH_START_JITTER_MS 3000U
+
+static const uint8_t CAB_MESH_BROADCAST_DESTINATION[6] = {
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+};
 
 static const char *TAG = "cab_mesh";
 static cab_mesh_role_t s_role;
@@ -39,6 +48,7 @@ static cab_mesh_stats_t s_stats;
 static uint8_t s_tx_buffer[CAB_MESH_WIRE_HEADER + CAB_MESH_MAX_PACKET];
 static SemaphoreHandle_t s_send_mutex;
 static portMUX_TYPE s_stats_lock = portMUX_INITIALIZER_UNLOCKED;
+static bool s_parent_search_requested;
 
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
 /* Mesh-Lite 1.0.2's prebuilt core uses the deprecated IDF 5 symbol. IDF 6
@@ -76,8 +86,27 @@ static void wifi_event(void *argument, esp_event_base_t base, int32_t event_id,
     }
 }
 
+static bool take_parent_search_request(void) {
+    bool requested;
+    portENTER_CRITICAL(&s_stats_lock);
+    requested = s_parent_search_requested;
+    s_parent_search_requested = false;
+    portEXIT_CRITICAL(&s_stats_lock);
+    return requested;
+}
+
+static bool tick_reached(TickType_t now, TickType_t target) {
+    return (int32_t)(now - target) >= 0;
+}
+
 static void state_task(void *argument) {
     (void)argument;
+    const TickType_t watchdog_interval =
+        pdMS_TO_TICKS(CAB_MESH_SEARCH_WATCHDOG_INTERVAL_MS);
+    const uint32_t jitter_seed = ((uint32_t)s_self_mac[4] << 8) |
+                                 s_self_mac[5];
+    TickType_t next_parent_search = xTaskGetTickCount() + pdMS_TO_TICKS(
+        1000U + jitter_seed % CAB_MESH_SEARCH_START_JITTER_MS);
     while (true) {
         const int level = esp_mesh_lite_get_level();
         bool connected = false;
@@ -88,6 +117,19 @@ static void state_task(void *argument) {
             connected = esp_wifi_sta_get_ap_info(&parent) == ESP_OK;
         }
         notify_state(connected, connected ? level : 0);
+
+        if (s_role == CAB_MESH_CABINET) {
+            const TickType_t now = xTaskGetTickCount();
+            const bool requested = take_parent_search_request();
+            if (connected) {
+                next_parent_search = now + watchdog_interval;
+            }
+            if (requested ||
+                (!connected && tick_reached(now, next_parent_search))) {
+                esp_mesh_lite_connect();
+                next_parent_search = now + watchdog_interval;
+            }
+        }
         vTaskDelay(pdMS_TO_TICKS(250));
     }
 }
@@ -185,7 +227,9 @@ static esp_err_t downstream_message(uint8_t *data, uint32_t length,
                  esp_err_to_name(forward_error));
     }
 
-    if (memcmp(destination, s_self_mac, sizeof(s_self_mac)) != 0) {
+    if (memcmp(destination, s_self_mac, sizeof(s_self_mac)) != 0 &&
+        memcmp(destination, CAB_MESH_BROADCAST_DESTINATION,
+               sizeof(CAB_MESH_BROADCAST_DESTINATION)) != 0) {
         return ESP_OK;
     }
     stats_increment(&s_stats.receives);
@@ -228,6 +272,7 @@ esp_err_t cab_mesh_init(cab_mesh_role_t role, cab_mesh_receive_t receive,
     s_context = context;
     s_connected = false;
     s_layer = 0;
+    s_parent_search_requested = false;
     memset(&s_stats, 0, sizeof(s_stats));
     ESP_ERROR_CHECK(esp_read_mac(s_self_mac, ESP_MAC_WIFI_STA));
 
@@ -261,6 +306,12 @@ esp_err_t cab_mesh_init(cab_mesh_role_t role, cab_mesh_receive_t receive,
        root provides cabinet images from SD, so both roles must match here. */
     config.device_category = "cabinet-node";
     esp_mesh_lite_init(&config);
+    if (role == CAB_MESH_CABINET) {
+        esp_mesh_lite_set_wifi_reconnect_interval(
+            CAB_MESH_PARENT_RETRY_INTERVAL_SECONDS,
+            CAB_MESH_PARENT_RETRY_COUNT,
+            CAB_MESH_RESCAN_INTERVAL_SECONDS);
+    }
     ESP_ERROR_CHECK(esp_mesh_lite_raw_msg_action_list_register(RAW_ACTIONS));
     ESP_ERROR_CHECK(esp_mesh_lite_set_softap_info(s_softap_ssid,
                                                   CAB_MESH_PASSWORD));
@@ -308,6 +359,13 @@ bool cab_mesh_parent_bssid(uint8_t output[6]) {
     if (esp_wifi_sta_get_ap_info(&parent) != ESP_OK) return false;
     memcpy(output, parent.bssid, 6);
     return true;
+}
+
+void cab_mesh_request_parent_search(void) {
+    if (s_role != CAB_MESH_CABINET) return;
+    portENTER_CRITICAL(&s_stats_lock);
+    s_parent_search_requested = true;
+    portEXIT_CRITICAL(&s_stats_lock);
 }
 
 static esp_err_t send_packet(uint32_t message_id, uint8_t direction,
@@ -365,6 +423,14 @@ esp_err_t cab_mesh_send_node(const uint8_t destination[6], const uint8_t *data,
     }
     return send_packet(CAB_MESH_RAW_DOWN, CAB_MESH_DIRECTION_DOWN, destination,
                        data, length,
+                       esp_mesh_lite_send_broadcast_raw_msg_to_child,
+                       pdMS_TO_TICKS(6000));
+}
+
+esp_err_t cab_mesh_send_all(const uint8_t *data, size_t length) {
+    if (s_role != CAB_MESH_ROOT) return ESP_ERR_INVALID_STATE;
+    return send_packet(CAB_MESH_RAW_DOWN, CAB_MESH_DIRECTION_DOWN,
+                       CAB_MESH_BROADCAST_DESTINATION, data, length,
                        esp_mesh_lite_send_broadcast_raw_msg_to_child,
                        pdMS_TO_TICKS(6000));
 }

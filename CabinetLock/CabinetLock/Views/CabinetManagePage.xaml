@@ -22,6 +22,10 @@
                 <TextBlock x:Name="PageStatusText" Text="正在读取柜子状态" Style="{StaticResource PageStatusText}"/>
             </StackPanel>
             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Bottom">
+                <Button x:Name="MaintenancePasswordButton" Style="{StaticResource SecondaryButton}"
+                        Content="维护密码" Click="MaintenancePasswordButton_Click" Margin="0,0,8,0"/>
+                <Button x:Name="MaintenanceModeButton" Style="{StaticResource SecondaryButton}"
+                        Content="维护模式" Click="MaintenanceModeButton_Click" Margin="0,0,8,0"/>
                 <Button x:Name="FirmwareUpgradeButton" Style="{StaticResource SecondaryButton}"
                         Content="柜机升级" Click="FirmwareUpgradeButton_Click" Margin="0,0,8,0"/>
                 <Button x:Name="ResyncButton" Style="{StaticResource SecondaryButton}"
@@ -104,7 +108,7 @@
 
                 <Grid Grid.Row="1">
                     <DataGrid x:Name="CabinetDataGrid" BorderThickness="0" IsReadOnly="True"
-                              SelectionMode="Single" MouseDoubleClick="CabinetDataGrid_MouseDoubleClick"
+                              SelectionMode="Extended" MouseDoubleClick="CabinetDataGrid_MouseDoubleClick"
                               KeyDown="CabinetDataGrid_KeyDown" EnableRowVirtualization="True">
                         <DataGrid.Resources>
                             <Style TargetType="TextBlock" BasedOn="{StaticResource DataGridTextBlockStyle}"/>
@@ -117,6 +121,21 @@
                             </Style>
                         </DataGrid.Resources>
                         <DataGrid.Columns>
+                            <DataGridTemplateColumn x:Name="MaintenanceSelectionColumn" Width="48">
+                                <DataGridTemplateColumn.Header>
+                                    <CheckBox x:Name="SelectAllMaintenanceCheckBox" IsThreeState="True"
+                                              HorizontalAlignment="Center" Click="SelectAllMaintenanceCheckBox_Click"
+                                              ToolTip="全选或取消当前页在线柜机"/>
+                                </DataGridTemplateColumn.Header>
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                  IsEnabled="{Binding IsOnline}" HorizontalAlignment="Center"
+                                                  Click="CabinetSelectionCheckBox_Click"
+                                                  ToolTip="选择该柜机进行批量维护"/>
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                            </DataGridTemplateColumn>
                             <DataGridTemplateColumn Header="状态" Width="86">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
@@ -200,6 +219,8 @@
                             <DataGridTextColumn Header="固件" Binding="{Binding FirmwareVersionText}" Width="100"
                                                 ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
                             <DataGridTextColumn Header="硬件" Binding="{Binding HardwareVersionText}" Width="100"
+                                                ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                            <DataGridTextColumn Header="维护状态" Binding="{Binding MaintenanceStatusText}" Width="150"
                                                 ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
                             <DataGridTextColumn Header="最后在线" Binding="{Binding LastSeenTime, StringFormat={}{0:MM-dd HH:mm}}" Width="100"
                                                 ElementStyle="{StaticResource DataGridTextBlockStyle}"/>

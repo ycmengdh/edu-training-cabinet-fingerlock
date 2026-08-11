@@ -465,6 +465,7 @@ static void handle_sd_version(const cab_app_view_t *request) {
         "{\"global_version\":%lu,\"users_version\":%lu,"
         "\"classes_version\":%lu,\"permissions_version\":%lu,"
         "\"devices_version\":%lu,\"fp_version\":%lu,"
+        "\"settings_version\":%lu,"
         "\"logs_version\":%lu,\"sd_total_bytes\":%llu,"
         "\"sd_used_bytes\":%llu}",
         (unsigned long)versions.global, (unsigned long)versions.users,
@@ -472,6 +473,7 @@ static void handle_sd_version(const cab_app_view_t *request) {
         (unsigned long)versions.permissions,
         (unsigned long)versions.devices,
         (unsigned long)versions.fingerprints,
+        (unsigned long)versions.settings,
         (unsigned long)versions.logs,
         (unsigned long long)root_storage_total_bytes(),
         (unsigned long long)root_storage_used_bytes());
@@ -630,6 +632,7 @@ static void send_ota_response(const cab_app_view_t *request,
         "\"pending_nodes\":%lu,\"incompatible_nodes\":%lu,"
         "\"unknown_hardware_nodes\":%lu,"
         "\"mesh_progress\":%u,\"started_at\":%lu,"
+        "\"elapsed_seconds\":%lu,"
         "\"published_at\":%llu,"
         "\"finish_reason\":%d,\"error\":\"%s\"}",
         operation == NULL ? "status" : operation,
@@ -646,6 +649,7 @@ static void send_ota_response(const cab_app_view_t *request,
         (unsigned long)status.incompatible_nodes,
         (unsigned long)status.unknown_hardware_nodes, status.mesh_progress,
         (unsigned long)status.started_at_seconds,
+        (unsigned long)status.elapsed_seconds,
         (unsigned long long)status.published_at, status.finish_reason,
         status.error);
     send_json(CAB_CMD_CABINET_OTA_RESPONSE, request, response, true);

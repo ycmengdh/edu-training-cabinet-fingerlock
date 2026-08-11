@@ -33,6 +33,7 @@ typedef struct {
     uint32_t incompatible_nodes;
     uint32_t unknown_hardware_nodes;
     uint32_t started_at_seconds;
+    uint32_t elapsed_seconds;
     uint64_t published_at;
     uint8_t mesh_progress;
     int finish_reason;

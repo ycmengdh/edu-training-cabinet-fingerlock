@@ -75,6 +75,7 @@ namespace CabinetLock
         /// V2.7 本机副指纹清单响应：deviceId, json（含 count + backups 数组）。
         /// </summary>
         public event Action<string, string>? OnBackupFpList;
+        public event Action<string, JObject>? OnMaintenanceStatus;
 
         /// <summary>
         /// V2.7 删除副指纹结果：deviceId, userId, result。
@@ -163,6 +164,9 @@ namespace CabinetLock
                 case CommandType.DeleteBackupFingerprintResult:
                     HandleBackupFingerprintDeleted(device, msg);
                     break;
+                case CommandType.MaintenanceEvent:
+                    HandleMaintenanceStatus(device, msg);
+                    break;
                 case CommandType.Heartbeat:
                     // 心跳包：仅维持连接（LastSeen 已在 MeshBridge 更新），无需业务处理
                     break;
@@ -246,11 +250,13 @@ namespace CabinetLock
             }
 
             var deviceId = device?.DeviceId ?? msg.DeviceId;
-            OnDeviceRegistered?.Invoke(deviceId, deviceName);
-
-            // 检测根节点（is_root=true），通知 SdStorageService
             bool isRoot = TryGetBoolData(msg, "is_root");
             if (device != null) device.IsRoot = isRoot;
+            OnDeviceRegistered?.Invoke(deviceId, deviceName);
+            if (msg.Data is JObject maintenanceData)
+                OnMaintenanceStatus?.Invoke(deviceId, maintenanceData);
+
+            // 检测根节点（is_root=true），通知 SdStorageService
             if (isRoot && !string.IsNullOrEmpty(deviceId))
             {
                 OnRootDeviceRegistered?.Invoke(deviceId, TryGetNullableBoolData(msg, "sd_ready"));
@@ -288,6 +294,13 @@ namespace CabinetLock
             var configJson = msg.Data != null ? JsonHelper.Serialize(msg.Data) : "{}";
             var deviceId = device?.DeviceId ?? msg.DeviceId;
             OnConfigResponse?.Invoke(deviceId, configJson);
+        }
+
+        private void HandleMaintenanceStatus(DeviceClient? device, Message msg)
+        {
+            if (msg.Data is not JObject data) return;
+            string deviceId = device?.DeviceId ?? msg.SourceDeviceId ?? msg.DeviceId;
+            OnMaintenanceStatus?.Invoke(deviceId, data);
         }
 
         private static void MergeReportedMetadata(DeviceClient? device, Message msg)
@@ -391,14 +404,15 @@ namespace CabinetLock
                 }
             }
 
+            bool success = string.Equals(result, "success", StringComparison.OrdinalIgnoreCase);
             OnFingerprintEnrollmentResult?.Invoke(msg.MsgId, new FingerprintEnrollmentResult
             {
-                Success = string.Equals(result, "success", StringComparison.OrdinalIgnoreCase),
+                Success = success,
                 DeviceId = deviceId,
                 UserId = userId,
                 FingerprintId = fingerprintId,
                 TemplateBytes = template,
-                ErrorMessage = message
+                ErrorMessage = success ? "" : FingerprintEnrollmentPrompts.LocalizeError(message)
             });
         }
 

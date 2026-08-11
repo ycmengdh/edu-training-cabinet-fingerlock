@@ -20,8 +20,8 @@
 static const gpio_num_t s_key_pins[5] = {
     GPIO_NUM_47, GPIO_NUM_48, GPIO_NUM_45, GPIO_NUM_38, GPIO_NUM_39
 };
-static const uint8_t s_relay_bits[4] = {4, 5, 6, 7};
-static const uint8_t s_led_bits[4] = {3, 2, 1, 0};
+static const uint8_t s_relay_bits[4] = {7, 6, 5, 4};
+static const uint8_t s_led_bits[4] = {0, 1, 2, 3};
 
 typedef struct {
     bool raw;
@@ -36,6 +36,8 @@ static SemaphoreHandle_t s_mutex;
 static uint8_t s_lock_mask;
 static uint8_t s_hint_mask;
 static bool s_hint_phase;
+static bool s_led_override_active;
+static uint8_t s_led_override_mask;
 static uint32_t s_opened_at[4];
 static uint32_t s_refreshed_at[4];
 static uint32_t s_hint_changed_at;
@@ -62,6 +64,9 @@ static void refresh_output(void) {
     for (uint8_t lock = 0; lock < 4; ++lock) {
         if ((s_lock_mask & (1U << lock)) != 0) {
             output |= (uint8_t)(1U << s_relay_bits[lock]);
+            output |= (uint8_t)(1U << s_led_bits[lock]);
+        } else if (s_led_override_active &&
+                   (s_led_override_mask & (1U << lock)) != 0) {
             output |= (uint8_t)(1U << s_led_bits[lock]);
         } else if (s_hint_phase &&
                    (s_hint_mask & (1U << lock)) != 0) {
@@ -170,6 +175,24 @@ void cab_lock_clear_permission_hint(void) {
     xSemaphoreGive(s_mutex);
 }
 
+void cab_led_set_override(uint8_t led_mask) {
+    if (s_mutex == NULL ||
+        xSemaphoreTake(s_mutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
+    s_led_override_active = true;
+    s_led_override_mask = led_mask & 0x0F;
+    refresh_output();
+    xSemaphoreGive(s_mutex);
+}
+
+void cab_led_clear_override(void) {
+    if (s_mutex == NULL ||
+        xSemaphoreTake(s_mutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
+    s_led_override_active = false;
+    s_led_override_mask = 0;
+    refresh_output();
+    xSemaphoreGive(s_mutex);
+}
+
 static void update_keys(uint32_t now) {
     for (int index = 0; index < 5; ++index) {
         key_state_t *key = &s_keys[index];
@@ -235,4 +258,8 @@ bool cab_key_take_long_press(int *key_id) {
     if (key_id != NULL) *key_id = s_long_key_event;
     s_long_key_event = -1;
     return true;
+}
+
+bool cab_key_is_pressed(int key_id) {
+    return key_id >= 0 && key_id < 5 && s_keys[key_id].stable;
 }

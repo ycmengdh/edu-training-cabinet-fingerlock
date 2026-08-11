@@ -39,6 +39,8 @@ namespace CabinetLock
         public uint PendingNodes { get; init; }
         public uint IncompatibleNodes { get; init; }
         public uint UnknownHardwareNodes { get; init; }
+        public uint StartedAtSeconds { get; init; }
+        public uint ElapsedSeconds { get; init; }
         public long PublishedAt { get; init; }
     }
 
@@ -486,6 +488,8 @@ namespace CabinetLock
                 PendingNodes = data["pending_nodes"]?.Value<uint>() ?? 0,
                 IncompatibleNodes = data["incompatible_nodes"]?.Value<uint>() ?? 0,
                 UnknownHardwareNodes = data["unknown_hardware_nodes"]?.Value<uint>() ?? 0,
+                StartedAtSeconds = data["started_at"]?.Value<uint>() ?? 0,
+                ElapsedSeconds = data["elapsed_seconds"]?.Value<uint>() ?? 0,
                 PublishedAt = data["published_at"]?.Value<long>() ?? 0
             };
         }

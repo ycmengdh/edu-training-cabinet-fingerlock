@@ -28,6 +28,7 @@ namespace CabinetLock
                     ["permissions"] = remote.PermissionsVersion,
                     ["devices"] = remote.DevicesVersion,
                     ["fingerprints"] = remote.FpVersion,
+                    ["system_settings"] = remote.SettingsVersion,
                 };
                 foreach ((string table, uint remoteVersion) in checks)
                 {
@@ -115,6 +116,7 @@ namespace CabinetLock
                 BusinessDatabase.GetTableVersion("role_permissions")),
             ["devices"] = BusinessDatabase.GetTableVersion("devices"),
             ["fingerprints"] = BusinessDatabase.GetTableVersion("fingerprints"),
+            ["system_settings"] = BusinessDatabase.GetTableVersion("system_settings"),
         };
     }
 }

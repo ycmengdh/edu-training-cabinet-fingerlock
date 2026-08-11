@@ -97,6 +97,7 @@ namespace CabinetLock
                 "role_permissions" => version.PermissionsVersion,
                 "devices" => version.DevicesVersion,
                 "fingerprints" => version.FpVersion,
+                "system_settings" => version.SettingsVersion,
                 "logs" => version.LogsVersion,
                 _ => 0
             };

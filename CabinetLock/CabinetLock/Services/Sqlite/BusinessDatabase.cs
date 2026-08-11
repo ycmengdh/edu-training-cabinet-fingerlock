@@ -17,14 +17,15 @@ namespace CabinetLock
 
         public static readonly string[] BusinessTables =
         {
-            "users", "classes", "permissions", "role_permissions", "devices", "fingerprints"
+            "users", "classes", "permissions", "role_permissions", "devices", "fingerprints",
+            "system_settings"
         };
 
         // Routine synchronization intentionally excludes fingerprint metadata/blob data.
         // Fingerprints are written to SD at enrollment time and are handled by full backup.
         public static readonly string[] DailySyncTables =
         {
-            "users", "classes", "permissions", "role_permissions", "devices"
+            "users", "classes", "permissions", "role_permissions", "devices", "system_settings"
         };
 
         /// <summary>
@@ -156,6 +157,16 @@ CREATE TABLE IF NOT EXISTS devices (
   hardware_version TEXT,
   status_json TEXT
 );
+CREATE TABLE IF NOT EXISTS system_settings (
+  setting_key TEXT PRIMARY KEY,
+  setting_value TEXT NOT NULL,
+  config_version INTEGER NOT NULL DEFAULT 1,
+  update_time TEXT NOT NULL
+);
+INSERT OR IGNORE INTO system_settings(setting_key,setting_value,config_version,update_time)
+VALUES('maintenance_pin','112233',1,datetime('now'));
+INSERT OR IGNORE INTO table_meta(table_name,version,updated_at)
+VALUES('system_settings',1,datetime('now'));
 CREATE TABLE IF NOT EXISTS fingerprints (
   fingerprint_id INTEGER PRIMARY KEY,
   user_id TEXT,
@@ -306,6 +317,7 @@ ON CONFLICT(table_name) DO UPDATE SET version=$v, updated_at=$u;";
                     "permissions" => ReadPermissions(conn),
                     "role_permissions" => ReadRolePermissions(conn),
                     "devices" => ReadDevices(conn),
+                    "system_settings" => ReadSystemSettings(conn),
                     "fingerprints" => ReadFingerprintMetadata(conn),
                     _ => throw new ArgumentException($"未知业务表: {table}", nameof(table))
                 };
@@ -328,6 +340,7 @@ ON CONFLICT(table_name) DO UPDATE SET version=$v, updated_at=$u;";
                     case "permissions": WritePermissions(conn, tx, array); break;
                     case "role_permissions": WriteRolePermissions(conn, tx, array); break;
                     case "devices": WriteDevices(conn, tx, array); break;
+                    case "system_settings": WriteSystemSettings(conn, tx, array); break;
                     case "fingerprints": WriteFingerprintMetadata(conn, tx, array); break;
                     default: throw new ArgumentException($"未知业务表: {table}", nameof(table));
                 }
@@ -358,7 +371,8 @@ ON CONFLICT(table_name) DO UPDATE SET version=$v, updated_at=$u;";
             if (versions == null) throw new ArgumentNullException(nameof(versions));
             foreach (string table in DailySyncTables)
             {
-                if (!tables.ContainsKey(table))
+                if (!tables.ContainsKey(table) &&
+                    !string.Equals(table, "system_settings", StringComparison.OrdinalIgnoreCase))
                     throw new InvalidDataException($"Snapshot table is missing: {table}");
             }
 
@@ -374,7 +388,9 @@ ON CONFLICT(table_name) DO UPDATE SET version=$v, updated_at=$u;";
                     JArray array = string.Equals(table, "users",
                         StringComparison.OrdinalIgnoreCase)
                         ? snapshotUsers
-                        : tables[table] ?? new JArray();
+                        : tables.TryGetValue(table, out JArray? value)
+                            ? value ?? new JArray()
+                            : new JArray();
                     switch (table)
                     {
                         case "users": WriteUsers(conn, tx, array); break;
@@ -382,6 +398,7 @@ ON CONFLICT(table_name) DO UPDATE SET version=$v, updated_at=$u;";
                         case "permissions": WritePermissions(conn, tx, array); break;
                         case "role_permissions": WriteRolePermissions(conn, tx, array); break;
                         case "devices": WriteDevices(conn, tx, array); break;
+                        case "system_settings": WriteSystemSettings(conn, tx, array); break;
                     }
 
                     using var cmd = conn.CreateCommand();

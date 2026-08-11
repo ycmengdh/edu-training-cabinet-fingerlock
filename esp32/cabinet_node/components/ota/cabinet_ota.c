@@ -288,17 +288,20 @@ static void health_validation_task(void *argument) {
     while (elapsed < OTA_HEALTH_TIMEOUT_MS) {
         cab_mesh_stats_t stats = cab_mesh_stats();
         if (cab_mesh_is_connected() && stats.heartbeat_acks > 0) {
-            if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-                set_status_locked("complete", 100,
-                                  esp_app_get_description()->version,
-                                  "", false);
-                xSemaphoreGive(s_mutex);
-            }
             esp_err_t result = esp_ota_mark_app_valid_cancel_rollback();
             ESP_LOGW(TAG, "OTA health validation: %s",
                      esp_err_to_name(result));
-            vTaskDelete(NULL);
-            return;
+            if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+                set_status_locked(result == ESP_OK ? "complete" : "validating",
+                                  100, esp_app_get_description()->version,
+                                  result == ESP_OK ? "" : esp_err_to_name(result),
+                                  result != ESP_OK);
+                xSemaphoreGive(s_mutex);
+            }
+            if (result == ESP_OK) {
+                vTaskDelete(NULL);
+                return;
+            }
         }
         vTaskDelay(pdMS_TO_TICKS(1000));
         elapsed += 1000;
@@ -329,6 +332,14 @@ bool cabinet_ota_init(void) {
 bool cabinet_ota_start_health_validation(void) {
     return xTaskCreate(health_validation_task, "ota_health",
                        OTA_HEALTH_TASK_STACK, NULL, 6, NULL) == pdPASS;
+}
+
+bool cabinet_ota_running_image_validated(void) {
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+    return running == NULL ||
+           esp_ota_get_state_partition(running, &state) != ESP_OK ||
+           state != ESP_OTA_IMG_PENDING_VERIFY;
 }
 
 esp_err_t cabinet_ota_request(const char *version, size_t image_size) {

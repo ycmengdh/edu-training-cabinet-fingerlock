@@ -150,6 +150,26 @@ class FingerprintRecoveryContractTests(unittest.TestCase):
         self.assertIn('cJSON_AddNumberToObject(item, "slot", slot);',
                       self.controller)
 
+    def test_template_restore_honors_sensor_packet_size(self):
+        self.assertIn("FP_CMD_READ_SYSTEM_PARAMETERS", self.fingerprint)
+        self.assertIn("static size_t data_packet_size(void)", self.fingerprint)
+        self.assertIn("case 0: return 32;", self.fingerprint)
+        self.assertIn("case 3: return 256;", self.fingerprint)
+        self.assertIn(
+            "attempt == 0 ? preferred_packet_size : 32",
+            self.fingerprint,
+        )
+        self.assertNotIn("fp_packet_t optional_ack", self.fingerprint)
+
+    def test_template_restore_reports_sensor_failure_stage(self):
+        self.assertIn("template download rejected", self.fingerprint)
+        self.assertIn("template packet send failed", self.fingerprint)
+        self.assertIn("template store failed", self.fingerprint)
+        restore = self.controller.split(
+            "static void handle_restore_fingerprint", 1)[1]
+        restore = restore.split("static void handle_delete_fingerprint", 1)[0]
+        self.assertIn("cab_fp_last_error()", restore)
+
 
 if __name__ == "__main__":
     unittest.main()

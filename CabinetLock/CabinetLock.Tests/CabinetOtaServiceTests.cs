@@ -144,6 +144,38 @@ public class CabinetOtaServiceTests
     }
 
     [Fact]
+    public void OtaWindow_ShowsRootReportedDistributionElapsedTime()
+    {
+        string xaml = File.ReadAllText(FindRepositoryFile(
+            Path.Combine("CabinetLock", "CabinetLock", "Views",
+                "CabinetOtaWindow.xaml")));
+        string code = File.ReadAllText(FindRepositoryFile(
+            Path.Combine("CabinetLock", "CabinetLock", "Views",
+                "CabinetOtaWindow.xaml.cs")));
+
+        Assert.Contains("x:Name=\"ElapsedText\"", xaml,
+            StringComparison.Ordinal);
+        Assert.Contains("分发用时", xaml, StringComparison.Ordinal);
+        Assert.Contains("status.ElapsedSeconds", code,
+            StringComparison.Ordinal);
+        Assert.Contains("FormatDuration", code, StringComparison.Ordinal);
+        Assert.Contains("正在拓扑下载", code, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void OtaStatus_CarriesDistributionTimingFields()
+    {
+        var status = new CabinetOtaStatus
+        {
+            StartedAtSeconds = 12,
+            ElapsedSeconds = 345
+        };
+
+        Assert.Equal(12U, status.StartedAtSeconds);
+        Assert.Equal(345U, status.ElapsedSeconds);
+    }
+
+    [Fact]
     public void Deploy_CanReuseOnlyAnExactlyMatchingValidatedRootImage()
     {
         var firmware = new CabinetFirmwareInfo

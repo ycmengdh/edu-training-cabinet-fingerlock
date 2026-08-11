@@ -15,6 +15,7 @@ typedef struct {
     uint32_t permissions;
     uint32_t devices;
     uint32_t fingerprints;
+    uint32_t settings;
     uint32_t logs;
 } root_sd_versions_t;
 

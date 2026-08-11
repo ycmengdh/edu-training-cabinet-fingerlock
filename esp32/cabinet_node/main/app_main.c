@@ -17,11 +17,12 @@
 #include "freertos/task.h"
 #include "nvs_flash.h"
 
-#define INCOMING_QUEUE_DEPTH 16
+#define INCOMING_QUEUE_DEPTH 32
 #define SERIAL_TASK_STACK 6144
 #define BUSINESS_TASK_STACK 12288
 #define HEARTBEAT_INTERVAL_MS 5000U
 #define ROOT_RESPONSE_TIMEOUT_MS 7000U
+#define ROOT_PARENT_RESELECT_TIMEOUT_COUNT 3U
 #define STATUS_REPORT_INTERVAL_MS 60000U
 
 typedef struct {
@@ -36,8 +37,10 @@ static volatile bool s_mesh_connected;
 static volatile bool s_register_pending;
 static uint32_t s_first_heartbeat_ms;
 static uint32_t s_first_status_report_ms;
+static uint32_t s_ota_report_interval_ms;
 static uint32_t s_unanswered_heartbeat_since;
 static bool s_root_response_timed_out;
+static uint8_t s_consecutive_root_timeouts;
 static QueueHandle_t s_incoming_queue;
 static SemaphoreHandle_t s_serial_mutex;
 
@@ -110,13 +113,14 @@ static void mesh_state(bool connected, int layer, void *context) {
     (void)layer;
     (void)context;
     if (connected && !s_mesh_connected) s_register_pending = true;
+    if (!connected) s_consecutive_root_timeouts = 0;
     s_mesh_connected = connected;
     cab_controller_set_mesh_connected(connected);
 }
 
 static int encode_periodic(uint8_t *output, size_t output_size,
                            uint16_t command) {
-    uint8_t payload[384];
+    uint8_t payload[512];
     int payload_length;
     if (command == CAB_CMD_REGISTER) {
         cab_mesh_stats_t stats = cab_mesh_stats();
@@ -133,12 +137,14 @@ static int encode_periodic(uint8_t *output, size_t output_size,
             "{\"device_id\":\"%s\",\"device_name\":\"ESP-IDF Cabinet\","
             "\"is_root\":false,\"firmware_version\":\"%s\","
             "\"hardware_version\":\"%s\","
+            "\"ota_validated\":%s,"
             "\"mesh_layer\":%d,\"mesh_mac\":\"%s\","
             "\"mesh_ap_mac\":\"%s\",\"parent_bssid\":\"%s\","
             "\"mesh_root_responses\":%lu,\"mesh_heartbeat_acks\":%lu,"
             "\"mesh_heartbeat_timeouts\":%lu}",
             s_device_id, esp_app_get_description()->version,
             CABINET_HARDWARE_VERSION,
+            cabinet_ota_running_image_validated() ? "true" : "false",
             cab_mesh_layer(), s_device_id + 4, ap_mac_text, parent_text,
             (unsigned long)stats.root_responses,
             (unsigned long)stats.heartbeat_acks,
@@ -193,7 +199,6 @@ static void business_task(void *argument) {
     uint32_t last_heartbeat = 0;
     uint32_t last_status_report = 0;
     uint32_t last_ota_report = 0;
-    uint32_t last_ota_generation = 0;
     while (true) {
         incoming_message_t *message = NULL;
         if (xQueueReceive(s_incoming_queue, &message,
@@ -209,6 +214,7 @@ static void business_task(void *argument) {
                             view.command == CAB_CMD_HEARTBEAT_ACK);
                         s_unanswered_heartbeat_since = 0;
                         s_root_response_timed_out = false;
+                        s_consecutive_root_timeouts = 0;
                     }
                     cab_controller_handle(&view, message->mesh_ingress);
                 }
@@ -245,10 +251,9 @@ static void business_task(void *argument) {
         cabinet_ota_status_t ota_status;
         if (s_mesh_connected && cabinet_ota_get_status(&ota_status) &&
             strcmp(ota_status.phase, "idle") != 0 &&
-            (ota_status.generation != last_ota_generation ||
-             (ota_status.active && now - last_ota_report >= 5000U))) {
+            (last_ota_report == 0 ||
+             now - last_ota_report >= s_ota_report_interval_ms)) {
             if (send_periodic(CAB_CMD_CABINET_OTA_PROGRESS)) {
-                last_ota_generation = ota_status.generation;
                 last_ota_report = now;
             }
         }
@@ -262,6 +267,14 @@ static void business_task(void *argument) {
                 cab_mesh_note_heartbeat_timeout();
             }
             s_root_response_timed_out = true;
+            if (s_consecutive_root_timeouts < UINT8_MAX) {
+                s_consecutive_root_timeouts++;
+            }
+            if (s_consecutive_root_timeouts >=
+                ROOT_PARENT_RESELECT_TIMEOUT_COUNT) {
+                cab_mesh_request_parent_search();
+                s_consecutive_root_timeouts = 0;
+            }
             s_register_pending = true;
             s_unanswered_heartbeat_since = now;
         }
@@ -282,6 +295,9 @@ void app_main(void) {
     make_device_id(s_device_id, sizeof(s_device_id), mac);
     s_first_heartbeat_ms = 1000U +
         ((((uint32_t)mac[4] << 8) | mac[5]) % 2000U);
+    s_ota_report_interval_ms = 5000U +
+        ((((uint32_t)mac[3] << 16) | ((uint32_t)mac[4] << 8) | mac[5]) %
+         3000U);
     // Spread the first report across the minute so a large installation does
     // not create a synchronized 100-node burst after a power restoration.
     s_first_status_report_ms = 5000U +

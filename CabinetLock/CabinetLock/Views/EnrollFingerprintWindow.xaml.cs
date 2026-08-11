@@ -14,6 +14,8 @@ namespace CabinetLock
         private bool _dataLoaded;
         private bool _enrolling;
         private string? _lastDeviceId;
+        private string? _lastEnrollmentPhase;
+        private CancellationTokenSource? _progressPromptCts;
 
         public int EnrolledFingerprintId { get; private set; } = -1;
         public byte[]? EnrolledTemplate { get; private set; }
@@ -295,16 +297,56 @@ namespace CabinetLock
 
         private static string FormatProgressDetail(
             string phase, int step, int total, int targetFingerprintId) => phase switch
+            {
+                "place_1" or "lift_1" => $"采集 1/4 · 目标指纹 ID #{targetFingerprintId}",
+                "place_2" or "lift_2" => $"采集 2/4 · 目标指纹 ID #{targetFingerprintId}",
+                "place_3" or "lift_3" => $"采集 3/4 · 目标指纹 ID #{targetFingerprintId}",
+                "place_4" or "storing" => $"采集 4/4 · 目标指纹 ID #{targetFingerprintId}",
+                "verify_lift_1" => $"验证准备 1/2 · 等待手指松开 · 目标指纹 ID #{targetFingerprintId}",
+                "verify_retry_lift_1" => $"验证 1/2 · 正在等待重新验证 · 目标指纹 ID #{targetFingerprintId}",
+                "verify_place_1" or "verify_1" => $"验证 1/2 · 目标指纹 ID #{targetFingerprintId}",
+                "verify_lift_2" => $"验证准备 2/2 · 等待手指松开 · 目标指纹 ID #{targetFingerprintId}",
+                "verify_retry_lift_2" => $"验证 2/2 · 正在等待重新验证 · 目标指纹 ID #{targetFingerprintId}",
+                "verify_place_2" or "verify_2" => $"验证 2/2 · 目标指纹 ID #{targetFingerprintId}",
+                "success" => $"验证 2/2 · 模板已导出，临时槽 0 已清空",
+                _ => $"进度 {step}/{total} · 目标指纹 ID #{targetFingerprintId}"
+            };
+
+        private void ShowEnrollmentProgress(
+            string phase, int step, int total, string hint, int targetFingerprintId)
         {
-            "place_1" or "lift_1" => $"采集 1/4 · 目标指纹 ID #{targetFingerprintId}",
-            "place_2" or "lift_2" => $"采集 2/4 · 目标指纹 ID #{targetFingerprintId}",
-            "place_3" or "lift_3" => $"采集 3/4 · 目标指纹 ID #{targetFingerprintId}",
-            "place_4" or "storing" => $"采集 4/4 · 目标指纹 ID #{targetFingerprintId}",
-            "verify_1" => $"验证 1/2 · 目标指纹 ID #{targetFingerprintId}",
-            "verify_2" => $"验证 2/2 · 目标指纹 ID #{targetFingerprintId}",
-            "success" => $"验证 2/2 · 模板已导出，临时槽 0 已清空",
-            _ => $"进度 {step}/{total} · 目标指纹 ID #{targetFingerprintId}"
-        };
+            _lastEnrollmentPhase = phase;
+            _progressPromptCts?.Cancel();
+            var cancellation = new CancellationTokenSource();
+            _progressPromptCts = cancellation;
+            _ = ShowEnrollmentProgressAsync(
+                phase, step, total, hint, targetFingerprintId, cancellation.Token);
+        }
+
+        private async Task ShowEnrollmentProgressAsync(
+            string phase, int step, int total, string hint,
+            int targetFingerprintId, CancellationToken cancellationToken)
+        {
+            try
+            {
+                int delay = FingerprintEnrollmentPrompts.GetDisplayDelayMilliseconds(phase);
+                if (delay > 0) await Task.Delay(delay, cancellationToken);
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    EnrollProgress.Maximum = total;
+                    EnrollProgress.Value = FingerprintEnrollmentPrompts.GetProgressValue(
+                        phase, step, total);
+                    StepHint.Text = hint;
+                    StepDetail.Text = FormatProgressDetail(
+                        phase, step, total, targetFingerprintId);
+                    StepIcon.Text = FingerprintEnrollmentPrompts.IsVerificationPhase(phase)
+                        ? "\uE73E" : "\uE928";
+                });
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
 
         private async void EnrollButton_Click(object sender, RoutedEventArgs e)
         {
@@ -316,9 +358,11 @@ namespace CabinetLock
 
             _enrolling = true;
             _lastDeviceId = deviceOption.DeviceId;
+            _lastEnrollmentPhase = null;
             SetSelectionEnabled(false);
             CancelButton.Content = "取消录入";
             EnrollProgress.Value = 0;
+            _progressPromptCts?.Cancel();
             StepIcon.Text = "\uE928";
             StepHint.Text = "正在发送录入指令";
             StepDetail.Text = "";
@@ -330,31 +374,30 @@ namespace CabinetLock
                 bool overwrite = fingerOption.ExistingFingerprintId.HasValue;
                 int targetFingerprintId = ResolveTargetFingerprintId(userOption, fingerOption);
                 StepHint.Text = $"准备录入{fingerOption.BaseName}";
-                StepDetail.Text = $"临时槽 0 采集 · 模板 ID #{targetFingerprintId} · 完成后验证 2 次";
+                StepDetail.Text = $"临时槽 0 采集 · 模板 ID #{targetFingerprintId} · 按提示完成 4 次采集和 2 次验证";
                 FingerprintEnrollmentResult result = await App.CommandService.EnrollFingerprintAsync(
                     deviceOption.DeviceId, user.UserId, targetFingerprintId, true, 210_000,
-                    (phase, step, total, hint) => Dispatcher.Invoke(() =>
-                    {
-                        EnrollProgress.Value = step;
-                        EnrollProgress.Maximum = total;
-                        StepHint.Text = hint;
-                        StepDetail.Text = FormatProgressDetail(
-                            phase, step, total, targetFingerprintId);
-                        StepIcon.Text = phase.StartsWith("verify") ? "\uE73E" : "\uE928";
-                    }));
+                    (phase, step, total, hint) => ShowEnrollmentProgress(
+                        phase, step, total, hint, targetFingerprintId));
+                _progressPromptCts?.Cancel();
                 if (!result.Success)
                 {
                     StepIcon.Text = "\uE783";
                     StepHint.Text = "录入失败";
                     StepDetail.Text = $"指纹 ID #{targetFingerprintId} · 未保存";
-                    ResultText.Text = string.IsNullOrWhiteSpace(result.ErrorMessage)
-                        ? "柜机未能完成指纹录入" : result.ErrorMessage;
+                    ResultText.Text = FingerprintEnrollmentPrompts.EnhanceFailureForPhase(
+                        result.ErrorMessage, _lastEnrollmentPhase);
                     return;
                 }
 
                 EnrolledFingerprintId = result.FingerprintId;
                 EnrolledTemplate = result.TemplateBytes;
                 EnrolledUserId = user.UserId;
+                EnrollProgress.Value = EnrollProgress.Maximum;
+                StepIcon.Text = "\uE73E";
+                StepHint.Text = "两次验证通过，正在保存指纹模板";
+                StepDetail.Text = $"目标指纹 ID #{result.FingerprintId} · 请稍候";
+                await Task.Delay(450);
                 string summary = overwrite
                     ? $"覆盖成功，{user.Name} 的{fingerOption.BaseName}模板 #{result.FingerprintId} 已更新。"
                     : $"录入成功，{user.Name} 的{fingerOption.BaseName}模板 #{result.FingerprintId} 已保存。";
@@ -392,8 +435,8 @@ namespace CabinetLock
 
                 summary += "\n柜机 0 号临时槽已清空。需要使用时，请在柜子详情中点击“绑定用户”再下发。";
                 StepIcon.Text = "\uE73E";
-                StepHint.Text = "录入完成，等待绑定";
-                StepDetail.Text = $"用户模板 ID：{result.FingerprintId} · 柜机正式槽位未写入";
+                StepHint.Text = "指纹录入成功";
+                StepDetail.Text = $"两次验证均已通过 · 用户模板 ID：{result.FingerprintId}";
                 ResultText.Text = summary;
                 TestButton.Visibility = Visibility.Visible;
                 RefreshFingerOptions();
@@ -402,11 +445,13 @@ namespace CabinetLock
             {
                 StepIcon.Text = "\uE783";
                 StepHint.Text = "录入异常";
-                ResultText.Text = ex.Message;
+                ResultText.Text = FingerprintEnrollmentPrompts.EnhanceFailureForPhase(
+                    ex.Message, _lastEnrollmentPhase);
             }
             finally
             {
                 _enrolling = false;
+                _progressPromptCts?.Cancel();
                 CancelButton.Content = "关闭";
                 SetSelectionEnabled(true);
                 UpdateSelectionState(updateMessage: false);
@@ -456,7 +501,8 @@ namespace CabinetLock
         {
             if (EnrolledFingerprintId <= 0 || string.IsNullOrWhiteSpace(EnrolledUserId)) return;
             var window = new FingerprintTestWindow(
-                EnrolledUserId, EnrolledFingerprintId, _lastDeviceId) { Owner = this };
+                EnrolledUserId, EnrolledFingerprintId, _lastDeviceId)
+            { Owner = this };
             window.ShowDialog();
         }
 
@@ -499,6 +545,7 @@ namespace CabinetLock
                 }
                 SendCancelEnroll();
             }
+            _progressPromptCts?.Cancel();
             base.OnClosing(e);
         }
     }

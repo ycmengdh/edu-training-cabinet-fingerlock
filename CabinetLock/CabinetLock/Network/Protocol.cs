@@ -66,6 +66,10 @@ namespace CabinetLock
 
         /// <summary>清除本地日志（上位机 -> 下位机）</summary>
         public const string CmdClearLogs = "CLEAR_LOGS";
+        public const string CmdSyncMaintenanceConfig = "SYNC_MAINTENANCE_CONFIG";
+        public const string CmdEnterMaintenance = "ENTER_MAINTENANCE";
+        public const string CmdExitMaintenance = "EXIT_MAINTENANCE";
+        public const string CmdMaintenanceEvent = "MAINTENANCE_EVENT";
 
         /// <summary>重启设备（上位机 -> 下位机）</summary>
         public const string CmdReboot = "REBOOT";
@@ -258,6 +262,10 @@ namespace CabinetLock
                 case CommandType.WriteConfig: return CmdWriteConfig;
                 case CommandType.ReadStatus: return CmdReadStatus;
                 case CommandType.ClearLogs: return CmdClearLogs;
+                case CommandType.SyncMaintenanceConfig: return CmdSyncMaintenanceConfig;
+                case CommandType.EnterMaintenance: return CmdEnterMaintenance;
+                case CommandType.ExitMaintenance: return CmdExitMaintenance;
+                case CommandType.MaintenanceEvent: return CmdMaintenanceEvent;
                 case CommandType.Reboot: return CmdReboot;
                 case CommandType.StatusReport: return CmdStatusReport;
                 case CommandType.LogReport: return CmdLogReport;
@@ -346,6 +354,10 @@ namespace CabinetLock
                 case CmdWriteConfig: return CommandType.WriteConfig;
                 case CmdReadStatus: return CommandType.ReadStatus;
                 case CmdClearLogs: return CommandType.ClearLogs;
+                case CmdSyncMaintenanceConfig: return CommandType.SyncMaintenanceConfig;
+                case CmdEnterMaintenance: return CommandType.EnterMaintenance;
+                case CmdExitMaintenance: return CommandType.ExitMaintenance;
+                case CmdMaintenanceEvent: return CommandType.MaintenanceEvent;
                 case CmdReboot: return CommandType.Reboot;
                 case CmdStatusReport: return CommandType.StatusReport;
                 case CmdLogReport: return CommandType.LogReport;

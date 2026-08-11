@@ -21,6 +21,16 @@ class MeshOtaPullContractTests(unittest.TestCase):
         self.mesh = (
             REPO / "esp32/common_components/cabinet_mesh/cabinet_mesh.c"
         ).read_text(encoding="utf-8")
+        self.protocol = (
+            REPO
+            / "esp32/common_components/cabinet_protocol/include/cabinet_protocol.h"
+        ).read_text(encoding="utf-8")
+        self.cabinet_app = (
+            REPO / "esp32/cabinet_node/main/app_main.c"
+        ).read_text(encoding="utf-8")
+        self.root_main = (
+            REPO / "esp32/root_node/main/app_main.c"
+        ).read_text(encoding="utf-8")
 
     def test_root_notifies_and_cabinet_starts_the_pull(self):
         self.assertIn("CAB_CMD_CABINET_OTA_NOTIFY", self.root_ota)
@@ -39,6 +49,22 @@ class MeshOtaPullContractTests(unittest.TestCase):
         self.assertIn("s_expected_size - param->offset", self.cabinet_ota)
         self.assertIn("esp_ota_write(s_update_handle, param->data,", self.cabinet_ota)
         self.assertIn("write_size);", self.cabinet_ota)
+
+    def test_raw_broadcast_ota_protocol_is_removed(self):
+        self.assertNotIn("CAB_OTA_BROADCAST", self.protocol)
+        self.assertNotIn("CAB_CMD_CABINET_OTA_REPAIR_REQUEST", self.protocol)
+        self.assertNotIn("OTA_BROADCAST", self.root_ota)
+        self.assertNotIn("ota_broadcast_version", self.cabinet_app)
+        self.assertNotIn("cabinet_ota_broadcast", self.cabinet_ota)
+        self.assertNotIn("CAB_CMD_CABINET_OTA_BROADCAST", self.controller)
+        self.assertNotIn("root_ota_note_repair", self.root_main)
+
+    def test_deep_nodes_wait_for_a_validated_parent_provider(self):
+        self.assertIn("if (!registration->has_parent_bssid) return false;",
+                      self.root_ota)
+        self.assertIn("parent->ota_validated", self.root_ota)
+        self.assertIn("OTA_PER_PARENT_CONCURRENCY 2U", self.root_ota)
+        self.assertIn("OTA_GLOBAL_CONCURRENCY 10U", self.root_ota)
 
     def test_pull_start_failure_retains_request_context(self):
         pull_start = self.cabinet_ota.index(

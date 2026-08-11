@@ -86,6 +86,29 @@ namespace CabinetLock
         public uint RootPermissionVersion { get; set; }
 
         [JsonIgnore]
+        public bool IsSelected { get; set; }
+
+        [JsonIgnore]
+        public bool MaintenanceActive { get; set; }
+
+        [JsonIgnore]
+        public int MaintenanceLockMask { get; set; }
+
+        [JsonIgnore]
+        public string MaintenanceSource { get; set; } = "";
+
+        [JsonIgnore]
+        public string MaintenanceStatusText => !MaintenanceActive
+            ? "正常"
+            : $"{(MaintenanceSource == "remote" ? "远程" : "本地")}维护 · {MaintenanceLockText}";
+
+        [JsonIgnore]
+        public string MaintenanceLockText => string.Join("、",
+            Enumerable.Range(0, 4)
+                .Where(index => (MaintenanceLockMask & (1 << index)) != 0)
+                .Select(index => LockNaming.ToDisplayName(index)));
+
+        [JsonIgnore]
         public string PermissionSyncText
         {
             get

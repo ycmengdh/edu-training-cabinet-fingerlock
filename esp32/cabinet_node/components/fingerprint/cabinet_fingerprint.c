@@ -31,6 +31,7 @@
 #define FP_CMD_DOWNLOAD_CHAR 0x09
 #define FP_CMD_DELETE_MODEL 0x0C
 #define FP_CMD_EMPTY_DATABASE 0x0D
+#define FP_CMD_READ_SYSTEM_PARAMETERS 0x0F
 #define FP_CMD_VERIFY_PASSWORD 0x13
 #define FP_CMD_TEMPLATE_COUNT 0x1D
 #define FP_CMD_READ_INDEX_TABLE 0x1F
@@ -46,6 +47,7 @@
 #define FP_PROBE_RETRY_MS 200
 #define FP_RECOVERY_INTERVAL_MS 5000
 #define FP_COMM_FAILURE_LIMIT 5
+#define FP_ENROLL_VERIFY_MAX_ATTEMPTS 3
 
 typedef struct {
     uint8_t type;
@@ -100,7 +102,8 @@ static uint32_t s_error_count;
 static cab_fp_enroll_phase_t s_phase;
 static int s_enroll_id = -1;
 static int64_t s_phase_started_us;
-static bool s_verify_released;
+static uint8_t s_verify_attempt_1;
+static uint8_t s_verify_attempt_2;
 
 static void set_error(const char *message) {
     snprintf(s_error, sizeof(s_error), "%s", message == NULL ? "" : message);
@@ -236,6 +239,21 @@ static int store_model(int id) {
     uint8_t data[] = {FP_CMD_STORE_MODEL, 1,
                       (uint8_t)((uint16_t)id >> 8), (uint8_t)id};
     return simple_command(data, sizeof(data), 800);
+}
+
+static size_t data_packet_size(void) {
+    const uint8_t data[] = {FP_CMD_READ_SYSTEM_PARAMETERS};
+    fp_packet_t ack;
+    int result = command(data, sizeof(data), &ack, 1000);
+    if (result != FP_OK || ack.length < 15) return 32;
+    uint16_t configured = ((uint16_t)ack.data[13] << 8) | ack.data[14];
+    switch (configured) {
+        case 0: return 32;
+        case 1: return 64;
+        case 2: return 128;
+        case 3: return 256;
+        default: return 32;
+    }
 }
 
 static int load_model(int id) {
@@ -527,6 +545,13 @@ int cab_fp_verify_once(void) {
     return result < 0 ? -2 : -1;
 }
 
+bool cab_fp_finger_present(void) {
+    if (!s_ready || !take_sensor(300)) return false;
+    int result = get_image();
+    give_sensor();
+    return result == FP_OK;
+}
+
 static void background_task(void *argument) {
     (void)argument;
     unsigned communication_failures = 0;
@@ -580,7 +605,8 @@ static void set_phase(cab_fp_enroll_phase_t phase) {
 
 void cab_fp_enroll_begin(int fingerprint_id) {
     s_enroll_id = fingerprint_id;
-    s_verify_released = false;
+    s_verify_attempt_1 = 0;
+    s_verify_attempt_2 = 0;
     set_error("");
     set_phase(CAB_FP_ENROLL_PLACE_1);
 }
@@ -595,8 +621,9 @@ cab_fp_enroll_phase_t cab_fp_enroll_phase(void) { return s_phase; }
 const char *cab_fp_enroll_phase_code(void) {
     static const char *codes[] = {
         "idle", "place_1", "lift_1", "place_2", "lift_2", "place_3",
-        "lift_3", "place_4", "store", "verify_1", "verify_2",
-        "done", "failed"
+        "lift_3", "place_4", "store", "verify_lift_1", "verify_place_1",
+        "verify_retry_lift_1", "verify_lift_2", "verify_place_2",
+        "verify_retry_lift_2", "done", "failed"
     };
     return codes[s_phase <= CAB_FP_ENROLL_DONE_FAIL ? s_phase : 0];
 }
@@ -605,8 +632,10 @@ const char *cab_fp_enroll_hint(void) {
     static const char *hints[] = {
         "", "place finger (1/4)", "lift finger", "place finger (2/4)",
         "lift finger", "place finger (3/4)", "lift finger",
-        "place finger (4/4)", "saving", "verify finger (1/2)",
-        "verify finger (2/2)", "complete", "failed"
+        "place finger (4/4)", "saving", "lift finger before verify (1/2)",
+        "place finger to verify (1/2)", "verification retry (1/2)",
+        "lift finger before verify (2/2)", "place finger to verify (2/2)",
+        "verification retry (2/2)", "complete", "failed"
     };
     return hints[s_phase <= CAB_FP_ENROLL_DONE_FAIL ? s_phase : 0];
 }
@@ -621,8 +650,12 @@ int cab_fp_enroll_step(void) {
         case CAB_FP_ENROLL_LIFT_3: return 3;
         case CAB_FP_ENROLL_PLACE_4:
         case CAB_FP_ENROLL_STORE: return 4;
-        case CAB_FP_ENROLL_VERIFY_1: return 5;
-        case CAB_FP_ENROLL_VERIFY_2: return 6;
+        case CAB_FP_ENROLL_VERIFY_LIFT_1:
+        case CAB_FP_ENROLL_VERIFY_PLACE_1:
+        case CAB_FP_ENROLL_VERIFY_RETRY_LIFT_1: return 5;
+        case CAB_FP_ENROLL_VERIFY_LIFT_2:
+        case CAB_FP_ENROLL_VERIFY_PLACE_2:
+        case CAB_FP_ENROLL_VERIFY_RETRY_LIFT_2: return 5;
         case CAB_FP_ENROLL_DONE_OK: return 6;
         default: return 0;
     }
@@ -672,31 +705,59 @@ bool cab_fp_enroll_tick(void) {
             break;
         case CAB_FP_ENROLL_STORE:
             if (create_model() == FP_OK && store_model(s_enroll_id) == FP_OK) {
-                s_verify_released = false;
-                set_phase(CAB_FP_ENROLL_VERIFY_1);
+                set_phase(CAB_FP_ENROLL_VERIFY_LIFT_1);
             } else {
                 set_error("fingerprint store failed");
                 set_phase(CAB_FP_ENROLL_DONE_FAIL);
             }
             break;
-        case CAB_FP_ENROLL_VERIFY_1:
-        case CAB_FP_ENROLL_VERIFY_2:
-            result = get_image();
-            if (!s_verify_released) {
-                if (result == FP_NO_FINGER) s_verify_released = true;
-            } else if (result == FP_OK && image_to_buffer(1) == FP_OK) {
+        case CAB_FP_ENROLL_VERIFY_LIFT_1:
+        case CAB_FP_ENROLL_VERIFY_RETRY_LIFT_1:
+            if (get_image() == FP_NO_FINGER)
+                set_phase(CAB_FP_ENROLL_VERIFY_PLACE_1);
+            break;
+        case CAB_FP_ENROLL_VERIFY_PLACE_1:
+            if (get_image() == FP_OK && image_to_buffer(1) == FP_OK) {
                 result = search(s_enroll_id, 1, NULL, NULL);
                 if (result == FP_OK) {
-                    s_verify_released = false;
-                    set_phase(s_phase == CAB_FP_ENROLL_VERIFY_1
-                        ? CAB_FP_ENROLL_VERIFY_2 : CAB_FP_ENROLL_DONE_OK);
+                    set_phase(CAB_FP_ENROLL_VERIFY_LIFT_2);
                 } else if (result == FP_NOT_FOUND) {
-                    uint8_t data[] = {FP_CMD_DELETE_MODEL,
-                        (uint8_t)((uint16_t)s_enroll_id >> 8),
-                        (uint8_t)s_enroll_id, 0, 1};
-                    simple_command(data, sizeof(data), 800);
-                    set_error("fingerprint verification failed");
-                    set_phase(CAB_FP_ENROLL_DONE_FAIL);
+                    ++s_verify_attempt_1;
+                    if (s_verify_attempt_1 < FP_ENROLL_VERIFY_MAX_ATTEMPTS) {
+                        set_phase(CAB_FP_ENROLL_VERIFY_RETRY_LIFT_1);
+                    } else {
+                        uint8_t data[] = {FP_CMD_DELETE_MODEL,
+                            (uint8_t)((uint16_t)s_enroll_id >> 8),
+                            (uint8_t)s_enroll_id, 0, 1};
+                        simple_command(data, sizeof(data), 800);
+                        set_error("fingerprint verification failed after retries");
+                        set_phase(CAB_FP_ENROLL_DONE_FAIL);
+                    }
+                }
+            }
+            break;
+        case CAB_FP_ENROLL_VERIFY_LIFT_2:
+        case CAB_FP_ENROLL_VERIFY_RETRY_LIFT_2:
+            if (get_image() == FP_NO_FINGER)
+                set_phase(CAB_FP_ENROLL_VERIFY_PLACE_2);
+            break;
+        case CAB_FP_ENROLL_VERIFY_PLACE_2:
+            if (get_image() == FP_OK && image_to_buffer(1) == FP_OK) {
+                result = search(s_enroll_id, 1, NULL, NULL);
+                if (result == FP_OK) {
+                    set_phase(CAB_FP_ENROLL_DONE_OK);
+                } else if (result == FP_NOT_FOUND) {
+                    ++s_verify_attempt_2;
+                    if (s_verify_attempt_2 < FP_ENROLL_VERIFY_MAX_ATTEMPTS) {
+                        set_phase(CAB_FP_ENROLL_VERIFY_RETRY_LIFT_2);
+                    } else {
+                        uint8_t data[] = {FP_CMD_DELETE_MODEL,
+                            (uint8_t)((uint16_t)s_enroll_id >> 8),
+                            (uint8_t)s_enroll_id, 0, 1};
+                        simple_command(data, sizeof(data), 800);
+                        set_error("fingerprint verification failed after retries");
+                        set_phase(CAB_FP_ENROLL_DONE_FAIL);
+                    }
                 }
             }
             break;
@@ -823,24 +884,63 @@ bool cab_fp_read_template(int fingerprint_id, uint8_t *output,
 
 bool cab_fp_write_template(int fingerprint_id, const uint8_t *data,
                            size_t length) {
-    if (!s_ready || data == NULL || length < CAB_FP_TEMPLATE_SIZE ||
-        fingerprint_id < 0 || fingerprint_id >= CAB_FP_MAX_SLOTS ||
-        !take_sensor(1500)) return false;
-    uint8_t download[] = {FP_CMD_DOWNLOAD_CHAR, 1};
-    fp_packet_t ack;
-    bool ok = command(download, sizeof(download), &ack, 1000) == FP_OK;
-    for (size_t offset = 0; ok && offset < CAB_FP_TEMPLATE_SIZE; offset += 128) {
-        ok = write_packet(offset + 128 >= CAB_FP_TEMPLATE_SIZE
-                          ? FP_PACKET_END : FP_PACKET_DATA,
-                          data + offset, 128);
-        vTaskDelay(pdMS_TO_TICKS(5));
+    if (!s_ready) {
+        set_error("fingerprint sensor is not ready");
+        return false;
     }
-    if (ok) {
-        fp_packet_t optional_ack;
-        read_packet(&optional_ack, 300);
-        ok = store_model(fingerprint_id) == FP_OK;
+    if (data == NULL || length < CAB_FP_TEMPLATE_SIZE || fingerprint_id < 0 ||
+        fingerprint_id >= CAB_FP_MAX_SLOTS) {
+        set_error("invalid fingerprint template parameters");
+        return false;
+    }
+    if (!take_sensor(1500)) {
+        set_error("fingerprint sensor is busy");
+        return false;
+    }
+
+    size_t preferred_packet_size = data_packet_size();
+    bool ok = false;
+    for (int attempt = 0; attempt < 2 && !ok; ++attempt) {
+        size_t packet_size = attempt == 0 ? preferred_packet_size : 32;
+        uint8_t download[] = {FP_CMD_DOWNLOAD_CHAR, 1};
+        fp_packet_t ack;
+        int download_result = command(download, sizeof(download), &ack, 1000);
+        if (download_result != FP_OK) {
+            snprintf(s_error, sizeof(s_error),
+                     "template download rejected (code=0x%02X)",
+                     download_result & 0xFF);
+            continue;
+        }
+
+        bool packets_written = true;
+        for (size_t offset = 0; offset < CAB_FP_TEMPLATE_SIZE;
+             offset += packet_size) {
+            size_t remaining = CAB_FP_TEMPLATE_SIZE - offset;
+            size_t chunk = remaining < packet_size ? remaining : packet_size;
+            packets_written = write_packet(chunk == remaining
+                                            ? FP_PACKET_END : FP_PACKET_DATA,
+                                            data + offset, (uint16_t)chunk);
+            if (!packets_written) break;
+            vTaskDelay(pdMS_TO_TICKS(5));
+        }
+        if (!packets_written) {
+            snprintf(s_error, sizeof(s_error),
+                     "template packet send failed (packet=%u)",
+                     (unsigned)packet_size);
+            continue;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(20));
+        int store_result = store_model(fingerprint_id);
+        ok = store_result == FP_OK;
+        if (!ok) {
+            snprintf(s_error, sizeof(s_error),
+                     "template store failed (code=0x%02X, packet=%u)",
+                     store_result & 0xFF, (unsigned)packet_size);
+        }
     }
     give_sensor();
+    if (ok) set_error("");
     return ok;
 }
 

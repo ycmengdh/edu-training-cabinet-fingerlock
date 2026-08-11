@@ -173,8 +173,9 @@ namespace CabinetLock
             void ProgressHandler(string msgId, string phase, int step, int total, string hint)
             {
                 if (!string.Equals(msgId, message.MsgId, StringComparison.Ordinal)) return;
-                onProgress?.Invoke(phase, step, total, hint);
-                EnrollProgressChanged?.Invoke(phase, step, total, hint);
+                string localizedHint = FingerprintEnrollmentPrompts.GetHint(phase, step, total);
+                onProgress?.Invoke(phase, step, total, localizedHint);
+                EnrollProgressChanged?.Invoke(phase, step, total, localizedHint);
             }
             App.MessageHandler.OnEnrollProgress += ProgressHandler;
 
@@ -184,7 +185,8 @@ namespace CabinetLock
                 if (!accepted.Success)
                 {
                     _pendingEnrollments.TryRemove(message.MsgId, out _);
-                    return FingerprintEnrollmentResult.Failed(accepted.ErrorMessage);
+                    return FingerprintEnrollmentResult.Failed(
+                        FingerprintEnrollmentPrompts.LocalizeError(accepted.ErrorMessage));
                 }
 
                 Task completed = await Task.WhenAny(completion.Task, Task.Delay(timeoutMs));
@@ -481,8 +483,9 @@ namespace CabinetLock
             void ProgressHandler(string msgId, string phase, int step, int total, string hint)
             {
                 if (!string.Equals(msgId, message.MsgId, StringComparison.Ordinal)) return;
-                onProgress?.Invoke(phase, step, total, hint);
-                EnrollProgressChanged?.Invoke(phase, step, total, hint);
+                string localizedHint = FingerprintEnrollmentPrompts.GetHint(phase, step, total);
+                onProgress?.Invoke(phase, step, total, localizedHint);
+                EnrollProgressChanged?.Invoke(phase, step, total, localizedHint);
             }
             App.MessageHandler.OnEnrollProgress += ProgressHandler;
 
@@ -492,7 +495,8 @@ namespace CabinetLock
                 if (!accepted.Success)
                 {
                     _pendingEnrollments.TryRemove(message.MsgId, out _);
-                    return FingerprintEnrollmentResult.Failed(accepted.ErrorMessage);
+                    return FingerprintEnrollmentResult.Failed(
+                        FingerprintEnrollmentPrompts.LocalizeError(accepted.ErrorMessage));
                 }
 
                 Task completed = await Task.WhenAny(completion.Task, Task.Delay(timeoutMs));
@@ -766,10 +770,10 @@ namespace CabinetLock
 
         public static BroadcastCommandResult Failed(
             string message, IEnumerable<string>? missing = null) => new()
-        {
-            ErrorMessage = message,
-            MissingDeviceIds = missing?.ToArray() ?? Array.Empty<string>()
-        };
+            {
+                ErrorMessage = message,
+                MissingDeviceIds = missing?.ToArray() ?? Array.Empty<string>()
+            };
 
         public static BroadcastCommandResult Succeeded(IEnumerable<string> confirmed) => new()
         {

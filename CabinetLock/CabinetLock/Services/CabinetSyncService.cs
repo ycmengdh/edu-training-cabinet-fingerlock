@@ -123,8 +123,15 @@ namespace CabinetLock
                 {
                     await App.CommandService.UpsertPermissionAsync(
                         deviceId, user, new bool[4], expectedVersion).ConfigureAwait(false);
+                    string reason = string.IsNullOrWhiteSpace(restored.ErrorMessage)
+                        ? "柜机未返回失败原因"
+                        : restored.ErrorMessage;
+                    string code = string.IsNullOrWhiteSpace(restored.ErrorCode)
+                        ? ""
+                        : $"，错误码 {restored.ErrorCode}";
                     return UserCabinetSyncResult.Failed(
-                        deviceId, user.UserId, "指纹更新失败，已撤销该用户柜机权限");
+                        deviceId, user.UserId,
+                        $"指纹更新失败（{reason}{code}），已撤销该用户柜机权限");
                 }
                 fingerprintUpdated = true;
             }
@@ -816,11 +823,11 @@ namespace CabinetLock
 
         public static UserCabinetSyncResult Failed(
             string deviceId, string userId, string error) => new()
-        {
-            DeviceId = deviceId,
-            UserId = userId,
-            ErrorMessage = error
-        };
+            {
+                DeviceId = deviceId,
+                UserId = userId,
+                ErrorMessage = error
+            };
     }
 
     public sealed record UserCabinetSyncProgress(

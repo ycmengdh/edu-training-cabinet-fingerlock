@@ -20,6 +20,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "psa/crypto.h"
 #include "root_storage.h"
 
@@ -36,6 +37,9 @@
 #define OTA_RETRY_SECONDS 30U
 #define OTA_SCHEDULER_SECONDS 5U
 #define OTA_TRANSFER_STALE_SECONDS 45U
+#define OTA_NOTIFY_STALE_SECONDS 12U
+#define OTA_VALIDATION_STALE_SECONDS 100U
+#define OTA_NOTIFY_RETRY_SECONDS 5U
 #define OTA_PER_PARENT_CONCURRENCY 2U
 #define OTA_GLOBAL_CONCURRENCY 10U
 #define OTA_HASH_BUFFER_SIZE 4096U
@@ -58,6 +62,7 @@ typedef struct {
     uint8_t retry_count;
     bool has_ap_mac;
     bool has_parent_bssid;
+    bool ota_validated;
 } registration_t;
 
 typedef struct {
@@ -73,6 +78,7 @@ static FILE *s_provider_file;
 static FILE *s_upload_file;
 static uint32_t s_next_distribution_at;
 static char s_provider_version[ROOT_OTA_VERSION_MAX + 1];
+static uint32_t s_distribution_completed_at_seconds;
 
 static esp_err_t inspect_image(
     const char *path, char actual_version[32], char actual_hardware[32],
@@ -83,6 +89,7 @@ static esp_err_t start_distribution(char *error, size_t error_size);
 static uint32_t now_seconds(void) {
     return (uint32_t)(esp_timer_get_time() / 1000000ULL);
 }
+
 
 static void copy_error(char *output, size_t output_size, const char *value) {
     if (output == NULL || output_size == 0) return;
@@ -162,7 +169,11 @@ static bool phase_is_active(const char *phase) {
            strcmp(phase, "downloading") == 0 ||
            strcmp(phase, "verifying") == 0 ||
            strcmp(phase, "rebooting") == 0 ||
-           strcmp(phase, "validating") == 0;
+           strcmp(phase, "validating") == 0 ||
+           strcmp(phase, "preparing") == 0 ||
+           strcmp(phase, "broadcasting") == 0 ||
+           strcmp(phase, "repairing") == 0 ||
+           strcmp(phase, "ready") == 0;
 }
 
 static bool registration_is_active_for_target_locked(
@@ -186,11 +197,12 @@ static registration_t *find_by_ap_mac_locked(const uint8_t mac[6]) {
 static bool parent_ready_locked(const registration_t *registration,
                                 uint32_t now) {
     if (registration->mesh_layer <= ROOT + 1) return true;
-    if (!registration->has_parent_bssid) return true;
+    if (!registration->has_parent_bssid) return false;
     registration_t *parent = find_by_ap_mac_locked(
         registration->parent_bssid);
     return parent != NULL && registration_is_online(parent, now) &&
-           strcmp(parent->version, s_status.version) == 0;
+           strcmp(parent->version, s_status.version) == 0 &&
+           parent->ota_validated;
 }
 
 static bool same_provider(const registration_t *left,
@@ -206,6 +218,28 @@ static uint32_t retry_delay_seconds(uint8_t retry_count) {
     if (retry_count == 2) return 15U;
     if (retry_count == 3) return 30U;
     return 60U;
+}
+
+static bool notification_delivery_failed(const registration_t *registration) {
+    return strcmp(registration->ota_error, "notification timeout") == 0 ||
+           strcmp(registration->ota_error, "notify failed") == 0;
+}
+
+static uint32_t registration_retry_delay_seconds(
+    const registration_t *registration) {
+    return notification_delivery_failed(registration)
+        ? OTA_NOTIFY_RETRY_SECONDS
+        : retry_delay_seconds(registration->retry_count);
+}
+
+static uint32_t transfer_stale_seconds(const registration_t *registration) {
+    if (strcmp(registration->ota_phase, "notified") == 0) {
+        return OTA_NOTIFY_STALE_SECONDS;
+    }
+    if (strcmp(registration->ota_phase, "validating") == 0) {
+        return OTA_VALIDATION_STALE_SECONDS;
+    }
+    return OTA_TRANSFER_STALE_SECONDS;
 }
 
 static int hex_nibble(char value) {
@@ -261,7 +295,7 @@ static void refresh_counts_locked(void) {
             continue;
         }
         ++s_status.compatible_nodes;
-        if (s_status.version[0] != '\0' &&
+        if (s_status.version[0] != '\0' && registration->ota_validated &&
             strcmp(registration->version, s_status.version) == 0) {
             ++s_status.completed_nodes;
         } else if (s_status.active) {
@@ -275,7 +309,8 @@ static void refresh_counts_locked(void) {
         registration_t *registration = &s_registrations[index];
         if (!registration_is_online(registration, now) ||
             !registration_is_compatible(registration)) continue;
-        if (strcmp(registration->version, s_status.version) == 0) {
+        if (registration->ota_validated &&
+            strcmp(registration->version, s_status.version) == 0) {
             progress_total += 100U;
         } else if (strcmp(registration->ota_version, s_status.version) == 0) {
             progress_total += registration->ota_progress;
@@ -283,6 +318,20 @@ static void refresh_counts_locked(void) {
     }
     s_status.mesh_progress = s_status.compatible_nodes == 0 ? 0 :
         (uint8_t)(progress_total / s_status.compatible_nodes);
+    if (s_status.started_at_seconds == 0) {
+        s_status.elapsed_seconds = 0;
+        s_distribution_completed_at_seconds = 0;
+    } else if (s_status.compatible_nodes > 0 &&
+               s_status.pending_nodes == 0) {
+        if (s_distribution_completed_at_seconds == 0) {
+            s_distribution_completed_at_seconds = now;
+        }
+        s_status.elapsed_seconds = s_distribution_completed_at_seconds -
+                                   s_status.started_at_seconds;
+    } else {
+        s_distribution_completed_at_seconds = 0;
+        s_status.elapsed_seconds = now - s_status.started_at_seconds;
+    }
 }
 
 static bool persist_policy_locked(char *error, size_t error_size) {
@@ -475,6 +524,7 @@ bool root_ota_init(void) {
     s_mutex = xSemaphoreCreateMutex();
     if (s_mutex == NULL) return false;
     memset(&s_status, 0, sizeof(s_status));
+    s_distribution_completed_at_seconds = 0;
     snprintf(s_status.phase, sizeof(s_status.phase), "idle");
     s_status.finish_reason = -1;
     if (root_storage_ready() &&
@@ -542,6 +592,7 @@ esp_err_t root_ota_upload_begin(const char *upload_id, const char *version,
         return ESP_FAIL;
     }
     memset(&s_status, 0, sizeof(s_status));
+    s_distribution_completed_at_seconds = 0;
     snprintf(s_status.phase, sizeof(s_status.phase), "uploading");
     snprintf(s_status.upload_id, sizeof(s_status.upload_id), "%s", upload_id);
     snprintf(s_status.version, sizeof(s_status.version), "%s", version);
@@ -828,11 +879,15 @@ static esp_err_t start_distribution(char *error, size_t error_size) {
         if (strcmp(registration->ota_version, s_status.version) == 0 &&
             phase_is_active(registration->ota_phase) &&
             now - registration->ota_updated_seconds >
-                OTA_TRANSFER_STALE_SECONDS) {
+                transfer_stale_seconds(registration)) {
+            bool notification_timeout =
+                strcmp(registration->ota_phase, "notified") == 0;
             snprintf(registration->ota_phase,
                      sizeof(registration->ota_phase), "failed");
             snprintf(registration->ota_error,
-                     sizeof(registration->ota_error), "progress timeout");
+                     sizeof(registration->ota_error), "%s",
+                     notification_timeout ? "notification timeout" :
+                     "progress timeout");
             registration->ota_updated_seconds = now;
         }
         if (registration_is_active_for_target_locked(registration, now)) {
@@ -865,9 +920,10 @@ static esp_err_t start_distribution(char *error, size_t error_size) {
                      sizeof(registration->ota_phase), "waiting_parent");
             continue;
         }
-        if (strcmp(registration->ota_phase, "failed") == 0 &&
+        bool retrying = strcmp(registration->ota_phase, "failed") == 0;
+        if (retrying &&
             now - registration->ota_updated_seconds <
-                retry_delay_seconds(registration->retry_count)) continue;
+                registration_retry_delay_seconds(registration)) continue;
         size_t provider_active = 0;
         for (size_t other = 0; other < OTA_REGISTRATION_CAPACITY; ++other) {
             if (registration_is_active_for_target_locked(
@@ -879,16 +935,16 @@ static esp_err_t start_distribution(char *error, size_t error_size) {
         if (provider_active >= OTA_PER_PARENT_CONCURRENCY ||
             !parse_cabinet_mac(registration->device_id,
                                targets[target_count].mac)) continue;
-        snprintf(targets[target_count].device_id,
-                 sizeof(targets[target_count].device_id), "%s",
-                 registration->device_id);
+        copy_text(targets[target_count].device_id,
+                  sizeof(targets[target_count].device_id),
+                  registration->device_id);
         targets[target_count].registration_index = index;
         snprintf(registration->ota_phase,
                  sizeof(registration->ota_phase), "notified");
         registration->ota_progress = 0;
         registration->ota_error[0] = '\0';
         registration->ota_updated_seconds = now;
-        if (registration->retry_count < UINT8_MAX) {
+        if (retrying && registration->retry_count < UINT8_MAX) {
             ++registration->retry_count;
         }
         ++target_count;
@@ -1053,6 +1109,8 @@ void root_ota_note_registration(const char *device_id,
         cJSON_GetObjectItemCaseSensitive(json, "mesh_ap_mac");
     const cJSON *parent_item = json == NULL ? NULL :
         cJSON_GetObjectItemCaseSensitive(json, "parent_bssid");
+    const cJSON *validated_item = json == NULL ? NULL :
+        cJSON_GetObjectItemCaseSensitive(json, "ota_validated");
     if (!cJSON_IsString(version_item) || version_item->valuestring == NULL) {
         cJSON_Delete(json);
         return;
@@ -1069,6 +1127,8 @@ void root_ota_note_registration(const char *device_id,
         }
         if (target < OTA_REGISTRATION_CAPACITY) {
             registration_t *registration = &s_registrations[target];
+            bool previously_reported_target = s_status.version[0] != '\0' &&
+                strcmp(registration->version, s_status.version) == 0;
             snprintf(registration->device_id,
                      sizeof(registration->device_id), "%s", device_id);
             snprintf(registration->version,
@@ -1088,6 +1148,8 @@ void root_ota_note_registration(const char *device_id,
             registration->has_parent_bssid = cJSON_IsString(parent_item) &&
                 parse_mac_text(parent_item->valuestring,
                                registration->parent_bssid);
+            registration->ota_validated = !cJSON_IsBool(validated_item) ||
+                cJSON_IsTrue(validated_item);
             registration->last_seen_seconds = now_seconds();
             if (s_status.version[0] != '\0' &&
                 strcmp(registration->version, s_status.version) == 0) {
@@ -1095,9 +1157,22 @@ void root_ota_note_registration(const char *device_id,
                          sizeof(registration->ota_version), "%s",
                          s_status.version);
                 snprintf(registration->ota_phase,
-                         sizeof(registration->ota_phase), "completed");
+                         sizeof(registration->ota_phase), "%s",
+                         registration->ota_validated ? "completed" :
+                         "validating");
                 registration->ota_progress = 100;
                 registration->ota_error[0] = '\0';
+                registration->ota_updated_seconds = now_seconds();
+            } else if (s_status.active && previously_reported_target) {
+                snprintf(registration->ota_version,
+                         sizeof(registration->ota_version), "%s",
+                         s_status.version);
+                snprintf(registration->ota_phase,
+                         sizeof(registration->ota_phase), "failed");
+                snprintf(registration->ota_error,
+                         sizeof(registration->ota_error),
+                         "firmware rollback detected");
+                registration->ota_progress = 0;
                 registration->ota_updated_seconds = now_seconds();
             } else if (s_status.active &&
                        strcmp(registration->ota_version,
@@ -1162,10 +1237,16 @@ void root_ota_note_progress(const char *device_id,
             double value = progress->valuedouble;
             registration->ota_progress = value <= 0 ? 0 :
                 value >= 100 ? 100 : (uint8_t)value;
+            if (strcmp(registration->ota_phase, "complete") == 0 ||
+                strcmp(registration->ota_phase, "completed") == 0) {
+                registration->ota_validated = true;
+            } else if (strcmp(registration->ota_phase, "validating") == 0) {
+                registration->ota_validated = false;
+            }
             registration->ota_updated_seconds = now_seconds();
             if (strcmp(registration->ota_phase, "failed") == 0) {
                 uint32_t due = now_seconds() +
-                    retry_delay_seconds(registration->retry_count);
+                    registration_retry_delay_seconds(registration);
                 if (s_next_distribution_at == 0 ||
                     due < s_next_distribution_at) s_next_distribution_at = due;
             }
@@ -1237,6 +1318,7 @@ size_t root_ota_get_nodes(size_t offset, size_t limit,
         } else if (!node->compatible) {
             copy_text(node->phase, sizeof(node->phase), "incompatible");
         } else if (s_status.version[0] != '\0' &&
+                   registration->ota_validated &&
                    strcmp(registration->version, s_status.version) == 0) {
             copy_text(node->phase, sizeof(node->phase), "completed");
             node->progress = 100;

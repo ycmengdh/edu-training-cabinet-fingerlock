@@ -9,6 +9,11 @@ namespace CabinetLock
     /// </summary>
     public partial class BackupFingerprintWindow : BorderlessWindow
     {
+        private bool _enrolling;
+        private string? _lastDeviceId;
+        private string? _lastEnrollmentPhase;
+        private CancellationTokenSource? _progressPromptCts;
+
         public BackupFingerprintWindow()
         {
             InitializeComponent();
@@ -67,6 +72,49 @@ namespace CabinetLock
             catch { /* 忽略 */ }
         }
 
+        private void ShowEnrollmentProgress(string phase, int step, int total, string hint)
+        {
+            _lastEnrollmentPhase = phase;
+            _progressPromptCts?.Cancel();
+            var cancellation = new CancellationTokenSource();
+            _progressPromptCts = cancellation;
+            _ = ShowEnrollmentProgressAsync(phase, step, total, hint, cancellation.Token);
+        }
+
+        private async Task ShowEnrollmentProgressAsync(
+            string phase, int step, int total, string hint, CancellationToken cancellationToken)
+        {
+            try
+            {
+                int delay = FingerprintEnrollmentPrompts.GetDisplayDelayMilliseconds(phase);
+                if (delay > 0) await Task.Delay(delay, cancellationToken);
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    EnrollProgress.Maximum = total;
+                    EnrollProgress.Value = FingerprintEnrollmentPrompts.GetProgressValue(
+                        phase, step, total);
+                    ProgressHint.Text = hint;
+                    ProgressDetail.Text = FormatProgressDetail(phase, step, total);
+                    StepIcon.Text = FingerprintEnrollmentPrompts.IsVerificationPhase(phase)
+                        ? "\uE73E" : "\uE928";
+                });
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
+
+        private static string FormatProgressDetail(string phase, int step, int total) => phase switch
+        {
+            "place_1" or "lift_1" => "采集 1/4",
+            "place_2" or "lift_2" => "采集 2/4",
+            "place_3" or "lift_3" => "采集 3/4",
+            "place_4" or "store" or "storing" => "采集 4/4",
+            "verify_lift_1" or "verify_place_1" or "verify_retry_lift_1" or "verify_1" => "验证 1/2",
+            "verify_lift_2" or "verify_place_2" or "verify_retry_lift_2" or "verify_2" => "验证 2/2",
+            _ => $"进度 {step}/{total}"
+        };
+
         private async void EnrollButton_Click(object sender, RoutedEventArgs e)
         {
             string? deviceId = DeviceCombo.SelectedValue as string;
@@ -83,32 +131,40 @@ namespace CabinetLock
             }
 
             EnrollButton.IsEnabled = false;
+            DeviceCombo.IsEnabled = false;
+            UserCombo.IsEnabled = false;
+            _enrolling = true;
+            _lastDeviceId = deviceId;
+            _lastEnrollmentPhase = null;
+            CancelButton.Content = "取消录入";
+            _progressPromptCts?.Cancel();
             EnrollProgress.Value = 0;
-            ProgressHint.Text = "正在发送录入指令...";
+            StepIcon.Text = "\uE928";
+            ProgressHint.Text = "正在发送录入指令";
+            ProgressDetail.Text = "请将手指放在指纹模块附近，等待开始提示";
             ResultText.Text = "";
 
             try
             {
                 var result = await App.CommandService.EnrollBackupFingerprintAsync(
                     deviceId, userId,
-                    onProgress: (phase, step, total, hint) =>
-                    {
-                        Dispatcher.Invoke(() =>
-                        {
-                            EnrollProgress.Value = step;
-                            EnrollProgress.Maximum = total;
-                            ProgressHint.Text = hint;
-                        });
-                    });
+                    onProgress: ShowEnrollmentProgress);
+                _progressPromptCts?.Cancel();
 
                 if (!result.Success)
                 {
-                    ResultText.Text = "录入失败：" + result.ErrorMessage;
+                    StepIcon.Text = "\uE783";
+                    ResultText.Text = FingerprintEnrollmentPrompts.EnhanceFailureForPhase(
+                        result.ErrorMessage, _lastEnrollmentPhase);
                     ProgressHint.Text = "录入未完成";
+                    ProgressDetail.Text = "请根据提示检查手指位置后重新尝试";
                     return;
                 }
 
-                ProgressHint.Text = "副指纹录入成功";
+                EnrollProgress.Value = EnrollProgress.Maximum;
+                StepIcon.Text = "\uE73E";
+                ProgressHint.Text = "两次验证通过，副指纹录入成功";
+                ProgressDetail.Text = "指纹已保存到当前柜机";
                 ResultText.Text = $"本机槽位 ID: {result.FingerprintId}";
 
                 // 弹窗二选一：覆盖全局主指纹 / 仅作为本机备用
@@ -116,11 +172,20 @@ namespace CabinetLock
             }
             catch (Exception ex)
             {
-                ResultText.Text = "异常：" + ex.Message;
+                StepIcon.Text = "\uE783";
+                ProgressHint.Text = "录入异常";
+                ProgressDetail.Text = "请检查柜机连接后重新尝试";
+                ResultText.Text = FingerprintEnrollmentPrompts.EnhanceFailureForPhase(
+                    ex.Message, _lastEnrollmentPhase);
             }
             finally
             {
+                _enrolling = false;
+                _progressPromptCts?.Cancel();
+                DeviceCombo.IsEnabled = true;
+                UserCombo.IsEnabled = true;
                 EnrollButton.IsEnabled = true;
+                CancelButton.Content = "关闭";
             }
         }
 
@@ -169,7 +234,46 @@ namespace CabinetLock
 
         private void CancelButton_Click(object sender, RoutedEventArgs e)
         {
-            Close();
+            if (!_enrolling)
+            {
+                Close();
+                return;
+            }
+            if (MessageBox.Show("确定取消本次副指纹录入？", "取消录入",
+                    MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
+                return;
+            SendCancelEnroll();
+            ProgressHint.Text = "正在取消本次录入";
+            ProgressDetail.Text = "请稍候，柜机会清理本次临时数据";
+        }
+
+        private void SendCancelEnroll()
+        {
+            if (string.IsNullOrWhiteSpace(_lastDeviceId)) return;
+            try
+            {
+                App.MeshBridge.SendToDevice(_lastDeviceId,
+                    Message.Create(Protocol.CmdCancelEnroll, _lastDeviceId));
+            }
+            catch
+            {
+            }
+        }
+
+        protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
+        {
+            if (_enrolling)
+            {
+                if (MessageBox.Show("录入进行中，关闭将取消本次录入。确定关闭？", "关闭确认",
+                        MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
+                {
+                    e.Cancel = true;
+                    return;
+                }
+                SendCancelEnroll();
+            }
+            _progressPromptCts?.Cancel();
+            base.OnClosing(e);
         }
 
         private class DeviceItem

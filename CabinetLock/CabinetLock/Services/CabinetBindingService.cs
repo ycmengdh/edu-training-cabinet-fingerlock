@@ -527,7 +527,7 @@ namespace CabinetLock
         private static CabinetAssignment Clone(CabinetAssignment item) => new()
         {
             DeviceId = item.DeviceId.Trim(),
-            FingerprintIds = item.FingerprintIds.ToList(),
+            FingerprintIds = item.FingerprintIds?.ToList() ?? new List<int>(),
             LockIds = item.LockIds?.ToList(),
             UpdateTime = item.UpdateTime
         };
@@ -535,7 +535,7 @@ namespace CabinetLock
         private static IReadOnlyList<int> NormalizeFingerprintIds(CabinetAssignment? assignment)
         {
             if (assignment == null) return Array.Empty<int>();
-            return assignment.FingerprintIds.Where(id => id > 0)
+            return (assignment.FingerprintIds ?? new List<int>()).Where(id => id > 0)
                 .Distinct().OrderBy(id => id).ToArray();
         }
 

@@ -49,8 +49,11 @@ previous response without executing a repeated lock command again.
 Cabinets send an application heartbeat every 5 seconds. Root replies with a
 `HEARTBEAT_ACK` carrying the same message ID. If a cabinet receives no valid
 Root downlink for 7 seconds after a heartbeat, it announces `REGISTER` again
-to repair the application route. Mesh-Lite remains responsible for parent-link
-recovery; an application timeout does not restart the Wi-Fi/Mesh stack.
+to repair the application route. After three consecutive Root-response
+timeouts, the cabinet also asks Mesh-Lite to rescan and reselect its parent.
+Disconnected cabinets use a 3-second Mesh-Lite rescan interval plus a
+5-second application watchdog, with a MAC-derived startup offset to prevent a
+large installation from scanning in lockstep when Root starts late.
 
 Root and cabinets also publish `STATUS_REPORT` every 60 seconds. Cabinet
 reports use the same compact 24-byte payload as `STATUS_RESPONSE`; the WPF
@@ -66,11 +69,27 @@ validates the ESP32-S3 image header, project name, version, size, and SHA-256
 before it exposes the image to the Mesh. Root only distributes the cabinet
 image and never writes it to its own OTA partition.
 
+Firmware is transferred through topology-aware Mesh-Lite file download.
+Direct children pull the image from the Root SD card; after an upgraded parent
+has rebooted and passed rollback validation, deeper children can pull the same
+version from that parent's running OTA partition. The scheduler limits
+transfers globally and per parent so the reliable file-transfer path does not
+saturate one Mesh branch.
+
 Cabinets write the image to the inactive OTA slot, reboot after validation,
 then report the version from the ESP-IDF application descriptor. A newly
 booted image is marked valid only after the cabinet has rejoined the Mesh and
 received a Root heartbeat ACK. If that does not happen within 90 seconds, the
 bootloader rolls back to the previous image.
+
+Root counts a cabinet as completed only after the new image has explicitly
+cancelled rollback validation. A cabinet that reports the target version while
+still pending verification remains in `validating`; if it later reports the
+old version, the node is shown as `firmware rollback detected` instead of
+briefly displaying 100% and silently returning to the upgrade queue. Lost
+unicast notifications are retried after a 12-second delivery timeout and a
+5-second retry delay, while transfers that have already started retain the
+longer progress timeout.
 
 The first installation of this firmware must use a complete serial flash so
 the cabinet receives the new two-slot OTA partition table and bootloader

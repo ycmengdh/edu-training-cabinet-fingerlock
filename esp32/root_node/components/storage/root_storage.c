@@ -80,7 +80,7 @@ static bool ensure_directory(const char *path) {
 bool root_storage_table_allowed(const char *table) {
     static const char *allowed[] = {
         "users", "classes", "permissions", "role_permissions",
-        "devices", "fingerprints", "logs", "version"
+        "devices", "fingerprints", "system_settings", "logs", "version"
     };
     if (table == NULL) return false;
     for (size_t index = 0; index < sizeof(allowed) / sizeof(allowed[0]);
@@ -237,8 +237,9 @@ bool root_storage_init(void) {
     static const struct { const char *table; const char *json; } defaults[] = {
         {"version", "{\"global_version\":0,\"users_version\":0,"
                     "\"classes_version\":0,\"permissions_version\":0,"
-                    "\"devices_version\":0,\"fp_version\":0,"
-                    "\"logs_version\":0,\"last_update_time\":\"\","
+                     "\"devices_version\":0,\"fp_version\":0,"
+                     "\"settings_version\":1,"
+                     "\"logs_version\":0,\"last_update_time\":\"\","
                     "\"last_update_source\":\"init\"}"},
         {"users", "[{\"user_id\":\"admin\",\"name\":\"System Administrator\","
                   "\"role\":\"admin\",\"fingerprint_id\":null,"
@@ -252,7 +253,11 @@ bool root_storage_init(void) {
                              "\"lock_1\":true,\"lock_2\":true,\"lock_3\":true},"
                              "{\"role\":\"student\",\"lock_0\":false,"
                              "\"lock_1\":false,\"lock_2\":false,\"lock_3\":false}]"},
-        {"fingerprints", "[]"}, {"devices", "[]"}, {"logs", "[]"},
+        {"fingerprints", "[]"}, {"devices", "[]"},
+        {"system_settings", "[{\"setting_key\":\"maintenance_pin\","
+                            "\"setting_value\":\"112233\","
+                            "\"config_version\":1,\"update_time\":\"\"}]"},
+        {"logs", "[]"},
     };
     for (size_t index = 0; index < sizeof(defaults) / sizeof(defaults[0]);
          ++index) {
@@ -338,6 +343,7 @@ bool root_storage_read_versions(root_sd_versions_t *versions) {
     READ_VERSION(permissions, "permissions_version");
     READ_VERSION(devices, "devices_version");
     READ_VERSION(fingerprints, "fp_version");
+    READ_VERSION(settings, "settings_version");
     READ_VERSION(logs, "logs_version");
 #undef READ_VERSION
     cJSON_Delete(root);
@@ -355,6 +361,7 @@ uint32_t root_storage_table_version(const char *table) {
         strcmp(table, "role_permissions") == 0) return versions.permissions;
     if (strcmp(table, "devices") == 0) return versions.devices;
     if (strcmp(table, "fingerprints") == 0) return versions.fingerprints;
+    if (strcmp(table, "system_settings") == 0) return versions.settings;
     if (strcmp(table, "logs") == 0) return versions.logs;
     return versions.global;
 }
@@ -369,6 +376,7 @@ bool root_storage_increment_version(const char *table) {
              strcmp(table, "role_permissions") == 0) ++versions.permissions;
     else if (strcmp(table, "devices") == 0) ++versions.devices;
     else if (strcmp(table, "fingerprints") == 0) ++versions.fingerprints;
+    else if (strcmp(table, "system_settings") == 0) ++versions.settings;
     else if (strcmp(table, "logs") == 0) ++versions.logs;
     else return false;
     ++versions.global;
@@ -377,12 +385,14 @@ bool root_storage_increment_version(const char *table) {
         "{\"global_version\":%lu,\"users_version\":%lu,"
         "\"classes_version\":%lu,\"permissions_version\":%lu,"
         "\"devices_version\":%lu,\"fp_version\":%lu,"
+        "\"settings_version\":%lu,"
         "\"logs_version\":%lu,\"last_update_time\":\"\","
         "\"last_update_source\":\"root_sd\"}",
         (unsigned long)versions.global, (unsigned long)versions.users,
         (unsigned long)versions.classes, (unsigned long)versions.permissions,
         (unsigned long)versions.devices,
-        (unsigned long)versions.fingerprints, (unsigned long)versions.logs);
+        (unsigned long)versions.fingerprints, (unsigned long)versions.settings,
+        (unsigned long)versions.logs);
     char path[128];
     if (!table_path("version", path, sizeof(path)) ||
         !atomic_write(path, (const uint8_t *)json, (size_t)length)) return false;

@@ -22,18 +22,27 @@
         <Border Grid.Row="1" Style="{StaticResource ToolbarPanel}" Margin="0,16,0,12" Padding="16,14">
             <Grid>
                 <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="180"/>
+                    <ColumnDefinition Width="12"/>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="12"/>
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <StackPanel>
-                    <TextBlock Text="用户" Style="{StaticResource LabelText}" Margin="0,0,0,6"/>
+                    <TextBlock Text="班级" Style="{StaticResource LabelText}" Margin="0,0,0,6"/>
+                    <ComboBox x:Name="ClassCombo" Height="38" DisplayMemberPath="DisplayText"
+                              SelectedValuePath="Key" IsTextSearchEnabled="True"
+                              TextSearch.TextPath="DisplayText"
+                              SelectionChanged="ClassCombo_SelectionChanged"/>
+                </StackPanel>
+                <StackPanel Grid.Column="2">
+                    <TextBlock Text="学生 / 用户" Style="{StaticResource LabelText}" Margin="0,0,0,6"/>
                     <ComboBox x:Name="UserCombo" Height="38" DisplayMemberPath="DisplayText"
                               SelectedValuePath="UserId" IsTextSearchEnabled="True"
                               TextSearch.TextPath="DisplayText"
-                              SelectionChanged="UserCombo_SelectionChanged"/>
+                              SelectionChanged="UserCombo_SelectionChanged" IsEnabled="False"/>
                 </StackPanel>
-                <Button x:Name="EnrollButton" Grid.Column="2" Content="录入新指纹"
+                <Button x:Name="EnrollButton" Grid.Column="4" Content="录入新指纹"
                         Style="{StaticResource SecondaryButton}" VerticalAlignment="Bottom"
                         Height="38" Click="EnrollButton_Click" IsEnabled="False"
                         ToolTip="使用当前柜机 0 号临时槽采集，完成后不自动绑定"/>
@@ -118,7 +127,7 @@
                     <ProgressBar x:Name="SyncProgress" Width="88" Height="5"
                                  HorizontalAlignment="Left" IsIndeterminate="True"
                                  Visibility="Collapsed"/>
-                    <TextBlock x:Name="StatusText" Text="绑定后才会把模板写入柜机正式槽位"
+                    <TextBlock x:Name="StatusText" Text="请先选择班级，再选择学生"
                                Margin="0,10,0,0" TextWrapping="Wrap"
                                Foreground="{StaticResource PrimaryDarkBrush}" FontSize="11"/>
                 </Grid>

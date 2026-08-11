@@ -6,6 +6,38 @@ namespace CabinetLock.Tests;
 public sealed class RolePermissionTemplateTests
 {
     [Fact]
+    public void NewStudent_DefaultsToAllCabinetDoorsWithoutSystemLock()
+    {
+        string originalPath = BusinessDatabase.ActiveDbPath;
+        User? originalUser = App.CurrentUser;
+        string tempPath = Path.Combine(Path.GetTempPath(), $"fingerlock-{Guid.NewGuid():N}.db");
+        try
+        {
+            BusinessDatabase.SetActivePath(tempPath);
+            BusinessDatabase.Initialize();
+            App.CurrentUser = new User { UserId = "admin", Role = "admin" };
+
+            Assert.True(new UserService().AddUser(new User
+            {
+                UserId = "S_DEFAULT",
+                Name = "默认权限学生",
+                Role = "student",
+                CreateTime = DateTime.Now
+            }));
+
+            string userId = new UserService().GetUserByCode("S_DEFAULT")!.UserId;
+            Assert.Equal([false, true, true, true],
+                new PermissionService().GetFinalPermissions(userId));
+        }
+        finally
+        {
+            App.CurrentUser = originalUser;
+            BusinessDatabase.SetActivePath(originalPath);
+            DeleteDatabaseFiles(tempPath);
+        }
+    }
+
+    [Fact]
     public void UpdatingTemplate_PreservesExistingUsers_AndInitializesNewUsers()
     {
         string originalPath = BusinessDatabase.ActiveDbPath;

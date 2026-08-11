@@ -57,10 +57,6 @@ namespace CabinetLock
                 CabinetGrid.ItemsSource = _devices
                     .Where(device => _assignedDeviceIds.Contains(device.DeviceId))
                     .Select(BuildCabinetRow).ToList();
-                CabinetCombo.ItemsSource = _devices
-                    .Where(device => !_assignedDeviceIds.Contains(device.DeviceId))
-                    .Select(device => new CabinetOption(device))
-                    .ToList();
                 FingerprintGrid.ItemsSource = BuildFingerprintRows();
                 LoadPermissions();
                 StatusText.Text = $"已加载 {_assignedDeviceIds.Count} 个绑定柜子";
@@ -132,9 +128,6 @@ namespace CabinetLock
         private void LoadPermissions()
         {
             bool[] final = App.PermissionService.GetFinalPermissions(_user.UserId);
-            bool isAdmin = string.Equals(_user.Role, "admin", StringComparison.OrdinalIgnoreCase);
-            Lock0CheckBox.IsEnabled = isAdmin;
-            Lock0CheckBox.IsChecked = isAdmin && final.ElementAtOrDefault(0);
             Lock1CheckBox.IsChecked = final.ElementAtOrDefault(1);
             Lock2CheckBox.IsChecked = final.ElementAtOrDefault(2);
             Lock3CheckBox.IsChecked = final.ElementAtOrDefault(3);
@@ -144,9 +137,10 @@ namespace CabinetLock
 
         private async void BindCabinetButton_Click(object sender, RoutedEventArgs e)
         {
-            if (CabinetCombo.SelectedItem is not CabinetOption option) return;
+            var picker = new StudentCabinetPickerWindow(_devices, _assignedDeviceIds) { Owner = this };
+            if (picker.ShowDialog() != true) return;
             Device? device = _devices.FirstOrDefault(item => string.Equals(
-                item.DeviceId, option.DeviceId, StringComparison.OrdinalIgnoreCase));
+                item.DeviceId, picker.SelectedDeviceId, StringComparison.OrdinalIgnoreCase));
             if (device == null) return;
             int[] defaultFingerprints = _templates.Where(item => item.Enabled && item.FingerprintId > 0)
                 .OrderBy(item => item.FingerIndex).ThenBy(item => item.FingerprintId)
@@ -193,7 +187,8 @@ namespace CabinetLock
                 return;
             }
             var dialog = new StudentCabinetConfigWindow(
-                device, _templates, selectedFingerprintIds, lockPermissions) { Owner = this };
+                device, _templates, selectedFingerprintIds, lockPermissions)
+            { Owner = this };
             if (dialog.ShowDialog() != true) return;
 
             SetBusy(true, $"正在保存 {device.DeviceName} 的柜机权限");
@@ -239,7 +234,7 @@ namespace CabinetLock
         {
             var permissions = new Dictionary<int, bool>
             {
-                [0] = Lock0CheckBox.IsEnabled && Lock0CheckBox.IsChecked == true,
+                [0] = false,
                 [1] = Lock1CheckBox.IsChecked == true,
                 [2] = Lock2CheckBox.IsChecked == true,
                 [3] = Lock3CheckBox.IsChecked == true
@@ -371,8 +366,12 @@ namespace CabinetLock
                     await Task.Run(() => App.UserService.ClearFingerprint(_user.UserId, row.FingerprintId));
                     _user.FingerprintId = null;
                 }
-                try { await App.SdStorageService.DeleteFingerTemplateAsync(
-                    _user.UserId, row.FingerIndex); } catch { }
+                try
+                {
+                    await App.SdStorageService.DeleteFingerTemplateAsync(
+                    _user.UserId, row.FingerIndex);
+                }
+                catch { }
                 App.FingerprintTemplateService.DeleteTemplate(row.FingerprintId);
                 FingerprintTemplate? replacement = _templates.FirstOrDefault(item =>
                     item.Enabled && item.FingerprintId != row.FingerprintId);
@@ -437,7 +436,6 @@ namespace CabinetLock
             _busy = busy;
             RefreshButton.IsEnabled = !busy;
             BindCabinetButton.IsEnabled = !busy;
-            CabinetCombo.IsEnabled = !busy;
             CabinetGrid.IsEnabled = !busy;
             FingerprintGrid.IsEnabled = !busy;
             EnrollFingerprintButton.IsEnabled = !busy;
@@ -460,22 +458,12 @@ namespace CabinetLock
 
         private static string FormatLockPermissions(IReadOnlyList<bool> permissions)
         {
-            string[] names = { "系统锁", "柜门 1", "柜门 2", "柜门 3" };
-            string[] selected = names.Where((_, index) => permissions.ElementAtOrDefault(index)).ToArray();
+            string[] selected = Enumerable.Range(1, 3)
+                .Where(index => permissions.ElementAtOrDefault(index))
+                .Select(index => $"柜门 {index}")
+                .ToArray();
             return selected.Length == 0 ? "无" : string.Join("、", selected);
         }
-    }
-
-    public sealed class CabinetOption
-    {
-        public CabinetOption(Device device)
-        {
-            DeviceId = device.DeviceId;
-            DisplayText = $"{(string.IsNullOrWhiteSpace(device.DeviceName) ? device.DeviceId : device.DeviceName)} ({device.DeviceId})";
-        }
-
-        public string DeviceId { get; }
-        public string DisplayText { get; }
     }
 
     public sealed class StudentCabinetRow

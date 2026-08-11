@@ -11,6 +11,8 @@ extern "C" {
 #define CAB_STORAGE_PERMISSION_MAX 200
 #define CAB_STORAGE_USER_ID_MAX 24
 #define CAB_STORAGE_NAME_MAX 32
+#define CAB_MAINTENANCE_PIN_LENGTH 6
+#define CAB_DEFAULT_MAINTENANCE_PIN "223344"
 
 typedef enum {
     CAB_ROLE_ADMIN = 0,
@@ -37,6 +39,8 @@ typedef struct {
     uint8_t mesh_channel;
     uint8_t fingerprint_count;
     uint32_t permission_version;
+    char maintenance_pin[CAB_MAINTENANCE_PIN_LENGTH + 1];
+    uint32_t maintenance_config_version;
 } cab_device_config_t;
 
 bool cab_storage_init(const char *default_device_id, bool is_root);

@@ -22,6 +22,12 @@
 #define PERMISSION_SYNC_TIMEOUT_MS 30000U
 #define FP_TEST_IDLE_TIMEOUT_MS 60000U
 #define FP_TEST_POLL_MS 180U
+#define MAINTENANCE_HOLD_MS 5000U
+#define MAINTENANCE_PIN_TIMEOUT_MS 10000U
+#define MAINTENANCE_FLASH_MS 200U
+#define MAINTENANCE_FINGER_POLL_MS 120U
+#define MAINTENANCE_FINGER_GRACE_MS 250U
+#define MAINTENANCE_PIN_ENCODING "digit_plus_one"
 #define UNIX_2000_01_01 946684800U
 
 typedef enum {
@@ -29,6 +35,9 @@ typedef enum {
     STATE_VERIFIED_WINDOW,
     STATE_ENROLLING,
     STATE_FINGERPRINT_TEST,
+    STATE_MAINTENANCE_ARMING,
+    STATE_MAINTENANCE_PIN,
+    STATE_MAINTENANCE,
 } controller_state_t;
 
 typedef struct {
@@ -82,6 +91,15 @@ static bool s_test_finger_down;
 static uint32_t s_last_permission_lost_report;
 static bool s_permission_lost_pending;
 static bool s_fingerprint_was_ready;
+static uint32_t s_maintenance_hold_started;
+static uint32_t s_maintenance_last_finger;
+static uint32_t s_maintenance_last_poll;
+static uint32_t s_maintenance_flash_until;
+static bool s_maintenance_input_ready;
+static char s_maintenance_input[CAB_MAINTENANCE_PIN_LENGTH + 1];
+static uint8_t s_maintenance_input_length;
+static uint8_t s_maintenance_lock_mask;
+static bool s_maintenance_remote;
 
 static uint32_t now_ms(void) {
     return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
@@ -91,6 +109,34 @@ static void set_state(controller_state_t state) {
     s_state = state;
     s_state_entered = now_ms();
     cab_fp_set_background_enabled(state == STATE_WAIT_FINGER);
+}
+
+static bool maintenance_pin_valid(const char *pin) {
+    if (pin == NULL || strlen(pin) != CAB_MAINTENANCE_PIN_LENGTH) return false;
+    for (size_t index = 0; index < CAB_MAINTENANCE_PIN_LENGTH; ++index) {
+        if (pin[index] < '1' || pin[index] > '4') return false;
+    }
+    return true;
+}
+
+static bool decode_maintenance_pin(const char *wire_pin, const char *encoding,
+                                   char output[CAB_MAINTENANCE_PIN_LENGTH + 1]) {
+    if (wire_pin == NULL || output == NULL) return false;
+    if (encoding == NULL || encoding[0] == '\0') {
+        if (!maintenance_pin_valid(wire_pin)) return false;
+        snprintf(output, CAB_MAINTENANCE_PIN_LENGTH + 1, "%s", wire_pin);
+        return true;
+    }
+    if (strcmp(encoding, MAINTENANCE_PIN_ENCODING) != 0 ||
+        strlen(wire_pin) != CAB_MAINTENANCE_PIN_LENGTH) {
+        return false;
+    }
+    for (size_t index = 0; index < CAB_MAINTENANCE_PIN_LENGTH; ++index) {
+        if (wire_pin[index] < '2' || wire_pin[index] > '5') return false;
+        output[index] = (char)(wire_pin[index] - 1);
+    }
+    output[CAB_MAINTENANCE_PIN_LENGTH] = '\0';
+    return maintenance_pin_valid(output);
 }
 
 static bool response_matches(const response_cache_t *entry,
@@ -328,6 +374,52 @@ static void send_verify_event(const char *event, int lock_id) {
     send_event(CAB_CMD_VERIFY_WINDOW_EVENT, json);
 }
 
+static void send_maintenance_event_details(const char *event, bool active,
+                                           bool remote, uint8_t lock_mask,
+                                           int lock_id) {
+    char json[256];
+    snprintf(json, sizeof(json),
+        "{\"event\":\"%s\",\"active\":%s,\"source\":\"%s\","
+        "\"lock_mask\":%u,\"lock_id\":%d}",
+        event == NULL ? "status" : event,
+        active ? "true" : "false", remote ? "remote" : "local",
+        (unsigned)lock_mask, lock_id);
+    send_event(CAB_CMD_MAINTENANCE_EVENT, json);
+}
+
+static void send_maintenance_event(const char *event, int lock_id) {
+    send_maintenance_event_details(event, s_state == STATE_MAINTENANCE,
+                                   s_maintenance_remote,
+                                   s_maintenance_lock_mask, lock_id);
+}
+
+static void leave_maintenance(const char *event) {
+    bool was_maintenance = s_state == STATE_MAINTENANCE;
+    bool was_remote = s_maintenance_remote;
+    uint8_t previous_lock_mask = s_maintenance_lock_mask;
+    cab_lock_close_all();
+    cab_led_clear_override();
+    s_maintenance_lock_mask = 0;
+    s_maintenance_remote = false;
+    s_maintenance_input_length = 0;
+    s_maintenance_input[0] = '\0';
+    set_state(STATE_WAIT_FINGER);
+    if (was_maintenance) {
+        send_maintenance_event_details(event, false, was_remote,
+                                       previous_lock_mask, -1);
+    }
+}
+
+static void enter_maintenance(uint8_t lock_mask, bool remote) {
+    cab_lock_clear_permission_hint();
+    s_verified_valid = false;
+    s_maintenance_lock_mask = lock_mask & 0x0F;
+    s_maintenance_remote = remote;
+    set_state(STATE_MAINTENANCE);
+    cab_led_set_override(s_maintenance_lock_mask);
+    send_maintenance_event("enter", -1);
+}
+
 static void end_verified_window(const char *event) {
     if (event != NULL) send_verify_event(event, -1);
     s_verified_valid = false;
@@ -358,7 +450,10 @@ static void handle_register(const cab_app_view_t *request, bool ingress) {
         "\"mesh_root_responses\":%lu,\"mesh_heartbeat_acks\":%lu,"
         "\"mesh_heartbeat_timeouts\":%lu,"
         "\"fingerprint_ready\":%s,\"fingerprint_error\":\"%s\","
-        "\"fingerprint_error_count\":%lu}",
+        "\"fingerprint_error_count\":%lu,"
+        "\"maintenance_config_version\":%lu,"
+        "\"maintenance_active\":%s,\"maintenance_source\":\"%s\","
+        "\"maintenance_lock_mask\":%u}",
         s_device_id, config.device_name, esp_app_get_description()->version,
         CABINET_HARDWARE_VERSION,
         cab_mesh_layer(),
@@ -370,7 +465,11 @@ static void handle_register(const cab_app_view_t *request, bool ingress) {
         (unsigned long)stats.heartbeat_acks,
         (unsigned long)stats.heartbeat_timeouts,
         cab_fp_ready() ? "true" : "false", cab_fp_last_error(),
-        (unsigned long)cab_fp_error_count());
+        (unsigned long)cab_fp_error_count(),
+        (unsigned long)config.maintenance_config_version,
+        s_state == STATE_MAINTENANCE ? "true" : "false",
+        s_maintenance_remote ? "remote" : "local",
+        (unsigned)s_maintenance_lock_mask);
     send_json(CAB_CMD_REGISTER, request->message_id,
               request->correlation_id, json, ingress, true);
 }
@@ -406,7 +505,7 @@ static void handle_read_status(const cab_app_view_t *request, bool ingress) {
 static void handle_read_config(const cab_app_view_t *request, bool ingress) {
     cab_device_config_t config;
     cab_storage_load_config(&config);
-    char json[512];
+    char json[768];
     snprintf(json, sizeof(json),
         "{\"device_id\":\"%s\",\"device_name\":\"%s\","
         "\"is_root\":false,\"work_mode\":\"mesh\","
@@ -417,6 +516,9 @@ static void handle_read_config(const cab_app_view_t *request, bool ingress) {
         "\"fingerprint_power_off_level\":%d,"
         "\"fingerprint_power_on_level\":%d,"
         "\"fingerprint_handshake\":%s,\"fingerprint_probe_result\":%d,"
+        "\"maintenance_config_version\":%lu,"
+        "\"maintenance_active\":%s,\"maintenance_source\":\"%s\","
+        "\"maintenance_lock_mask\":%u,"
         "\"firmware_version\":\"%s\",\"hardware_version\":\"%s\"}",
         s_device_id, config.device_name, config.fingerprint_count,
         (unsigned long)cab_storage_permission_version(),
@@ -426,7 +528,12 @@ static void handle_read_config(const cab_app_view_t *request, bool ingress) {
         cab_fp_power_off_feedback_level(),
         cab_fp_power_on_feedback_level(),
         cab_fp_handshake_seen() ? "true" : "false",
-        cab_fp_probe_result(), esp_app_get_description()->version,
+        cab_fp_probe_result(),
+        (unsigned long)config.maintenance_config_version,
+        s_state == STATE_MAINTENANCE ? "true" : "false",
+        s_maintenance_remote ? "remote" : "local",
+        (unsigned)s_maintenance_lock_mask,
+        esp_app_get_description()->version,
         CABINET_HARDWARE_VERSION);
     send_json(CAB_CMD_CONFIG_RESPONSE, request->message_id,
               request->correlation_id, json, ingress, true);
@@ -467,6 +574,60 @@ static void handle_control_lock(const cab_app_view_t *request, bool ingress) {
     } else {
         send_error(request, CAB_ERR_LOCK_HARDWARE, "lock open failed", ingress);
     }
+}
+
+static void handle_sync_maintenance_config(const cab_app_view_t *request,
+                                            cJSON *json, bool ingress) {
+    const char *wire_pin = json_string(json, "pin", "");
+    const char *encoding = json_string(json, "pin_encoding", "");
+    char pin[CAB_MAINTENANCE_PIN_LENGTH + 1];
+    uint32_t version = json_u32(json, "version", 0);
+    if (!decode_maintenance_pin(wire_pin, encoding, pin) || version == 0) {
+        send_error(request, CAB_ERR_BAD_REQUEST,
+                   "maintenance pin encoding is invalid", ingress);
+        return;
+    }
+    cab_device_config_t config;
+    if (!cab_storage_load_config(&config)) {
+        send_error(request, CAB_ERR_FLASH_READ, "config read failed", ingress);
+        return;
+    }
+    if (version < config.maintenance_config_version) {
+        send_error(request, CAB_ERR_BAD_REQUEST,
+                   "maintenance config version is stale", ingress);
+        return;
+    }
+    snprintf(config.maintenance_pin, sizeof(config.maintenance_pin), "%s", pin);
+    config.maintenance_config_version = version;
+    if (!cab_storage_save_config(&config)) {
+        send_error(request, CAB_ERR_FLASH_WRITE, "config save failed", ingress);
+        return;
+    }
+    if (s_state == STATE_MAINTENANCE) leave_maintenance("config_changed");
+    send_ack(request, "maintenance_config_saved", ingress);
+}
+
+static void handle_enter_maintenance(const cab_app_view_t *request,
+                                     cJSON *json, bool ingress) {
+    uint8_t lock_mask = (uint8_t)json_int(json, "lock_mask", 0) & 0x0F;
+    if (lock_mask == 0) {
+        send_error(request, CAB_ERR_BAD_REQUEST,
+                   "maintenance lock mask is empty", ingress);
+        return;
+    }
+    if (s_state != STATE_WAIT_FINGER && s_state != STATE_MAINTENANCE) {
+        send_error(request, CAB_ERR_DEVICE_BUSY, "device busy", ingress);
+        return;
+    }
+    if (s_state == STATE_MAINTENANCE) leave_maintenance("replaced");
+    enter_maintenance(lock_mask, true);
+    send_ack(request, "maintenance_entered", ingress);
+}
+
+static void handle_exit_maintenance(const cab_app_view_t *request,
+                                    bool ingress) {
+    if (s_state == STATE_MAINTENANCE) leave_maintenance("remote_exit");
+    send_ack(request, "maintenance_exited", ingress);
 }
 
 static void reset_permission_sync(void) {
@@ -758,8 +919,10 @@ static void handle_restore_fingerprint(const cab_app_view_t *request,
     }
     if (!cab_fp_write_template(fingerprint_id, template_data,
                                sizeof(template_data))) {
+        const char *reason = cab_fp_last_error();
         send_error(request, CAB_ERR_FP_COMM_FAILED,
-                   "fingerprint restore failed", ingress);
+                   reason[0] == '\0' ? "fingerprint restore failed" : reason,
+                   ingress);
         return;
     }
     update_config_fingerprint_count();
@@ -838,8 +1001,11 @@ static void handle_start_test(const cab_app_view_t *request, cJSON *json,
         cab_fp_delete(CAB_FP_TEMP_SLOT);
     if (!cab_fp_write_template(CAB_FP_TEMP_SLOT, template_data,
                                sizeof(template_data))) {
+        const char *reason = cab_fp_last_error();
         send_error(request, CAB_ERR_FP_COMM_FAILED,
-                   "fingerprint test template write failed", ingress);
+                   reason[0] == '\0'
+                       ? "fingerprint test template write failed" : reason,
+                   ingress);
         return;
     }
     snprintf(s_test_token, sizeof(s_test_token), "%s",
@@ -1104,17 +1270,22 @@ static void finish_enrollment(bool success) {
         backup.is_backup = true;
         success = cab_storage_save_permission(&backup, 0);
     }
+    const char *failure_message = cab_fp_last_error();
+    if (failure_message == NULL || failure_message[0] == '\0')
+        failure_message = "fingerprint enrollment failed";
     snprintf(response, 1400,
         "{\"fingerprint_id\":%d,\"local_fp_id\":%d,"
         "\"user_id\":\"%s\",\"is_backup\":%s,"
-        "\"result\":\"%s\"%s%s%s%s}",
+        "\"result\":\"%s\"%s%s%s%s%s%s}",
         s_enroll_target, s_enroll_backup ? s_enroll_target : CAB_FP_TEMP_SLOT,
         s_enroll_user, s_enroll_backup ? "true" : "false",
         success ? "success" : "fail",
         template_hex[0] != '\0' ? ",\"template_hex\":\"" : "",
         template_hex[0] != '\0' ? template_hex : "",
         template_hex[0] != '\0' ? "\"" : "",
-        success ? "" : ",\"message\":\"fingerprint enrollment failed\"");
+        success ? "" : ",\"message\":\"",
+        success ? "" : failure_message,
+        success ? "" : "\"");
     if (!success) {
         size_t used = strlen(response);
         if (used > 0 && response[used - 1] != '}')
@@ -1232,6 +1403,15 @@ void cab_controller_handle(const cab_app_view_t *request, bool mesh_ingress) {
         }
         case CAB_CMD_WRITE_CONFIG:
             handle_write_config(request, json, mesh_ingress);
+            break;
+        case CAB_CMD_SYNC_MAINTENANCE_CONFIG:
+            handle_sync_maintenance_config(request, json, mesh_ingress);
+            break;
+        case CAB_CMD_ENTER_MAINTENANCE:
+            handle_enter_maintenance(request, json, mesh_ingress);
+            break;
+        case CAB_CMD_EXIT_MAINTENANCE:
+            handle_exit_maintenance(request, mesh_ingress);
             break;
         case CAB_CMD_SYNC_PERMISSIONS:
             handle_sync_permissions(request, json, mesh_ingress);
@@ -1381,6 +1561,99 @@ static void update_test(void) {
                     confidence);
 }
 
+static void begin_maintenance_arming(void) {
+    s_maintenance_hold_started = 0;
+    s_maintenance_last_finger = 0;
+    s_maintenance_last_poll = 0;
+    set_state(STATE_MAINTENANCE_ARMING);
+}
+
+static void update_maintenance_arming(uint32_t now) {
+    if (!cab_key_is_pressed(CAB_KEY_CANCEL)) {
+        set_state(STATE_WAIT_FINGER);
+        return;
+    }
+    if (now - s_maintenance_last_poll < MAINTENANCE_FINGER_POLL_MS) return;
+    s_maintenance_last_poll = now;
+    if (cab_fp_finger_present()) {
+        s_maintenance_last_finger = now;
+        if (s_maintenance_hold_started == 0) s_maintenance_hold_started = now;
+    } else if (s_maintenance_last_finger == 0 ||
+               now - s_maintenance_last_finger > MAINTENANCE_FINGER_GRACE_MS) {
+        s_maintenance_hold_started = 0;
+    }
+    if (s_maintenance_hold_started == 0 ||
+        now - s_maintenance_hold_started < MAINTENANCE_HOLD_MS) return;
+
+    s_maintenance_input_length = 0;
+    s_maintenance_input[0] = '\0';
+    s_maintenance_input_ready = false;
+    s_maintenance_flash_until = now + MAINTENANCE_FLASH_MS;
+    cab_led_set_override(0x0F);
+    set_state(STATE_MAINTENANCE_PIN);
+    send_maintenance_event("pin_prompt", -1);
+}
+
+static void update_maintenance_pin(uint32_t now, int key) {
+    if (s_maintenance_flash_until != 0 && now >= s_maintenance_flash_until) {
+        cab_led_clear_override();
+        s_maintenance_flash_until = 0;
+    }
+    if (now - s_state_entered >= MAINTENANCE_PIN_TIMEOUT_MS) {
+        cab_led_clear_override();
+        set_state(STATE_WAIT_FINGER);
+        send_maintenance_event("pin_timeout", -1);
+        return;
+    }
+    if (!s_maintenance_input_ready) {
+        if (cab_key_is_pressed(CAB_KEY_CANCEL)) return;
+        if (now - s_maintenance_last_poll < MAINTENANCE_FINGER_POLL_MS) return;
+        s_maintenance_last_poll = now;
+        if (cab_fp_finger_present()) return;
+        s_maintenance_input_ready = true;
+        return;
+    }
+    if (key == CAB_KEY_CANCEL) {
+        cab_led_clear_override();
+        set_state(STATE_WAIT_FINGER);
+        send_maintenance_event("pin_cancel", -1);
+        return;
+    }
+    if (key < 0 || key >= CAB_LOCK_COUNT) return;
+    s_maintenance_input[s_maintenance_input_length++] = (char)('1' + key);
+    s_maintenance_input[s_maintenance_input_length] = '\0';
+    if (s_maintenance_input_length < CAB_MAINTENANCE_PIN_LENGTH) return;
+
+    cab_device_config_t config;
+    bool matched = cab_storage_load_config(&config) &&
+                   strcmp(s_maintenance_input, config.maintenance_pin) == 0;
+    if (matched) {
+        enter_maintenance(0x0F, false);
+    } else {
+        cab_led_clear_override();
+        set_state(STATE_WAIT_FINGER);
+        send_maintenance_event("pin_failed", -1);
+    }
+}
+
+static void update_maintenance(int key) {
+    if (key == CAB_KEY_CANCEL) {
+        leave_maintenance("local_exit");
+        return;
+    }
+    if (key < 0 || key >= CAB_LOCK_COUNT) return;
+    if ((s_maintenance_lock_mask & (1U << key)) == 0) {
+        send_maintenance_event("denied", key);
+        return;
+    }
+    if (cab_lock_open((uint8_t)key)) {
+        send_log("maintenance", -1, key, "success",
+                 s_maintenance_remote ? "remote_maintenance" :
+                                        "local_maintenance");
+        send_maintenance_event("unlocked", key);
+    }
+}
+
 void cab_controller_update(void) {
     uint32_t now = now_ms();
     bool fingerprint_ready = cab_fp_ready();
@@ -1393,7 +1666,18 @@ void cab_controller_update(void) {
     s_fingerprint_was_ready = fingerprint_ready;
     cab_hardware_update();
     int key = cab_key_take_press();
-    if (key == CAB_KEY_CANCEL) {
+
+    if (s_state == STATE_WAIT_FINGER &&
+        cab_key_is_pressed(CAB_KEY_CANCEL)) {
+        begin_maintenance_arming();
+    }
+    if (s_state == STATE_MAINTENANCE_ARMING) {
+        update_maintenance_arming(now);
+    } else if (s_state == STATE_MAINTENANCE_PIN) {
+        update_maintenance_pin(now, key);
+    } else if (s_state == STATE_MAINTENANCE) {
+        update_maintenance(key);
+    } else if (key == CAB_KEY_CANCEL) {
         cancel_current_operation();
     } else if (key >= 0 && key < CAB_LOCK_COUNT &&
                s_state == STATE_VERIFIED_WINDOW && s_verified_valid) {
@@ -1438,6 +1722,10 @@ void cab_controller_update(void) {
             break;
         case STATE_FINGERPRINT_TEST:
             update_test();
+            break;
+        case STATE_MAINTENANCE_ARMING:
+        case STATE_MAINTENANCE_PIN:
+        case STATE_MAINTENANCE:
             break;
     }
 }

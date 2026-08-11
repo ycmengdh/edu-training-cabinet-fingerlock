@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Windows;
+using System.Windows.Threading;
 using Microsoft.Win32;
 
 namespace CabinetLock
@@ -29,7 +30,8 @@ namespace CabinetLock
         {
             get
             {
-                if (!string.IsNullOrWhiteSpace(_node.Error)) return _node.Error;
+                if (!string.IsNullOrWhiteSpace(_node.Error))
+                    return FormatError(_node.Error);
                 return PhaseKind switch
                 {
                     "offline" => "设备当前不在线",
@@ -97,6 +99,15 @@ namespace CabinetLock
             return $"{seconds / 86400} 天前";
         }
 
+        private static string FormatError(string error) => error switch
+        {
+            "firmware rollback detected" => "新固件启动校验失败，已回滚到旧版本",
+            "notification timeout" => "升级通知未送达，正在快速重试",
+            "notify failed" => "升级通知发送失败，正在快速重试",
+            "progress timeout" => "升级进度超时，正在重试",
+            _ => error
+        };
+
         public event PropertyChangedEventHandler? PropertyChanged;
 
         private void OnPropertyChanged([CallerMemberName] string? name = null) =>
@@ -116,6 +127,11 @@ namespace CabinetLock
         private string _lastLoggedStage = "";
         private int _lastLoggedPercent = -5;
         private DateTime _lastProgressLogAt = DateTime.MinValue;
+        private readonly DispatcherTimer _elapsedTimer;
+        private uint _elapsedBaseSeconds;
+        private DateTime _elapsedCapturedAtUtc = DateTime.UtcNow;
+        private bool _elapsedRunning;
+        private bool _elapsedVisible;
 
         public CabinetOtaWindow()
         {
@@ -123,6 +139,12 @@ namespace CabinetLock
             NodeDataGrid.ItemsSource = _nodeRows;
             Closing += CabinetOtaWindow_Closing;
             Loaded += CabinetOtaWindow_Loaded;
+            _elapsedTimer = new DispatcherTimer
+            {
+                Interval = TimeSpan.FromSeconds(1)
+            };
+            _elapsedTimer.Tick += (_, _) => UpdateElapsedText();
+            _elapsedTimer.Start();
             RefreshEnvironment();
         }
 
@@ -231,6 +253,11 @@ namespace CabinetLock
                     MessageBoxImage.Question) != MessageBoxResult.Yes) return;
 
             SetRunning(true);
+            _elapsedBaseSeconds = 0;
+            _elapsedCapturedAtUtc = DateTime.UtcNow;
+            _elapsedRunning = true;
+            _elapsedVisible = true;
+            UpdateElapsedText();
             _lastLoggedStage = "";
             _lastLoggedPercent = -5;
             _lastProgressLogAt = DateTime.MinValue;
@@ -406,6 +433,19 @@ namespace CabinetLock
                 string.Equals(status.Phase, "published", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(status.Phase, "distributing", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(status.Phase, "complete", StringComparison.OrdinalIgnoreCase);
+            if (status.StartedAtSeconds > 0 || status.ElapsedSeconds > 0)
+            {
+                _elapsedBaseSeconds = status.ElapsedSeconds;
+                _elapsedCapturedAtUtc = DateTime.UtcNow;
+                _elapsedRunning = activePolicy && pending > 0;
+                _elapsedVisible = true;
+            }
+            else if (!activePolicy)
+            {
+                _elapsedRunning = false;
+                _elapsedVisible = false;
+            }
+            UpdateElapsedText();
             ProgressDetailText.Text = activePolicy
                 ? $"目标 {status.Version} · {hardware} · 在线兼容 {compatible} · 待升级 {pending} · 不兼容 {status.IncompatibleNodes} · 未知硬件 {status.UnknownHardwareNodes}{errorDetail}"
                 : $"根节点尚未保存柜机目标版本{errorDetail}";
@@ -419,6 +459,32 @@ namespace CabinetLock
             string line = $"{DateTime.Now:HH:mm:ss}  {text}";
             LogTextBox.AppendText((LogTextBox.Text.Length == 0 ? "" : Environment.NewLine) + line);
             LogTextBox.ScrollToEnd();
+        }
+
+        private void UpdateElapsedText()
+        {
+            if (!_elapsedVisible)
+            {
+                ElapsedText.Text = "分发用时 --";
+                return;
+            }
+            uint seconds = _elapsedBaseSeconds;
+            if (_elapsedRunning)
+            {
+                seconds += (uint)Math.Max(0,
+                    (DateTime.UtcNow - _elapsedCapturedAtUtc).TotalSeconds);
+            }
+            ElapsedText.Text = $"分发用时 {FormatDuration(seconds)}";
+        }
+
+        internal static string FormatDuration(uint seconds)
+        {
+            uint hours = seconds / 3600U;
+            uint minutes = seconds % 3600U / 60U;
+            uint remainingSeconds = seconds % 60U;
+            return hours > 0
+                ? $"{hours:00}:{minutes:00}:{remainingSeconds:00}"
+                : $"{minutes:00}:{remainingSeconds:00}";
         }
 
         private void SetRunning(bool running)
@@ -435,7 +501,7 @@ namespace CabinetLock
         {
             "uploading" => "上传到根节点",
             "ready" => "镜像已就绪",
-            "distributing" => "正在拓扑分发",
+            "distributing" => "正在拓扑下载",
             "published" => "目标版本已发布",
             "complete" => "升级完成",
             "idle" => "尚未发布",
@@ -466,6 +532,7 @@ namespace CabinetLock
             }
             _cancellation?.Cancel();
             _pollingCancellation?.Cancel();
+            _elapsedTimer.Stop();
         }
     }
 }
