@@ -916,9 +916,15 @@
                         <Border x:Name="CheckBorder" Width="17" Height="17" CornerRadius="4"
                                 Background="{StaticResource InputBrush}" BorderBrush="{StaticResource BorderBrush}"
                                 BorderThickness="1" VerticalAlignment="Center">
-                            <Path x:Name="CheckMark" Data="M 3 8 L 7 12 L 14 4" Stroke="{StaticResource PrimaryForegroundBrush}"
-                                  StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
-                                  Visibility="Collapsed"/>
+                            <Grid>
+                                <Path x:Name="CheckMark" Data="M 3 8 L 7 12 L 14 4" Stroke="{StaticResource PrimaryForegroundBrush}"
+                                      StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                      Visibility="Collapsed"/>
+                                <Border x:Name="IndeterminateMark" Width="9" Height="2" CornerRadius="1"
+                                        Background="{StaticResource PrimaryForegroundBrush}"
+                                        HorizontalAlignment="Center" VerticalAlignment="Center"
+                                        Visibility="Collapsed"/>
+                            </Grid>
                         </Border>
                         <ContentPresenter Margin="8,0,0,0" VerticalAlignment="Center"
                                           TextElement.Foreground="{TemplateBinding Foreground}"/>
@@ -931,6 +937,11 @@
                             <Setter TargetName="CheckBorder" Property="Background" Value="{StaticResource PrimaryBrush}"/>
                             <Setter TargetName="CheckBorder" Property="BorderBrush" Value="{StaticResource PrimaryBrush}"/>
                             <Setter TargetName="CheckMark" Property="Visibility" Value="Visible"/>
+                        </Trigger>
+                        <Trigger Property="IsChecked" Value="{x:Null}">
+                            <Setter TargetName="CheckBorder" Property="Background" Value="{StaticResource PrimaryBrush}"/>
+                            <Setter TargetName="CheckBorder" Property="BorderBrush" Value="{StaticResource PrimaryBrush}"/>
+                            <Setter TargetName="IndeterminateMark" Property="Visibility" Value="Visible"/>
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
                             <Setter Property="Opacity" Value="0.5"/>

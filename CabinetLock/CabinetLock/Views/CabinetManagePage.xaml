@@ -1,14 +1,12 @@
 <Page x:Class="CabinetLock.CabinetManagePage"
       xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-      xmlns:controls="clr-namespace:CabinetLock.Controls"
       Title="实训柜管理" Background="{StaticResource BackgroundBrush}">
     <Grid Style="{StaticResource PageRoot}">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
-            <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
@@ -93,16 +91,37 @@
                     </StackPanel>
                     <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                         <TextBlock Text="搜索" Style="{StaticResource LabelText}" Margin="0,0,7,0"/>
-                        <TextBox x:Name="CabinetSearchBox" Width="210" Height="34"
+                        <TextBox x:Name="CabinetSearchBox" Width="180" Height="34"
                                  ToolTip="按设备编号、名称、MAC 或通讯 ID 搜索" TextChanged="CabinetFilter_Changed"/>
-                        <ComboBox x:Name="CabinetStatusFilter" Width="132" Height="34" Margin="10,0,0,0"
+                        <ComboBox x:Name="OnlineStatusFilter" Width="112" Height="34" Margin="8,0,0,0"
                                   SelectionChanged="CabinetFilter_Changed">
-                            <ComboBoxItem Content="全部状态" Tag="all" IsSelected="True"/>
+                            <ComboBoxItem Content="全部在线状态" Tag="all" IsSelected="True"/>
                             <ComboBoxItem Content="在线" Tag="online"/>
                             <ComboBoxItem Content="离线" Tag="offline"/>
-                            <ComboBoxItem Content="权限落后" Tag="lagging"/>
-                            <ComboBoxItem Content="需要处理" Tag="attention"/>
                         </ComboBox>
+                        <ComboBox x:Name="PermissionSyncFilter" Width="112" Height="34" Margin="8,0,0,0"
+                                  SelectionChanged="CabinetFilter_Changed">
+                            <ComboBoxItem Content="全部权限同步" Tag="all" IsSelected="True"/>
+                            <ComboBoxItem Content="已同步" Tag="synced"/>
+                            <ComboBoxItem Content="权限落后" Tag="lagging"/>
+                            <ComboBoxItem Content="未知" Tag="unknown"/>
+                        </ComboBox>
+                        <ComboBox x:Name="MaintenanceStatusFilter" Width="112" Height="34" Margin="8,0,0,0"
+                                  SelectionChanged="CabinetFilter_Changed">
+                            <ComboBoxItem Content="全部维护状态" Tag="all" IsSelected="True"/>
+                            <ComboBoxItem Content="正常" Tag="normal"/>
+                            <ComboBoxItem Content="维护" Tag="maintenance"/>
+                        </ComboBox>
+                        <Button x:Name="DeleteSelectedCabinetsButton" Style="{StaticResource DangerButton}"
+                                Height="34" Margin="8,0,0,0" Visibility="Collapsed"
+                                Click="DeleteSelectedCabinetsButton_Click" ToolTip="删除已勾选的柜子">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="&#xE74D;" FontFamily="{StaticResource AppIconFont}"
+                                           Foreground="{StaticResource DangerBrush}" Margin="0,0,7,0"/>
+                                <TextBlock x:Name="DeleteSelectedCabinetsText" Text="删除选中"
+                                           Foreground="{StaticResource DangerBrush}"/>
+                            </StackPanel>
+                        </Button>
                     </StackPanel>
                 </Grid>
 
@@ -125,14 +144,14 @@
                                 <DataGridTemplateColumn.Header>
                                     <CheckBox x:Name="SelectAllMaintenanceCheckBox" IsThreeState="True"
                                               HorizontalAlignment="Center" Click="SelectAllMaintenanceCheckBox_Click"
-                                              ToolTip="全选或取消当前页在线柜机"/>
+                                              ToolTip="全选或取消当前筛选结果中的柜子"/>
                                 </DataGridTemplateColumn.Header>
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
                                         <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                                  IsEnabled="{Binding IsOnline}" HorizontalAlignment="Center"
+                                                  HorizontalAlignment="Center"
                                                   Click="CabinetSelectionCheckBox_Click"
-                                                  ToolTip="选择该柜机进行批量维护"/>
+                                                  ToolTip="选择该柜机进行批量操作"/>
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
                             </DataGridTemplateColumn>
@@ -169,15 +188,13 @@
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
                             </DataGridTemplateColumn>
-                            <DataGridTextColumn Header="设备编号" Binding="{Binding DeviceNumber}" Width="92"
+                            <DataGridTextColumn Header="设备编号" Binding="{Binding DeviceNumber}" Width="*" MinWidth="120"
                                                 ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                            <DataGridTextColumn Header="柜子名称" Binding="{Binding DeviceName}" Width="1.1*" MinWidth="110"
+                            <DataGridTextColumn Header="柜子名称" Binding="{Binding DeviceName}" Width="*" MinWidth="120"
                                                 ElementStyle="{StaticResource DataGridLeftTextBlockStyle}"/>
-                            <DataGridTextColumn Header="通讯 ID" Binding="{Binding DeviceId}" Width="1.15*" MinWidth="120"
+                            <DataGridTextColumn Header="通讯 ID" Binding="{Binding DeviceId}" Width="*" MinWidth="120"
                                                 ElementStyle="{StaticResource DataGridLeftTextBlockStyle}"/>
-                            <DataGridTextColumn Header="指纹槽" Binding="{Binding FingerprintSlotHint}" Width="70"
-                                                ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                            <DataGridTextColumn Header="权限数" Binding="{Binding Status.PermissionCount}" Width="70"
+                            <DataGridTextColumn Header="指纹/权限" Binding="{Binding FingerprintPermissionCountText}" Width="92"
                                                 ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
                             <DataGridTemplateColumn Header="权限同步" Width="88">
                                 <DataGridTemplateColumn.CellTemplate>
@@ -198,6 +215,9 @@
                                                         <DataTrigger Binding="{Binding PermissionSyncText}" Value="离线">
                                                             <Setter Property="Foreground" Value="{StaticResource DangerBrush}"/>
                                                         </DataTrigger>
+                                                        <DataTrigger Binding="{Binding PermissionSyncText}" Value="未知">
+                                                            <Setter Property="Foreground" Value="{StaticResource SubTextBrush}"/>
+                                                        </DataTrigger>
                                                     </Style.Triggers>
                                                 </Style>
                                             </TextBlock.Style>
@@ -205,23 +225,25 @@
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
                             </DataGridTemplateColumn>
-                            <DataGridTextColumn Binding="{Binding PermissionVersionPairText}" Width="190">
-                                <DataGridTextColumn.Header>
-                                    <TextBlock Text="权限标识（柜端 / 当前）"
-                                               ToolTip="用于判断权限数据是否同步的 32 位组合标识；由用户、班级、权限和指纹相关数据版本计算，不是固件版本。"/>
-                                </DataGridTextColumn.Header>
-                                <DataGridTextColumn.ElementStyle>
-                                    <Style TargetType="TextBlock" BasedOn="{StaticResource DataGridTextBlockStyle}">
-                                        <Setter Property="ToolTip" Value="{Binding PermissionVersionExplanation}"/>
-                                    </Style>
-                                </DataGridTextColumn.ElementStyle>
-                            </DataGridTextColumn>
-                            <DataGridTextColumn Header="固件" Binding="{Binding FirmwareVersionText}" Width="100"
-                                                ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                            <DataGridTextColumn Header="硬件" Binding="{Binding HardwareVersionText}" Width="100"
-                                                ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                            <DataGridTextColumn Header="维护状态" Binding="{Binding MaintenanceStatusText}" Width="150"
-                                                ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                            <DataGridTemplateColumn Header="设备状态" Width="88">
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding DeviceStateText}" HorizontalAlignment="Center" VerticalAlignment="Center">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock" BasedOn="{StaticResource DataGridTextBlockStyle}">
+                                                    <Setter Property="Foreground" Value="{StaticResource SuccessBrush}"/>
+                                                    <Setter Property="FontWeight" Value="SemiBold"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding MaintenanceActive}" Value="True">
+                                                            <Setter Property="Foreground" Value="{StaticResource WarningBrush}"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                            </DataGridTemplateColumn>
                             <DataGridTextColumn Header="最后在线" Binding="{Binding LastSeenTime, StringFormat={}{0:MM-dd HH:mm}}" Width="100"
                                                 ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
                             <DataGridTemplateColumn Header="操作" Width="168">
@@ -265,11 +287,15 @@
 
         <Grid x:Name="OperationProgressPanel" Grid.Row="3" Margin="0,10,0,0"
               Visibility="Collapsed">
-            <ProgressBar x:Name="OperationProgressBar" Height="6"
-                         IsIndeterminate="True"/>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <TextBlock x:Name="OperationProgressText" Grid.Row="0"
+                       Foreground="{StaticResource SubTextBrush}" Margin="2,0,0,6"/>
+            <ProgressBar x:Name="OperationProgressBar" Grid.Row="1" Height="6"
+                         Minimum="0" Maximum="100" IsIndeterminate="True"/>
         </Grid>
 
-        <controls:PaginationControl x:Name="Pager" Grid.Row="4" Margin="0,10,0,0"
-                                    PageRequested="Pager_PageRequested"/>
     </Grid>
 </Page>

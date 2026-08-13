@@ -9,6 +9,7 @@ namespace CabinetLock
 
     public sealed class ClassLifecycleService
     {
+        private const int DeleteCommandTimeoutMs = 5_000;
         private static readonly SemaphoreSlim OperationLock = new(1, 1);
         private readonly RootDataService _root = new();
 
@@ -170,51 +171,186 @@ namespace CabinetLock
             ClassLifecyclePlan plan, IProgress<ClassLifecycleProgress>? progress,
             CancellationToken cancellationToken)
         {
-            ClassLifecycleResult cleanup = await CleanupCabinetsAsync(
-                plan, progress, cancellationToken, enqueueRetries: false).ConfigureAwait(false);
-            if (!cleanup.Success) return cleanup;
+            string[] knownDeviceIds = plan.Devices.Select(device => device.DeviceId).ToArray();
+            var details = new List<string>();
+            int deletedStudents = 0;
+            int skippedStudents = 0;
 
-            progress?.Report(new ClassLifecycleProgress(88, "正在清理学生、权限和指纹模板"));
-            HashSet<string> studentIds = plan.Students.Select(user => user.UserId)
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            List<User> remainingUsers = plan.AllUsers.Where(user => !studentIds.Contains(user.UserId))
+            for (int studentIndex = 0; studentIndex < plan.Students.Count; studentIndex++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                User student = plan.Students[studentIndex];
+                string studentLabel = $"{student.Name}（{student.DisplayId}）";
+                int basePercent = plan.Students.Count == 0
+                    ? 0 : studentIndex * 90 / plan.Students.Count;
+
+                string[] assignedDeviceIds = App.CabinetBindingService
+                    .GetRecordedAssignedDeviceIds(student, knownDeviceIds)
+                    .OrderBy(id => id, StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+                bool hasCabinetBindings = assignedDeviceIds.Length > 0;
+                if (hasCabinetBindings)
+                {
+                    progress?.Report(new ClassLifecycleProgress(
+                        basePercent,
+                        $"正在检查学生 {studentLabel} 的柜机（{studentIndex + 1}/{plan.Students.Count}）"));
+                }
+
+                HashSet<string> online = !hasCabinetBindings
+                    ? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                    : App.MeshBridge.GetOnlineDevices()
+                        .Where(device => device.IsOnline && !device.IsRoot)
+                        .Select(device => device.DeviceId)
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                string[] offlineDeviceIds = assignedDeviceIds
+                    .Where(deviceId => !online.Contains(deviceId))
+                    .ToArray();
+                if (offlineDeviceIds.Length > 0)
+                {
+                    skippedStudents++;
+                    details.Add($"{studentLabel}：柜机 {string.Join("、", offlineDeviceIds)} 离线，已跳过");
+                    progress?.Report(new ClassLifecycleProgress(
+                        (studentIndex + 1) * 90 / Math.Max(1, plan.Students.Count),
+                        $"已跳过 {studentLabel}：{offlineDeviceIds.Length} 台柜机离线"));
+                    continue;
+                }
+
+                int[] fingerprintIds = plan.Templates.Where(template => string.Equals(
+                        template.UserId, student.UserId, StringComparison.OrdinalIgnoreCase))
+                    .Select(template => template.FingerprintId)
+                    .Append(student.FingerprintId ?? -1)
+                    .Where(id => id > 0)
+                    .Distinct()
+                    .ToArray();
+                uint currentVersion = hasCabinetBindings
+                    ? CabinetSyncService.GetExpectedPermissionVersion()
+                    : 0;
+                string? remoteFailure = null;
+                foreach (string deviceId in assignedDeviceIds)
+                {
+                    progress?.Report(new ClassLifecycleProgress(
+                        basePercent, $"{studentLabel}：正在删除 {deviceId} 的权限"));
+                    CommandResult permissionDeleted = await App.CommandService
+                        .DeleteUserPermissionAsync(
+                            deviceId, student.UserId, currentVersion, DeleteCommandTimeoutMs)
+                        .ConfigureAwait(false);
+                    if (!permissionDeleted.Success)
+                    {
+                        remoteFailure = $"{deviceId} 权限删除失败：{permissionDeleted.ErrorMessage}";
+                        break;
+                    }
+
+                    foreach (int fingerprintId in fingerprintIds)
+                    {
+                        progress?.Report(new ClassLifecycleProgress(
+                            basePercent, $"{studentLabel}：正在删除 {deviceId} 的指纹 #{fingerprintId}"));
+                        CommandResult fingerprintDeleted = await App.CommandService.SendAsync(
+                            deviceId,
+                            Message.Create(Protocol.CmdDeleteFingerprint, deviceId,
+                                new { fingerprint_id = fingerprintId }),
+                            DeleteCommandTimeoutMs)
+                            .ConfigureAwait(false);
+                        if (!fingerprintDeleted.Success)
+                        {
+                            remoteFailure = $"{deviceId} 指纹 #{fingerprintId} 删除失败：" +
+                                fingerprintDeleted.ErrorMessage;
+                            break;
+                        }
+                    }
+                    if (remoteFailure != null) break;
+                }
+
+                if (remoteFailure != null)
+                {
+                    skippedStudents++;
+                    details.Add($"{studentLabel}：{remoteFailure}，本地学生数据已保留");
+                    progress?.Report(new ClassLifecycleProgress(
+                        (studentIndex + 1) * 90 / Math.Max(1, plan.Students.Count),
+                        $"已跳过 {studentLabel}：柜机未确认删除"));
+                    continue;
+                }
+
+                if (hasCabinetBindings || fingerprintIds.Length > 0)
+                {
+                    progress?.Report(new ClassLifecycleProgress(
+                        basePercent, hasCabinetBindings
+                            ? $"{studentLabel}：柜机已清理，正在删除本地学生数据"
+                            : $"{studentLabel}：正在删除本地学生与指纹数据"));
+                }
+                if (!App.UserService.DeleteUser(student.UserId, enqueueCabinetCleanup: false))
+                {
+                    skippedStudents++;
+                    details.Add($"{studentLabel}：本地学生数据删除失败，已保留");
+                    continue;
+                }
+
+                foreach (int fingerprintId in fingerprintIds)
+                    App.FingerprintTemplateService.DeleteTemplate(fingerprintId);
+                App.CabinetBindingService.RemoveFromAll(student.UserId);
+                if (fingerprintIds.Length > 0)
+                {
+                    try
+                    {
+                        await App.SdStorageService.DeleteTemplateAsync(
+                                student.UserId, DeleteCommandTimeoutMs)
+                            .ConfigureAwait(false);
+                    }
+                    catch { }
+                }
+                deletedStudents++;
+                details.Add($"{studentLabel}：删除完成");
+                int processedCount = studentIndex + 1;
+                if (hasCabinetBindings || fingerprintIds.Length > 0 ||
+                    processedCount % 25 == 0 || processedCount == plan.Students.Count)
+                {
+                    progress?.Report(new ClassLifecycleProgress(
+                        processedCount * 90 / Math.Max(1, plan.Students.Count),
+                        hasCabinetBindings || fingerprintIds.Length > 0
+                            ? $"已删除学生 {studentLabel}（{processedCount}/{plan.Students.Count}）"
+                            : $"正在逐个删除本地学生（{processedCount}/{plan.Students.Count}）"));
+                }
+            }
+
+            bool classDeleted = false;
+            List<User> remainingStudents = App.UserService.GetAllUsers().Where(user =>
+                    string.Equals(user.Role, "student", StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(user.ClassId, plan.ClassInfo.ClassId, StringComparison.OrdinalIgnoreCase))
                 .ToList();
-            foreach (User teacher in remainingUsers.Where(user =>
-                         user.IsResponsibleForClass(plan.ClassInfo.ClassId)))
+            if (remainingStudents.Count == 0)
+            {
+                progress?.Report(new ClassLifecycleProgress(94, "所有学生均已删除，正在删除班级"));
+                if (!DetachTeachersFromClass(plan.ClassInfo.ClassId))
+                    return ClassLifecycleResult.Failed("学生已删除，但教师班级关系保存失败，请重试", details);
+                if (!App.ClassService.Delete(plan.ClassInfo.ClassId))
+                    return ClassLifecycleResult.Failed("学生已删除，但班级记录删除失败，请重试", details);
+                classDeleted = true;
+            }
+
+            progress?.Report(new ClassLifecycleProgress(100, classDeleted
+                ? "学生与班级删除完成"
+                : $"已删除 {deletedStudents} 名学生，跳过 {skippedStudents} 名，班级已保留"));
+            if (classDeleted)
+                return ClassLifecycleResult.Succeeded($"班级删除完成，共删除 {deletedStudents} 名学生");
+            if (deletedStudents > 0)
+                return ClassLifecycleResult.Partial(
+                    $"已删除 {deletedStudents} 名学生，跳过 {skippedStudents} 名；班级已保留",
+                    details);
+            return ClassLifecycleResult.Skipped(
+                $"{skippedStudents} 名学生均未删除，班级已保留", details);
+        }
+
+        private bool DetachTeachersFromClass(string classId)
+        {
+            List<User> users = App.UserService.GetAllUsers();
+            bool changed = false;
+            foreach (User teacher in users.Where(user => user.IsResponsibleForClass(classId)))
             {
                 teacher.SetResponsibleClassIds(teacher.GetResponsibleClassIds().Where(id =>
-                    !string.Equals(id, plan.ClassInfo.ClassId, StringComparison.OrdinalIgnoreCase)));
+                    !string.Equals(id, classId, StringComparison.OrdinalIgnoreCase)));
                 teacher.UpdateTime = DateTime.Now;
+                changed = true;
             }
-            if (!_root.Save("users", remainingUsers))
-                return ClassLifecycleResult.Failed("柜机已清理，但学生数据保存失败，请重试");
-
-            List<UserPermission> permissions = _root.Read<UserPermission>("permissions");
-            permissions.RemoveAll(item => studentIds.Contains(item.UserId));
-            if (!_root.Save("permissions", permissions))
-                return ClassLifecycleResult.Failed("学生已清理，但权限数据保存失败，请重试");
-
-            foreach (FingerprintTemplate template in plan.Templates.Where(item =>
-                         !string.IsNullOrWhiteSpace(item.UserId) && studentIds.Contains(item.UserId)))
-                App.FingerprintTemplateService.DeleteTemplate(template.FingerprintId);
-            foreach (User student in plan.Students)
-            {
-                App.CabinetBindingService.RemoveFromAll(student.UserId);
-                try { await App.SdStorageService.DeleteTemplateAsync(student.UserId).ConfigureAwait(false); }
-                catch { }
-            }
-
-            progress?.Report(new ClassLifecycleProgress(97, "正在删除班级记录"));
-            if (!App.ClassService.Delete(plan.ClassInfo.ClassId))
-                return ClassLifecycleResult.Failed("学生已清理，但班级记录删除失败，请重试");
-
-            foreach (string deviceId in plan.DeviceFingerprints.Keys)
-                App.CabinetSyncQueueService.EnqueueCabinet(
-                    deviceId, "班级删除后最终核对");
-            App.CabinetSyncQueueService.Trigger();
-
-            progress?.Report(new ClassLifecycleProgress(100, "班级及关联学生数据已全部删除"));
-            return ClassLifecycleResult.Succeeded("班级删除完成");
+            return !changed || _root.Save("users", users);
         }
 
         private static async Task<ClassLifecycleResult> CleanupCabinetsAsync(
@@ -243,6 +379,7 @@ namespace CabinetLock
                         App.CabinetSyncQueueService.EnqueueCabinet(
                             deviceId, "班级停用或删除后的柜机清理");
                     queuedDevices.Add(deviceId);
+                    failures.Add($"{deviceId}：柜机离线，未清理权限与指纹");
                     completed += 1 + plan.DeviceFingerprints[deviceId].Count;
                     progress?.Report(new ClassLifecycleProgress(
                         completed * 85 / Math.Max(1, totalSteps),
@@ -288,9 +425,15 @@ namespace CabinetLock
 
             if (enqueueRetries && queuedDevices.Count > 0)
                 App.CabinetSyncQueueService.Trigger();
-            return ClassLifecycleResult.Succeeded(queuedDevices.Count == 0
-                ? "全部柜机已确认清理"
-                : $"{queuedDevices.Count} 台柜机已加入后台清理队列");
+            if (queuedDevices.Count == 0)
+                return ClassLifecycleResult.Succeeded("全部柜机已确认清理");
+
+            if (enqueueRetries)
+                return ClassLifecycleResult.Succeeded(
+                    $"{queuedDevices.Count} 台柜机未完成，已加入后台清理队列");
+
+            return ClassLifecycleResult.Failed(
+                $"{queuedDevices.Count} 台柜机离线或清理失败", failures);
         }
 
         private sealed record ClassLifecyclePlan(
@@ -307,6 +450,8 @@ namespace CabinetLock
     public sealed class ClassLifecycleResult
     {
         public bool Success { get; init; }
+        public bool WasSkipped { get; init; }
+        public bool IsPartial { get; init; }
         public string Message { get; init; } = "";
         public IReadOnlyList<string> Failures { get; init; } = Array.Empty<string>();
 
@@ -319,6 +464,23 @@ namespace CabinetLock
         public static ClassLifecycleResult Failed(
             string message, IEnumerable<string>? failures = null) => new()
         {
+            Message = message,
+            Failures = failures?.ToArray() ?? Array.Empty<string>()
+        };
+
+        public static ClassLifecycleResult Skipped(
+            string message, IEnumerable<string>? failures = null) => new()
+        {
+            WasSkipped = true,
+            Message = message,
+            Failures = failures?.ToArray() ?? Array.Empty<string>()
+        };
+
+        public static ClassLifecycleResult Partial(
+            string message, IEnumerable<string>? failures = null) => new()
+        {
+            Success = true,
+            IsPartial = true,
             Message = message,
             Failures = failures?.ToArray() ?? Array.Empty<string>()
         };

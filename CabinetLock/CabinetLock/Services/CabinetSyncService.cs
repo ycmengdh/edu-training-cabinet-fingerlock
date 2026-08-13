@@ -623,9 +623,11 @@ namespace CabinetLock
                 new { version, total = rows.Count });
             CommandResult committed = App.CommandService.SendAsync(
                 deviceId, commit, 15_000).GetAwaiter().GetResult();
-            return committed.Success
-                ? committed
-                : StageFailure("提交权限同步", committed);
+            if (!committed.Success)
+                return StageFailure("提交权限同步", committed);
+
+            App.MeshBridge.MarkPermissionSyncConfirmed(deviceId, version, rows.Count);
+            return committed;
         }
 
         private static CommandResult StageFailure(string stage, CommandResult result)

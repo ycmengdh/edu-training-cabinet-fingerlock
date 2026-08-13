@@ -12,12 +12,12 @@ namespace CabinetLock
         public DateTime UpdateTime { get; init; } = DateTime.Now;
 
         public static bool IsValidPin(string? pin) =>
-            pin?.Length == PinLength && pin.All(character => character is >= '1' and <= '4');
+            pin?.Length == PinLength && pin.All(character => character is >= '1' and <= '3');
 
         public static string EncodeForDevice(string pin)
         {
             if (!IsValidPin(pin))
-                throw new ArgumentException("维护密码必须是由按键 1-4 组成的 6 位密码", nameof(pin));
+                throw new ArgumentException("维护密码必须是由按键 1-3 组成的 6 位密码", nameof(pin));
             char[] encoded = pin.ToCharArray();
             for (int index = 0; index < encoded.Length; index++)
                 encoded[index] = (char)(encoded[index] + 1);

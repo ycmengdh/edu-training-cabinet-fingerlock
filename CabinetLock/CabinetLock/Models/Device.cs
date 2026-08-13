@@ -103,6 +103,9 @@ namespace CabinetLock
             : $"{(MaintenanceSource == "remote" ? "远程" : "本地")}维护 · {MaintenanceLockText}";
 
         [JsonIgnore]
+        public string DeviceStateText => MaintenanceActive ? "维护" : "正常";
+
+        [JsonIgnore]
         public string MaintenanceLockText => string.Join("、",
             Enumerable.Range(0, 4)
                 .Where(index => (MaintenanceLockMask & (1 << index)) != 0)
@@ -114,7 +117,7 @@ namespace CabinetLock
             get
             {
                 if (!IsOnline) return "离线";
-                if (RootPermissionVersion == 0 && Status.PermissionVersion == 0) return "-";
+                if (RootPermissionVersion == 0 || Status.PermissionVersion == 0) return "未知";
                 return Status.PermissionVersion == RootPermissionVersion ? "已同步" : "落后";
             }
         }
@@ -172,6 +175,10 @@ namespace CabinetLock
                 return count.ToString();
             }
         }
+
+        [JsonIgnore]
+        public string FingerprintPermissionCountText =>
+            $"{FingerprintSlotHint} / {Status?.PermissionCount ?? 0}";
     }
 
     public class DeviceRuntimeStatus

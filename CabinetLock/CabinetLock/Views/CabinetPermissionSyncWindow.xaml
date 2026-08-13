@@ -38,7 +38,7 @@
                 <StackPanel Grid.Column="1" Orientation="Horizontal">
                     <Button x:Name="RetryFailedButton" Content="重试失败柜机"
                             Style="{StaticResource SecondaryButton}" Click="RetryFailedButton_Click"/>
-                    <Button x:Name="SyncAllButton" Content="重新同步全部在线柜机"
+                    <Button x:Name="SyncAllButton" Content="同步待处理在线柜机"
                             Margin="8,0,0,0" Click="SyncAllButton_Click"/>
                 </StackPanel>
             </Grid>

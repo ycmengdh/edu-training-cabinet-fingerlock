@@ -359,6 +359,41 @@ ON CONFLICT(table_name) DO UPDATE SET version=$v, updated_at=$u;";
             }
         }
 
+        /// <summary>按用户主键原子删除用户及其权限，避免逐人删除时反复重写整张表。</summary>
+        public static bool DeleteUserAndPermissions(string userId)
+        {
+            if (string.IsNullOrWhiteSpace(userId)) return false;
+            lock (Sync)
+            {
+                Initialize();
+                using SqliteConnection connection = Open();
+                using SqliteTransaction transaction = connection.BeginTransaction();
+
+                int removedUsers;
+                using (SqliteCommand deletePermissions = connection.CreateCommand())
+                {
+                    deletePermissions.Transaction = transaction;
+                    deletePermissions.CommandText =
+                        "DELETE FROM permissions WHERE user_id=$id COLLATE NOCASE";
+                    deletePermissions.Parameters.AddWithValue("$id", userId.Trim());
+                    deletePermissions.ExecuteNonQuery();
+                }
+                using (SqliteCommand deleteUser = connection.CreateCommand())
+                {
+                    deleteUser.Transaction = transaction;
+                    deleteUser.CommandText = "DELETE FROM users WHERE user_id=$id COLLATE NOCASE";
+                    deleteUser.Parameters.AddWithValue("$id", userId.Trim());
+                    removedUsers = deleteUser.ExecuteNonQuery();
+                }
+
+                if (removedUsers == 0) return false;
+                BumpTableVersion(connection, transaction, "users");
+                BumpTableVersion(connection, transaction, "permissions");
+                transaction.Commit();
+                return true;
+            }
+        }
+
         /// <summary>
         /// Atomically replaces every table carried by a daily business snapshot.
         /// No caller can observe a mixture of old and new table generations.
@@ -794,8 +829,13 @@ ON CONFLICT(fingerprint_id) DO UPDATE SET
         }
 
         private static void BumpTableVersion(SqliteConnection conn, string table)
+            => BumpTableVersion(conn, null, table);
+
+        private static void BumpTableVersion(
+            SqliteConnection conn, SqliteTransaction? transaction, string table)
         {
             using var command = conn.CreateCommand();
+            command.Transaction = transaction;
             command.CommandText = @"
 INSERT INTO table_meta(table_name,version,updated_at) VALUES($table,1,$time)
 ON CONFLICT(table_name) DO UPDATE SET version=version+1,updated_at=$time;";

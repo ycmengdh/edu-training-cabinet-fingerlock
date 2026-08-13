@@ -32,6 +32,28 @@ namespace CabinetLock
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
         }
 
+        /// <summary>
+        /// 删除业务只清理有明确绑定记录的柜机；旧数据完全没有绑定记录时视为未分配。
+        /// </summary>
+        public HashSet<string> GetRecordedAssignedDeviceIds(
+            User user, IEnumerable<string> knownDeviceIds)
+        {
+            ArgumentNullException.ThrowIfNull(user);
+            string[] known = NormalizeIds(knownDeviceIds);
+            if (!IsStudent(user)) return known.ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (user.CabinetAssignments != null || user.AssignedDeviceIds != null)
+            {
+                return ResolveAssignments(user, known, Array.Empty<CabinetUserBinding>())
+                    .Select(item => item.DeviceId)
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            }
+
+            IReadOnlyList<CabinetUserBinding> legacy = ReadLegacy();
+            return known.Where(deviceId => IsExplicitlyLegacyAssigned(
+                    legacy, deviceId, user.UserId))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        }
+
         public IReadOnlyList<CabinetAssignment> GetAssignments(
             User user, IEnumerable<string> knownDeviceIds)
         {
@@ -396,9 +418,13 @@ namespace CabinetLock
         {
             if (string.IsNullOrWhiteSpace(userId)) return false;
             List<CabinetUserBinding> legacy = ReadLegacy();
-            legacy.RemoveAll(item => string.Equals(
+            int removedLegacy = legacy.RemoveAll(item => string.Equals(
                 item.UserId, userId, StringComparison.OrdinalIgnoreCase));
-            SaveLegacy(legacy);
+            if (removedLegacy > 0) SaveLegacy(legacy);
+
+            // 删除用户后的清理是常见路径。先按主键确认，避免为一个已不存在的
+            // 用户反复读取和反序列化整张 users 表。
+            if (BusinessDatabase.ReadUser(userId) == null) return true;
 
             List<User> users = _root.Read<User>("users");
             User? user = users.FirstOrDefault(item => string.Equals(
@@ -578,6 +604,15 @@ namespace CabinetLock
             if (exact != null) return exact.Assigned;
             CabinetUserBinding? fallback = items.FirstOrDefault(item => Same(item, AllDevices, userId));
             return fallback?.Assigned ?? true;
+        }
+
+        private static bool IsExplicitlyLegacyAssigned(
+            IReadOnlyList<CabinetUserBinding> items, string deviceId, string userId)
+        {
+            CabinetUserBinding? exact = items.FirstOrDefault(item => Same(item, deviceId, userId));
+            if (exact != null) return exact.Assigned;
+            CabinetUserBinding? fallback = items.FirstOrDefault(item => Same(item, AllDevices, userId));
+            return fallback?.Assigned == true;
         }
 
         private static bool IsStudent(User user) => string.Equals(

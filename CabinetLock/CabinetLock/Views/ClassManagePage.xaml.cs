@@ -200,7 +200,7 @@ namespace CabinetLock
             string message = selected.Count == 1
                 ? $"确认删除班级「{selected[0].Name}」及其 {studentCount} 名学生？"
                 : $"确认批量删除 {selected.Count} 个班级及其共 {studentCount} 名学生？";
-            message += "\n系统将先逐柜撤销权限并删除指纹，全部确认后才删除业务数据。";
+            message += "\n系统会逐个学生先删除柜机权限与指纹，再删除本地学生数据；柜机离线或删除失败的学生会跳过。全部学生删除后才删除班级。";
             if (MessageBox.Show(message, "确认删除", MessageBoxButton.YesNo,
                     MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
             ShowLifecycleWindow(selected, ClassLifecycleAction.Delete);

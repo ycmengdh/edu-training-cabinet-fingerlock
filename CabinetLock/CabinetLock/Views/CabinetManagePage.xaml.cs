@@ -10,7 +10,6 @@ namespace CabinetLock
         private System.Windows.Threading.DispatcherTimer? _refreshTimer;
         private List<Device> _allCabinets = new();
         private readonly ObservableCollection<Device> _visibleCabinets = new();
-        private readonly ListPager _pager = new(20);
         private readonly HashSet<string> _metadataQueried =
             new(StringComparer.OrdinalIgnoreCase);
         private CancellationTokenSource? _metadataQueryCts;
@@ -157,9 +156,10 @@ namespace CabinetLock
 
         private void SelectAllMaintenanceCheckBox_Click(object sender, RoutedEventArgs e)
         {
-            bool selected = SelectAllMaintenanceCheckBox.IsChecked == true;
-            foreach (Device device in _visibleCabinets.Where(device => device.IsOnline))
-                device.IsSelected = selected;
+            Device[] selectable = _visibleCabinets.ToArray();
+            bool selectAll = selectable.Any(device => !device.IsSelected);
+            foreach (Device device in selectable)
+                device.IsSelected = selectAll;
             CabinetDataGrid.Items.Refresh();
             UpdateMaintenanceSelectionState();
         }
@@ -219,7 +219,6 @@ namespace CabinetLock
             target.MaintenanceActive = source.MaintenanceActive;
             target.MaintenanceLockMask = source.MaintenanceLockMask;
             target.MaintenanceSource = source.MaintenanceSource;
-            if (!target.IsOnline) target.IsSelected = false;
         }
 
         private void StartMissingMetadataQueries()
@@ -289,7 +288,6 @@ namespace CabinetLock
 
         private void CabinetFilter_Changed(object sender, RoutedEventArgs e)
         {
-            _pager.Reset();
             ApplyFilter();
         }
 
@@ -298,7 +296,9 @@ namespace CabinetLock
             if (CabinetDataGrid == null) return;
 
             string keyword = CabinetSearchBox?.Text?.Trim() ?? "";
-            string status = (CabinetStatusFilter?.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "all";
+            string onlineStatus = SelectedFilterTag(OnlineStatusFilter);
+            string permissionSync = SelectedFilterTag(PermissionSyncFilter);
+            string maintenanceStatus = SelectedFilterTag(MaintenanceStatusFilter);
             var visible = _allCabinets.Where(device =>
             {
                 bool keywordMatched = string.IsNullOrWhiteSpace(keyword) ||
@@ -306,20 +306,29 @@ namespace CabinetLock
                     device.DeviceNumber.Contains(keyword, StringComparison.OrdinalIgnoreCase) ||
                     device.MeshMac.Contains(keyword, StringComparison.OrdinalIgnoreCase) ||
                     device.DeviceId.Contains(keyword, StringComparison.OrdinalIgnoreCase);
-                bool statusMatched = status switch
+                bool onlineMatched = onlineStatus switch
                 {
                     "online" => device.IsOnline,
                     "offline" => !device.IsOnline,
-                    "lagging" => device.IsOnline && device.PermissionSyncText == "落后",
-                    "attention" => device.NeedsAttention,
                     _ => true
                 };
-                return keywordMatched && statusMatched;
+                bool permissionMatched = permissionSync switch
+                {
+                    "synced" => device.PermissionSyncText == "已同步",
+                    "lagging" => device.IsOnline && device.PermissionSyncText == "落后",
+                    "unknown" => device.IsOnline && device.PermissionSyncText == "未知",
+                    _ => true
+                };
+                bool maintenanceMatched = maintenanceStatus switch
+                {
+                    "normal" => !device.MaintenanceActive,
+                    "maintenance" => device.MaintenanceActive,
+                    _ => true
+                };
+                return keywordMatched && onlineMatched && permissionMatched && maintenanceMatched;
             }).ToList();
 
-            IReadOnlyList<Device> page = _pager.Slice(visible);
-            UpdateVisibleCabinets(page);
-            _pager.BindChrome(Pager, "台柜子");
+            UpdateVisibleCabinets(visible);
             VisibleCountText.Text = $"{visible.Count} 台";
             EmptyStatePanel.Visibility = visible.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             EmptyStateText.Text = _allCabinets.Count == 0 ? "尚未发现柜子" : "没有符合条件的柜子";
@@ -329,22 +338,28 @@ namespace CabinetLock
         private void UpdateMaintenanceSelectionState()
         {
             if (SelectAllMaintenanceCheckBox == null) return;
-            Device[] pageOnline = _visibleCabinets.Where(device => device.IsOnline).ToArray();
-            int pageSelected = pageOnline.Count(device => device.IsSelected);
-            SelectAllMaintenanceCheckBox.IsChecked = pageOnline.Length == 0 || pageSelected == 0
+            int visibleSelected = _visibleCabinets.Count(device => device.IsSelected);
+            SelectAllMaintenanceCheckBox.IsChecked = _visibleCabinets.Count == 0 || visibleSelected == 0
                 ? false
-                : pageSelected == pageOnline.Length ? true : null;
+                : visibleSelected == _visibleCabinets.Count ? true : null;
 
-            int selectedCount = _allCabinets.Count(device => device.IsOnline && device.IsSelected);
-            MaintenanceModeButton.Content = selectedCount == 0
-                ? "维护模式" : $"维护模式 ({selectedCount})";
+            int selectedCount = _allCabinets.Count(device => device.IsSelected);
+            int selectedOnlineCount = _allCabinets.Count(device => device.IsSelected && device.IsOnline);
+            MaintenanceModeButton.Content = selectedOnlineCount == 0
+                ? "维护模式" : $"维护模式 ({selectedOnlineCount})";
+            DeleteSelectedCabinetsButton.Visibility = selectedCount > 0
+                ? Visibility.Visible : Visibility.Collapsed;
+            DeleteSelectedCabinetsText.Text = $"删除选中 ({selectedCount})";
         }
 
-        private void UpdateVisibleCabinets(IReadOnlyList<Device> page)
+        private static string SelectedFilterTag(ComboBox? filter) =>
+            (filter?.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "all";
+
+        private void UpdateVisibleCabinets(IReadOnlyList<Device> visible)
         {
-            for (int index = 0; index < page.Count; index++)
+            for (int index = 0; index < visible.Count; index++)
             {
-                Device desired = page[index];
+                Device desired = visible[index];
                 if (index < _visibleCabinets.Count &&
                     ReferenceEquals(_visibleCabinets[index], desired)) continue;
 
@@ -355,16 +370,10 @@ namespace CabinetLock
                     _visibleCabinets.Insert(index, desired);
             }
 
-            while (_visibleCabinets.Count > page.Count)
+            while (_visibleCabinets.Count > visible.Count)
                 _visibleCabinets.RemoveAt(_visibleCabinets.Count - 1);
 
             CabinetDataGrid.Items.Refresh();
-        }
-
-        private void Pager_PageRequested(object sender, Controls.PaginationRequestedEventArgs e)
-        {
-            _pager.ApplyRequest(e);
-            ApplyFilter();
         }
 
         private async void RefreshButton_Click(object sender, RoutedEventArgs e) =>
@@ -444,16 +453,35 @@ namespace CabinetLock
             }
         }
 
+        private async void DeleteSelectedCabinetsButton_Click(object sender, RoutedEventArgs e) =>
+            await DeleteCabinetsAsync(_allCabinets.Where(device => device.IsSelected).ToArray());
+
         private async void DeleteDeviceButton_Click(object sender, RoutedEventArgs e)
         {
             if (sender is not Button { Tag: Device device }) return;
+            await DeleteCabinetsAsync(new[] { device });
+        }
 
-            IReadOnlyList<User> assignedStudents;
-            SetBusy(true, $"正在检查 {device.DisplayIdentity} 的学生绑定");
+        private async Task DeleteCabinetsAsync(IReadOnlyList<Device> targets)
+        {
+            if (targets.Count == 0) return;
+
+            var assignments = new Dictionary<Device, IReadOnlyList<User>>();
+            SetBusy(true, targets.Count == 1
+                ? $"正在检查 {targets[0].DisplayIdentity} 的学生绑定"
+                : $"正在检查 {targets.Count} 台柜子的学生绑定");
             try
             {
-                assignedStudents = await Task.Run(() =>
-                    App.CabinetBindingService.GetAssignedStudents(device.DeviceId));
+                for (int index = 0; index < targets.Count; index++)
+                {
+                    Device device = targets[index];
+                    UpdateOperationProgress(
+                        $"正在检查学生绑定：{device.DisplayIdentity}（{index + 1}/{targets.Count}）",
+                        index, targets.Count);
+                    assignments[device] = await Task.Run(() =>
+                        App.CabinetBindingService.GetAssignedStudents(device.DeviceId));
+                }
+                UpdateOperationProgress("学生绑定检查完成，等待确认", targets.Count, targets.Count);
             }
             catch (Exception ex)
             {
@@ -465,42 +493,89 @@ namespace CabinetLock
                 SetBusy(false);
             }
 
-            if (assignedStudents.Count > 0)
+            int assignedStudentCount = assignments.Sum(pair => pair.Value.Count);
+            string confirmMessage;
+            if (targets.Count == 1)
             {
-                string studentList = string.Join("\n", assignedStudents.Select((student, index) =>
+                Device device = targets[0];
+                IReadOnlyList<User> assignedStudents = assignments[device];
+                string bindingNote = assignedStudents.Count == 0
+                    ? ""
+                    : "\n\n已绑定以下学生，删除后将同时解除绑定：\n" +
+                      string.Join("\n", assignedStudents.Select((student, index) =>
                     $"{index + 1}. {student.Name}（学号：{student.DisplayId}）"));
-                string message =
-                    $"柜子「{device.DisplayIdentity}」已绑定以下 {assignedStudents.Count} 名学生：\n\n" +
-                    $"{studentList}\n\n删除柜子会同时解除以上学生与该柜子的绑定。确认继续删除？";
-                if (MessageBox.Show(message, "删除柜子", MessageBoxButton.YesNo,
-                        MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes)
-                    return;
+                confirmMessage = $"确认删除柜子「{device.DisplayIdentity}」？{bindingNote}";
             }
+            else
+            {
+                string bindingNote = assignedStudentCount == 0
+                    ? ""
+                    : $"\n其中 {assignments.Count(pair => pair.Value.Count > 0)} 台柜子共绑定 " +
+                      $"{assignedStudentCount} 名学生，删除后将同时解除绑定。";
+                confirmMessage = $"确认批量删除选中的 {targets.Count} 台柜子？{bindingNote}";
+            }
+            if (MessageBox.Show(confirmMessage, "删除柜子", MessageBoxButton.YesNo,
+                    MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes)
+                return;
 
-            SetBusy(true, $"正在删除 {device.DisplayIdentity}");
+            SetBusy(true, targets.Count == 1
+                ? $"正在删除 {targets[0].DisplayIdentity}"
+                : $"正在删除 {targets.Count} 台柜子");
+            int successCount = 0;
+            int removedStudentCount = 0;
+            var failures = new List<string>();
             try
             {
-                (bool saved, int affectedStudents, string error) result = await Task.Run(() =>
+                for (int index = 0; index < targets.Count; index++)
                 {
-                    bool saved = App.DeviceService.DeleteDevice(
-                        device, out int affectedStudents, out string error);
-                    return (saved, affectedStudents, error);
-                });
-                if (!result.saved)
-                {
-                    AppToast.Error(string.IsNullOrWhiteSpace(result.error)
-                        ? "柜机删除失败" : result.error);
-                    return;
+                    Device device = targets[index];
+                    UpdateOperationProgress(
+                        $"正在删除并解绑：{device.DisplayIdentity}（{index + 1}/{targets.Count}）",
+                        index, targets.Count);
+                    try
+                    {
+                        (bool saved, int affectedStudents, string error) result = await Task.Run(() =>
+                        {
+                            bool saved = App.DeviceService.DeleteDevice(
+                                device, out int affectedStudents, out string error);
+                            return (saved, affectedStudents, error);
+                        });
+                        if (!result.saved)
+                        {
+                            failures.Add($"{device.DisplayIdentity}：" +
+                                (string.IsNullOrWhiteSpace(result.error) ? "删除失败" : result.error));
+                            continue;
+                        }
+                        device.IsSelected = false;
+                        successCount++;
+                        removedStudentCount += result.affectedStudents;
+                    }
+                    catch (Exception ex)
+                    {
+                        failures.Add($"{device.DisplayIdentity}：{ex.Message}");
+                    }
+                    UpdateOperationProgress(
+                        $"已处理 {index + 1}/{targets.Count} 台柜子",
+                        index + 1, targets.Count);
                 }
 
-                AppToast.Success(result.affectedStudents > 0
-                    ? $"柜机已删除，并解除 {result.affectedStudents} 名学生的绑定"
-                    : "柜机已删除");
+                UpdateOperationProgress("删除处理完成，正在刷新柜子列表", targets.Count, targets.Count);
                 await LoadCabinetsAsync(quiet: true);
-            }
-            catch (Exception ex)
-            {
-                AppToast.Error($"柜机删除失败：{ex.Message}");
+                if (failures.Count == 0)
+                {
+                    string resultMessage = removedStudentCount > 0
+                        ? $"已删除 {successCount} 台柜子，并解除 {removedStudentCount} 名学生的绑定"
+                        : $"已删除 {successCount} 台柜子";
+                    PageStatusText.Text = resultMessage;
+                    AppToast.Success(resultMessage);
+                }
+                else
+                {
+                    PageStatusText.Text = $"删除完成：成功 {successCount} 台，失败 {failures.Count} 台";
+                    AppToast.Warning($"已删除 {successCount} 台，{failures.Count} 台失败");
+                    MessageBox.Show(string.Join("\n", failures), "部分柜子删除失败",
+                        MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
             }
             finally
             {
@@ -644,11 +719,31 @@ namespace CabinetLock
             FirmwareUpgradeButton.IsEnabled = !busy;
             MaintenancePasswordButton.IsEnabled = !busy;
             MaintenanceModeButton.IsEnabled = !busy;
+            DeleteSelectedCabinetsButton.IsEnabled = !busy;
             CabinetDataGrid.IsEnabled = !busy;
             OperationProgressPanel.Visibility = busy
                 ? Visibility.Visible
                 : Visibility.Collapsed;
-            if (!string.IsNullOrWhiteSpace(status)) PageStatusText.Text = status;
+            if (!string.IsNullOrWhiteSpace(status))
+            {
+                PageStatusText.Text = status;
+                OperationProgressText.Text = status;
+            }
+            if (busy)
+            {
+                OperationProgressBar.IsIndeterminate = true;
+                OperationProgressBar.Value = 0;
+            }
+        }
+
+        private void UpdateOperationProgress(string status, int completed, int total)
+        {
+            PageStatusText.Text = status;
+            OperationProgressText.Text = status;
+            OperationProgressBar.IsIndeterminate = false;
+            OperationProgressBar.Value = total <= 0
+                ? 0
+                : Math.Clamp(completed * 100d / total, 0d, 100d);
         }
     }
 }

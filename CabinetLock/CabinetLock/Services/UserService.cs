@@ -233,11 +233,10 @@ namespace CabinetLock
             return saved;
         }
 
-        public bool DeleteUser(string userId)
+        public bool DeleteUser(string userId, bool enqueueCabinetCleanup = true)
         {
             if (string.IsNullOrWhiteSpace(userId)) return false;
-            var users = _root.Read<User>("users");
-            var existing = users.FirstOrDefault(u => u.UserId == userId);
+            User? existing = GetUser(userId);
             if (existing == null) return false;
             if (SystemAdministratorPolicy.IsReserved(existing)) return false;
 
@@ -245,26 +244,26 @@ namespace CabinetLock
             Scope.EnsureCanModify(existing);
 
             string[] affectedDevices = Array.Empty<string>();
-            try
+            if (enqueueCabinetCleanup)
             {
-                string[] known = App.DeviceService.GetAllDevices()
-                    .Where(device => !DeviceService.IsTrueRoot(device))
-                    .Select(device => device.DeviceId).ToArray();
-                affectedDevices = App.CabinetBindingService
-                    .GetAssignedDeviceIds(existing, known).ToArray();
+                try
+                {
+                    string[] known = App.DeviceService.GetAllDevices()
+                        .Where(device => !DeviceService.IsTrueRoot(device))
+                        .Select(device => device.DeviceId).ToArray();
+                    affectedDevices = App.CabinetBindingService
+                        .GetAssignedDeviceIds(existing, known).ToArray();
+                }
+                catch { }
             }
-            catch { }
 
-            int removed = users.RemoveAll(u => u.UserId == userId);
-            if (removed == 0) return false;
-            if (!_root.Save("users", users)) return false;
-
-            var permissions = _root.Read<UserPermission>("permissions");
-            permissions.RemoveAll(p => p.UserId == userId);
-            _root.Save("permissions", permissions);
-            App.CabinetSyncQueueService.EnqueueUserDeletion(
-                userId, affectedDevices, "删除用户并清理柜机数据");
-            App.CabinetSyncQueueService.Trigger();
+            if (!BusinessDatabase.DeleteUserAndPermissions(userId)) return false;
+            if (enqueueCabinetCleanup)
+            {
+                App.CabinetSyncQueueService.EnqueueUserDeletion(
+                    userId, affectedDevices, "删除用户并清理柜机数据");
+                App.CabinetSyncQueueService.Trigger();
+            }
             return true;
         }
 

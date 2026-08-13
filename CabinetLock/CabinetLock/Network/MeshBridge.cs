@@ -242,6 +242,49 @@ namespace CabinetLock
             }
         }
 
+        /// <summary>
+        /// 权限事务收到柜机提交确认后，立即更新运行时快照。
+        /// 后续 STATUS_RESPONSE 仍会用设备真实上报覆盖该值。
+        /// </summary>
+        public void MarkPermissionSyncConfirmed(
+            string deviceId, uint permissionVersion, int permissionCount)
+        {
+            if (string.IsNullOrWhiteSpace(deviceId) || permissionVersion == 0) return;
+            lock (_devicesLock)
+            {
+                DeviceClient? device = _devices.Values.FirstOrDefault(candidate =>
+                    string.Equals(candidate.DeviceId, deviceId,
+                        StringComparison.OrdinalIgnoreCase) ||
+                    (!string.IsNullOrWhiteSpace(candidate.MeshMac) &&
+                     string.Equals(candidate.MeshMac, deviceId,
+                         StringComparison.OrdinalIgnoreCase)));
+                if (device == null) return;
+
+                device.Status ??= new DeviceRuntimeStatus();
+                device.Status.PermissionVersion = permissionVersion;
+                device.Status.PermissionCount = Math.Max(0, permissionCount);
+                device.LastStatusAt = DateTime.Now;
+            }
+        }
+
+        public void MarkPermissionVersionConfirmed(string deviceId, uint permissionVersion)
+        {
+            if (string.IsNullOrWhiteSpace(deviceId) || permissionVersion == 0) return;
+            lock (_devicesLock)
+            {
+                DeviceClient? device = _devices.Values.FirstOrDefault(candidate =>
+                    string.Equals(candidate.DeviceId, deviceId,
+                        StringComparison.OrdinalIgnoreCase) ||
+                    (!string.IsNullOrWhiteSpace(candidate.MeshMac) &&
+                     string.Equals(candidate.MeshMac, deviceId,
+                         StringComparison.OrdinalIgnoreCase)));
+                if (device == null) return;
+                device.Status ??= new DeviceRuntimeStatus();
+                device.Status.PermissionVersion = permissionVersion;
+                device.LastStatusAt = DateTime.Now;
+            }
+        }
+
         public void ForgetDevice(string deviceId, string? meshMac = null)
         {
             if (string.IsNullOrWhiteSpace(deviceId) && string.IsNullOrWhiteSpace(meshMac)) return;
