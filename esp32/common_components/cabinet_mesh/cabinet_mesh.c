@@ -29,6 +29,7 @@
 #define CAB_MESH_RESCAN_INTERVAL_SECONDS 3U
 #define CAB_MESH_SEARCH_WATCHDOG_INTERVAL_MS 5000U
 #define CAB_MESH_SEARCH_START_JITTER_MS 3000U
+#define CAB_MESH_PARENT_RESELECT_SETTLE_MS 250U
 
 static const uint8_t CAB_MESH_BROADCAST_DESTINATION[6] = {
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
@@ -124,8 +125,17 @@ static void state_task(void *argument) {
             if (connected) {
                 next_parent_search = now + watchdog_interval;
             }
-            if (requested ||
-                (!connected && tick_reached(now, next_parent_search))) {
+            if (requested) {
+                ESP_LOGW(TAG, "Root downlink timed out; reselecting parent");
+                esp_err_t error = esp_mesh_lite_disconnect();
+                if (error != ESP_OK) {
+                    ESP_LOGW(TAG, "parent disconnect failed: %s",
+                             esp_err_to_name(error));
+                }
+                vTaskDelay(pdMS_TO_TICKS(CAB_MESH_PARENT_RESELECT_SETTLE_MS));
+                esp_mesh_lite_connect();
+                next_parent_search = xTaskGetTickCount() + watchdog_interval;
+            } else if (!connected && tick_reached(now, next_parent_search)) {
                 esp_mesh_lite_connect();
                 next_parent_search = now + watchdog_interval;
             }

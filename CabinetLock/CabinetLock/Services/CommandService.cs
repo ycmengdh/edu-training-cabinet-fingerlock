@@ -399,7 +399,8 @@ namespace CabinetLock
         private async Task<FingerprintSlotPage?> GetFingerprintSlotPageAsync(
             string deviceId, int page, int pageSize, int timeoutMs)
         {
-            var message = Message.Create(Protocol.CmdFingerprintListRequest, deviceId,
+            var message = Message.Create(
+                Protocol.CmdFingerprintListRequest, deviceId,
                 new { page, page_size = pageSize });
             var completion = new TaskCompletionSource<FingerprintSlotPage>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
@@ -443,12 +444,25 @@ namespace CabinetLock
             App.MessageHandler.OnFingerprintListResponse += Handler;
             try
             {
-                CommandResult accepted = await SendAsync(deviceId, message, timeoutMs)
-                    .ConfigureAwait(false);
-                if (!accepted.Success) return null;
-                Task completed = await Task.WhenAny(
-                    completion.Task, Task.Delay(timeoutMs)).ConfigureAwait(false);
-                return completed == completion.Task ? await completion.Task : null;
+                DateTime deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+                int[] waits = { 1500, 3000, timeoutMs };
+                foreach (int requestedWait in waits)
+                {
+                    App.MeshBridge.SendToDevice(deviceId, message);
+
+                    int remainingMs = (int)Math.Max(0,
+                        (deadline - DateTime.UtcNow).TotalMilliseconds);
+                    if (remainingMs == 0) break;
+                    Task completed = await Task.WhenAny(
+                        completion.Task,
+                        Task.Delay(Math.Min(requestedWait, remainingMs)))
+                        .ConfigureAwait(false);
+                    if (completed == completion.Task)
+                        return await completion.Task.ConfigureAwait(false);
+                }
+                return completion.Task.IsCompleted
+                    ? await completion.Task.ConfigureAwait(false)
+                    : null;
             }
             finally
             {

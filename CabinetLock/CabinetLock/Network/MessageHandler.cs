@@ -137,6 +137,9 @@ namespace CabinetLock
                 case CommandType.AddFingerprintResult:
                     HandleFingerprintEnrollmentResult(device, msg);
                     break;
+                case CommandType.RestoreFingerprintResult:
+                    HandleRestoreFingerprintResult(msg);
+                    break;
                 case CommandType.EnrollProgress:
                     HandleEnrollProgress(device, msg);
                     break;
@@ -493,6 +496,20 @@ namespace CabinetLock
                 ExpectedCrc32 = data?["expected_crc32"]?.Value<uint>() ?? 0,
                 ActualCrc32 = data?["actual_crc32"]?.Value<uint>() ?? 0
             });
+        }
+
+        private void HandleRestoreFingerprintResult(Message msg)
+        {
+            string result = TryGetStringData(msg, "result") ?? "success";
+            if (string.Equals(result, "success", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(result, "ok", StringComparison.OrdinalIgnoreCase))
+            {
+                OnAckReceived?.Invoke(msg.MsgId, result);
+                return;
+            }
+
+            OnErrorReceived?.Invoke(msg.MsgId, "RESTORE_FAILED",
+                "柜机未能恢复指纹模板");
         }
 
         private void HandleFingerprintListResponse(DeviceClient? device, Message msg)

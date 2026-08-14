@@ -16,29 +16,7 @@ namespace CabinetLock
         {
             InitializeComponent();
             CabinetGrid.ItemsSource = _rows;
-            Loaded += async (_, _) => await LoadAndSyncAsync();
-        }
-
-        private async Task LoadAndSyncAsync()
-        {
-            if (!await LoadRowsAsync() || _cts.IsCancellationRequested) return;
-
-            List<CabinetPermissionSyncRow> pendingRows = _rows
-                .Where(row => row.NeedsSync)
-                .ToList();
-            if (pendingRows.Count == 0)
-            {
-                int online = _rows.Count(row => row.IsOnline);
-                PageStatusText.Text = online == 0
-                    ? "没有在线柜机可同步"
-                    : $"全部 {online} 台在线柜机指纹与权限已同步";
-                ProgressText.Text = online == 0
-                    ? "等待柜机上线后可重新读取"
-                    : "指纹内容、权限版本和权限条数均已确认";
-                return;
-            }
-
-            await SyncRowsAsync(pendingRows);
+            Loaded += async (_, _) => await LoadRowsAsync();
         }
 
         private async Task<bool> LoadRowsAsync()
@@ -67,7 +45,7 @@ namespace CabinetLock
                 }
 
                 SyncProgressBar.Value = 0;
-                ProgressText.Text = "";
+                ProgressText.Text = "选择单台同步，或手动同步全部在线柜机";
                 loaded = true;
             }
             catch (OperationCanceledException)
@@ -95,54 +73,62 @@ namespace CabinetLock
             int success = 0;
             try
             {
-                foreach (CabinetPermissionSyncRow row in rows)
-                {
-                    _cts.Token.ThrowIfCancellationRequested();
-                    row.BeginSync();
-                    UpdateProgress(completed, rows.Count, $"正在同步 {row.DisplayName}");
-
-                    CabinetDataSyncResult result;
-                    try
+                await App.CommunicationCoordinator.RunExclusiveAsync(
+                    CommunicationOperationKind.CabinetSync,
+                    rows.Count == 1
+                        ? $"手动同步柜机 {rows[0].DeviceId}"
+                        : $"手动批量同步 {rows.Count} 台柜机",
+                    rows.Count == 1 ? rows[0].DeviceId : "",
+                    async token =>
                     {
-                        var progress = new Progress<string>(stage =>
+                        foreach (CabinetPermissionSyncRow row in rows)
                         {
-                            row.UpdateStage(stage);
+                            token.ThrowIfCancellationRequested();
+                            row.BeginSync();
                             UpdateProgress(completed, rows.Count,
-                                $"{row.DisplayName}：{stage}");
-                        });
-                        result = await App.CabinetSyncService.SyncCabinetDataAsync(
-                            row.DeviceId, progress, _cts.Token);
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        result = CabinetDataSyncResult.Failed(row.DeviceId, ex.Message);
-                    }
+                                $"正在同步 {row.DisplayName}");
 
-                    if (result.Success)
-                    {
-                        row.MarkSuccess(result);
-                        success++;
-                    }
-                    else
-                    {
-                        row.MarkFailed(result);
-                    }
+                            CabinetDataSyncResult result = await SyncRowOnceAsync(
+                                row, completed, rows.Count, token);
+                            if (!result.Success && ShouldRetry(result))
+                            {
+                                row.UpdateStage("链路未确认，稳定后自动重试一次");
+                                UpdateProgress(completed, rows.Count,
+                                    $"{row.DisplayName}：正在重试本柜机");
+                                await Task.Delay(1000, token);
+                                result = await SyncRowOnceAsync(
+                                    row, completed, rows.Count, token);
+                            }
 
-                    completed++;
-                    UpdateProgress(completed, rows.Count, $"已完成 {row.DisplayName}");
-                    UpdateSummary();
-                }
+                            if (result.Success)
+                            {
+                                row.MarkSuccess(result);
+                                success++;
+                            }
+                            else
+                            {
+                                row.MarkFailed(result);
+                            }
+
+                            completed++;
+                            UpdateProgress(completed, rows.Count,
+                                $"已完成 {row.DisplayName}");
+                            UpdateSummary();
+                            await Task.Delay(result.Success ? 250 : 750, token);
+                        }
+                    },
+                    _cts.Token);
 
                 int failed = completed - success;
                 int online = _rows.Count(row => row.IsOnline);
                 int synced = _rows.Count(row => row.Status == "已同步");
                 PageStatusText.Text = failed == 0
                     ? $"全部 {synced}/{online} 台在线柜机指纹与权限已同步"
-                    : $"已完成 {completed} 台，成功 {success} 台，失败 {failed} 台";
+                    : $"已完成 {completed} 台，成功 {success} 台，未完成 {failed} 台";
                 if (failed == 0)
                     AppToast.Success("全部在线柜机指纹与权限已同步");
                 else
-                    AppToast.Warning($"{failed} 台柜机同步未完成，可在窗口内重试");
+                    AppToast.Warning($"{failed} 台柜机未完成，可在窗口内重试");
             }
             catch (OperationCanceledException)
             {
@@ -154,6 +140,40 @@ namespace CabinetLock
             }
         }
 
+        private async Task<CabinetDataSyncResult> SyncRowOnceAsync(
+            CabinetPermissionSyncRow row, int completed, int total,
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                var progress = new Progress<string>(stage =>
+                {
+                    row.UpdateStage(stage);
+                    UpdateProgress(completed, total,
+                        $"{row.DisplayName}：{stage}");
+                });
+                return await App.CabinetSyncService.SyncCabinetDataAsync(
+                    row.DeviceId, progress, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return CabinetDataSyncResult.Failed(row.DeviceId, ex.Message);
+            }
+        }
+
+        private static bool ShouldRetry(CabinetDataSyncResult result)
+        {
+            if (result.Success) return false;
+            string detail = result.PermissionResult.ErrorMessage + " " +
+                string.Join(" ", result.FingerprintFailures);
+            return detail.Contains("超时", StringComparison.OrdinalIgnoreCase) ||
+                detail.Contains("未确认", StringComparison.OrdinalIgnoreCase) ||
+                detail.Contains("无法读取", StringComparison.OrdinalIgnoreCase) ||
+                detail.Contains("未读取到", StringComparison.OrdinalIgnoreCase) ||
+                detail.Contains("链路", StringComparison.OrdinalIgnoreCase) ||
+                detail.Contains("路由", StringComparison.OrdinalIgnoreCase);
+        }
+
         private async void SyncOneButton_Click(object sender, RoutedEventArgs e)
         {
             if ((sender as Button)?.Tag is CabinetPermissionSyncRow { IsOnline: true } row)
@@ -163,7 +183,7 @@ namespace CabinetLock
         private async void RetryFailedButton_Click(object sender, RoutedEventArgs e)
         {
             List<CabinetPermissionSyncRow> failedRows = _rows
-                .Where(row => row.IsOnline && row.Status == "失败")
+                .Where(row => row.IsOnline && row.Status == "未完成")
                 .ToList();
             if (failedRows.Count == 0)
             {
@@ -174,8 +194,23 @@ namespace CabinetLock
             await SyncRowsAsync(failedRows);
         }
 
-        private async void SyncAllButton_Click(object sender, RoutedEventArgs e) =>
-            await SyncRowsAsync(_rows.Where(row => row.IsOnline).ToList());
+        private async void SyncAllButton_Click(object sender, RoutedEventArgs e)
+        {
+            List<CabinetPermissionSyncRow> rows = _rows
+                .Where(row => row.IsOnline).ToList();
+            if (rows.Count == 0)
+            {
+                AppToast.Info("当前没有在线柜机");
+                return;
+            }
+            if (MessageBox.Show(
+                    $"确认逐台校验并同步全部 {rows.Count} 台在线柜机？\n\n" +
+                    "同步期间通讯通道将专用于本次操作，预计需要数分钟。",
+                    "同步全部在线柜机", MessageBoxButton.YesNo,
+                    MessageBoxImage.Question, MessageBoxResult.No) != MessageBoxResult.Yes)
+                return;
+            await SyncRowsAsync(rows);
+        }
 
         private async void RefreshButton_Click(object sender, RoutedEventArgs e) =>
             await LoadRowsAsync();
@@ -190,11 +225,11 @@ namespace CabinetLock
         {
             int online = _rows.Count(row => row.IsOnline);
             int success = _rows.Count(row => row.Status == "已同步");
-            int failed = _rows.Count(row => row.Status == "失败");
+            int failed = _rows.Count(row => row.Status == "未完成");
             CabinetCountText.Text = $"柜机 {_rows.Count}";
             OnlineCountText.Text = $"在线 {online}";
             SuccessCountText.Text = $"成功 {success}";
-            FailedCountText.Text = $"失败 {failed}";
+            FailedCountText.Text = $"未完成 {failed}";
             RetryFailedButton.IsEnabled = !_busy && failed > 0;
             if (!keepStatus && !_busy)
                 PageStatusText.Text = $"在线 {online} 台，完整已同步 {success} 台";
@@ -204,7 +239,7 @@ namespace CabinetLock
         {
             _busy = busy;
             RefreshButton.IsEnabled = !busy;
-            RetryFailedButton.IsEnabled = !busy && _rows.Any(row => row.Status == "失败");
+            RetryFailedButton.IsEnabled = !busy && _rows.Any(row => row.Status == "未完成");
             SyncAllButton.IsEnabled = !busy && _rows.Any(row => row.IsOnline);
             CabinetGrid.IsEnabled = !busy;
             CloseButton.IsEnabled = !busy;
@@ -339,7 +374,7 @@ namespace CabinetLock
             }
             IsIndeterminate = false;
             Progress = 100;
-            Status = "失败";
+            Status = "未完成";
             OnPropertyChanged(nameof(NeedsSync));
             Detail = result.FormatForDisplay().Replace(Environment.NewLine, "；");
         }

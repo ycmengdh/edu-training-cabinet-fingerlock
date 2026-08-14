@@ -13,7 +13,9 @@ namespace CabinetLock
         private const int InterRowDelayMs = 40;
 
         /// <summary>柜与柜之间的间隔（毫秒）。</summary>
-        private const int InterNodeDelayMs = 100;
+        private const int InterNodeDelayMs = 250;
+        private const int PermissionTransactionAttempts = 2;
+        private const int PermissionRetryDelayMs = 800;
         private const int MaxProbeConcurrency = 1;
         private readonly ConcurrentDictionary<string, FingerprintVerification>
             _fingerprintVerifications = new(StringComparer.OrdinalIgnoreCase);
@@ -843,6 +845,21 @@ namespace CabinetLock
         private static CommandResult SyncOneCabinet(
             string deviceId, List<Dictionary<string, object>> rows, uint version)
         {
+            CommandResult result = CommandResult.Failed("尚未执行权限同步");
+            for (int attempt = 1; attempt <= PermissionTransactionAttempts; attempt++)
+            {
+                result = SyncOneCabinetOnce(deviceId, rows, version);
+                if (result.Success || !IsTransientTransactionFailure(result) ||
+                    attempt == PermissionTransactionAttempts)
+                    return result;
+                Thread.Sleep(PermissionRetryDelayMs * attempt);
+            }
+            return result;
+        }
+
+        private static CommandResult SyncOneCabinetOnce(
+            string deviceId, List<Dictionary<string, object>> rows, uint version)
+        {
             CommandResult begin = App.CommandService.SendAsync(
                 deviceId,
                 Message.Create(Protocol.CmdBeginPermissionSync, deviceId,
@@ -879,6 +896,18 @@ namespace CabinetLock
 
             App.MeshBridge.MarkPermissionSyncConfirmed(deviceId, version, rows.Count);
             return committed;
+        }
+
+        private static bool IsTransientTransactionFailure(CommandResult result)
+        {
+            if (result.Success) return false;
+            if (CommandService.IsTransientError(result.ErrorCode)) return true;
+            string message = result.ErrorMessage ?? "";
+            return message.Contains("超时", StringComparison.OrdinalIgnoreCase) ||
+                message.Contains("未确认", StringComparison.OrdinalIgnoreCase) ||
+                message.Contains("链路", StringComparison.OrdinalIgnoreCase) ||
+                message.Contains("路由", StringComparison.OrdinalIgnoreCase) ||
+                message.Contains("发送失败", StringComparison.OrdinalIgnoreCase);
         }
 
         private static CommandResult StageFailure(string stage, CommandResult result)

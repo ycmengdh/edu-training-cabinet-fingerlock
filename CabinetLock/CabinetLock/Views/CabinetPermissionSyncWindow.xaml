@@ -32,11 +32,11 @@
                     <TextBlock x:Name="OnlineCountText" Text="在线 0" Margin="0,0,18,0"/>
                     <TextBlock x:Name="SuccessCountText" Text="成功 0"
                                Foreground="{StaticResource SuccessBrush}" Margin="0,0,18,0"/>
-                    <TextBlock x:Name="FailedCountText" Text="失败 0"
-                               Foreground="{StaticResource DangerBrush}"/>
+                    <TextBlock x:Name="FailedCountText" Text="未完成 0"
+                               Foreground="{StaticResource WarningBrush}"/>
                 </StackPanel>
                 <StackPanel Grid.Column="1" Orientation="Horizontal">
-                    <Button x:Name="RetryFailedButton" Content="重试失败柜机"
+                    <Button x:Name="RetryFailedButton" Content="重试未完成柜机"
                             Style="{StaticResource SecondaryButton}" Click="RetryFailedButton_Click"/>
                     <Button x:Name="SyncAllButton" Content="重新同步全部在线柜机"
                             Margin="8,0,0,0" Click="SyncAllButton_Click"/>

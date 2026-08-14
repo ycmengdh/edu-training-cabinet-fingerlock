@@ -186,6 +186,31 @@ public class MessageHandlerTests
     }
 
     [Fact]
+    public void RestoreFingerprintResult_CompletesCommandWithoutWaitingForTrailingAck()
+    {
+        var handler = new MessageHandler();
+        string ackMessageId = "";
+        string ackResult = "";
+        handler.OnAckReceived += (messageId, result) =>
+        {
+            ackMessageId = messageId;
+            ackResult = result;
+        };
+
+        handler.HandleMessage(new DeviceClient { DeviceId = "CABINET_001" },
+            new Message
+            {
+                MsgId = "restore-1",
+                Cmd = Protocol.CmdRestoreFingerprintResult,
+                DeviceId = "CABINET_001",
+                Data = JObject.FromObject(new { result = "success" })
+            });
+
+        Assert.Equal("restore-1", ackMessageId);
+        Assert.Equal("success", ackResult);
+    }
+
+    [Fact]
     public void ConfigResponse_MergesNonEmptyReportedVersions()
     {
         var handler = new MessageHandler();
