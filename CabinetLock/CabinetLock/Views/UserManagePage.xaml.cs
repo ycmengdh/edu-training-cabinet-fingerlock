@@ -53,12 +53,16 @@ namespace CabinetLock
             try
             {
                 PagedResult<User> result = await Task.Run(() =>
-                    App.UserService.QueryVisibleUsersPage(
+                {
+                    PagedResult<User> page = App.UserService.QueryVisibleUsersPage(
                         _pager.PageIndex,
                         _pager.PageSize,
                         role: _classId == null ? role : "student",
                         keyword: keyword,
-                        classId: _classId));
+                        classId: _classId);
+                    App.FingerprintTemplateService.ApplyFingerprintSummaries(page.Items);
+                    return page;
+                });
                 _filteredUsers = result.Items.ToList();
                 _pager.SetTotalCount(result.TotalCount);
                 ApplyUserPage();
@@ -185,11 +189,11 @@ namespace CabinetLock
                 }));
             }
 
-            menu.Items.Add(CreateRowMenuItem("\uE777", "恢复指纹到柜子", () =>
+            menu.Items.Add(CreateRowMenuItem("\uE928", "管理指纹", () =>
             {
                 SelectUserForRowAction(user);
-                RestoreFingerprintButton_Click(button, new RoutedEventArgs());
-            }, user.FingerprintId.HasValue));
+                AssignFingerprintButton_Click(button, new RoutedEventArgs());
+            }));
 
             bool isCurrentUser = string.Equals(
                 user.UserId, App.CurrentUser?.UserId, StringComparison.OrdinalIgnoreCase);
@@ -374,6 +378,10 @@ namespace CabinetLock
             {
                 foreach (User selected in targets)
                 {
+                    int[] fingerprintIds = App.FingerprintTemplateService
+                        .GetTemplatesForUser(selected.UserId)
+                        .Where(item => item.FingerprintId > 0)
+                        .Select(item => item.FingerprintId).Distinct().ToArray();
                     bool deleted;
                     try
                     {
@@ -392,8 +400,11 @@ namespace CabinetLock
                     }
 
                     success++;
-                    if (selected.FingerprintId.HasValue)
-                        App.CabinetSyncService.DeleteFingerprintFromAll(selected.FingerprintId.Value);
+                    foreach (int fingerprintId in fingerprintIds)
+                    {
+                        App.CabinetSyncService.DeleteFingerprintFromAll(fingerprintId);
+                        App.FingerprintTemplateService.DeleteTemplate(fingerprintId);
+                    }
                     App.CabinetBindingService.RemoveFromAll(selected.UserId);
                     try
                     {
@@ -639,108 +650,20 @@ namespace CabinetLock
 
         // ===== 场景入口：指纹 / 权限 / 导入 =====
 
-        /// <summary>打开统一录入窗口录入指纹，成功后写入用户并同步权限。</summary>
+        /// <summary>打开用户指纹管理窗口。</summary>
         private async void AssignFingerprintButton_Click(object sender, RoutedEventArgs e)
         {
             if (UserDataGrid.SelectedItem is not User selected)
             {
-                MessageBox.Show("请先选择要分配指纹的用户", "提示");
+                MessageBox.Show("请先选择要管理指纹的用户", "提示");
                 return;
             }
-            var window = new EnrollFingerprintWindow(presetDeviceId: null, presetUserId: selected.UserId)
+            var window = new UserFingerprintManageWindow(selected)
             {
                 Owner = OwnerWindow
             };
             window.ShowDialog();
-
-            if (window.EnrolledFingerprintId <= 0)
-                return;
-
-            selected.FingerprintId = window.EnrolledFingerprintId;
-            await LoadUsersAsync();
-        }
-
-        private async void RestoreFingerprintButton_Click(object sender, RoutedEventArgs e)
-        {
-            if (UserDataGrid.SelectedItem is not User selected)
-            {
-                MessageBox.Show("请先选择用户", "提示");
-                return;
-            }
-            if (!selected.FingerprintId.HasValue)
-            {
-                MessageBox.Show("该用户尚未录入指纹，无法恢复", "提示",
-                    MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
-
-            var cabinets = App.MeshBridge.GetOnlineDevices()
-                .Where(d => !d.IsRoot)
-                .Select(d => new Device
-                {
-                    DeviceId = d.DeviceId,
-                    DeviceName = string.IsNullOrWhiteSpace(d.DeviceName) ? d.DeviceId : d.DeviceName,
-                    IsOnline = true,
-                    MeshMac = d.MeshMac,
-                    IpAddress = ""
-                }).ToList();
-            string? targetDevice = UserManageDialogs.SelectCabinet(OwnerWindow, cabinets, "选择恢复目标柜子");
-            if (string.IsNullOrEmpty(targetDevice))
-            {
-                MessageBox.Show("当前没有可执行恢复的在线柜子", "无法恢复",
-                    MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
-
-            SetBusy(true, "正在从根节点下载模板并写入目标柜子");
-            try
-            {
-                byte[]? template = await App.SdStorageService.DownloadTemplateAsync(selected.UserId, 1);
-                if (template == null || template.Length == 0)
-                {
-                    MessageBox.Show("根节点没有该用户的指纹模板备份", "无法恢复",
-                        MessageBoxButton.OK, MessageBoxImage.Warning);
-                    return;
-                }
-
-                CommandResult restore = await App.CommandService.RestoreFingerprintAsync(
-                    targetDevice, selected.UserId, selected.FingerprintId.Value, template);
-                if (!restore.Success)
-                {
-                    MessageBox.Show(
-                        string.IsNullOrWhiteSpace(restore.ErrorMessage)
-                            ? "柜子未能写入指纹模板"
-                            : restore.ErrorMessage,
-                        "恢复失败", MessageBoxButton.OK, MessageBoxImage.Error);
-                    return;
-                }
-
-                User? restoredUser = App.UserService.GetUser(selected.UserId);
-                IReadOnlyList<UserCabinetSyncResult> synced = restoredUser == null
-                    ? Array.Empty<UserCabinetSyncResult>()
-                    : await App.CabinetSyncService.VerifyAndSyncUserAsync(
-                        restoredUser, new[] { targetDevice });
-                bool syncOk = synced.Count == 1 && synced[0].Success;
-                if (!syncOk && restoredUser != null)
-                {
-                    App.CabinetSyncQueueService.EnqueueUser(
-                        restoredUser.UserId, new[] { targetDevice }, "恢复指纹后补同步权限");
-                    App.CabinetSyncQueueService.Trigger();
-                }
-                MessageBox.Show(
-                    "模板已写入目标柜子。\n" +
-                    (syncOk ? "目标柜权限同步完成。" : "目标柜权限同步未确认，已保留待同步任务。"),
-                    "恢复完成", MessageBoxButton.OK,
-                    syncOk ? MessageBoxImage.Information : MessageBoxImage.Warning);
-            }
-            catch (RootDataUnavailableException ex)
-            {
-                MessageBox.Show(ex.Message, "根节点不可用", MessageBoxButton.OK, MessageBoxImage.Error);
-            }
-            finally
-            {
-                SetBusy(false);
-            }
+            if (window.Changed) await LoadUsersAsync(resetPage: false);
         }
 
         private async void BatchAssignPermButton_Click(object sender, RoutedEventArgs e)

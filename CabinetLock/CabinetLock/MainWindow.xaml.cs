@@ -18,6 +18,10 @@ namespace CabinetLock
 
         /// <summary>状态栏刷新定时器</summary>
         private DispatcherTimer? _statusTimer;
+        private bool _pendingSyncStatusLoading;
+        private DateTime _lastPendingSyncStatusRefreshUtc = DateTime.MinValue;
+        private int _statusTimerTicks;
+        private int _statusRefreshQueued;
 
         private bool _loggingOut;
 
@@ -60,6 +64,7 @@ namespace CabinetLock
 
             // 刷新底部状态栏
             UpdateStatusBar();
+            _ = RefreshPendingSyncStatusAsync(force: true);
             UpdateThemeToggle();
             ThemeManager.ThemeChanged += OnThemeChanged;
 
@@ -75,7 +80,13 @@ namespace CabinetLock
             CurrentUserRole.Text = App.CurrentUser?.Role ?? "";
         }
 
-        private void StatusTimer_Tick(object? sender, EventArgs e) => UpdateStatusBar();
+        private void StatusTimer_Tick(object? sender, EventArgs e)
+        {
+            CurrentTimeText.Text = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+            if (++_statusTimerTicks % 5 != 0) return;
+            UpdateStatusBar();
+            _ = RefreshPendingSyncStatusAsync();
+        }
 
         private void ThemeToggleButton_Click(object sender, RoutedEventArgs e) => ThemeManager.Toggle();
 
@@ -385,13 +396,23 @@ namespace CabinetLock
         /// <summary>设备连接/断开回调（来自后台线程，需切到 UI 线程刷新）</summary>
         private void OnDeviceConnectionChanged(DeviceClient device)
         {
-            Dispatcher.BeginInvoke(new Action(UpdateStatusBar));
+            QueueStatusBarRefresh();
         }
 
         /// <summary>Mesh 链路连接状态变化回调（来自后台线程）</summary>
         private void OnMeshConnectionChanged(bool connected)
         {
-            Dispatcher.BeginInvoke(new Action(UpdateStatusBar));
+            QueueStatusBarRefresh();
+        }
+
+        private void QueueStatusBarRefresh()
+        {
+            if (Interlocked.Exchange(ref _statusRefreshQueued, 1) != 0) return;
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                Interlocked.Exchange(ref _statusRefreshQueued, 0);
+                if (IsLoaded) UpdateStatusBar();
+            }), DispatcherPriority.Background);
         }
 
         /// <summary>刷新底部状态栏：Mesh 链路状态、SD 数据状态、在线设备数、传输类型、当前时间</summary>
@@ -435,7 +456,6 @@ namespace CabinetLock
 
                 // SD 数据状态：就绪 / 降级模式 / 未连接
                 UpdateRootDataStatus();
-                UpdatePendingSyncStatus();
             }
             catch
             {
@@ -447,33 +467,50 @@ namespace CabinetLock
             CurrentTimeText.Text = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
         }
 
-        private void UpdatePendingSyncStatus()
+        private async Task RefreshPendingSyncStatusAsync(bool force = false)
         {
+            if (_pendingSyncStatusLoading) return;
+            DateTime now = DateTime.UtcNow;
+            if (!force && now - _lastPendingSyncStatusRefreshUtc < TimeSpan.FromSeconds(5))
+                return;
+
+            _pendingSyncStatusLoading = true;
+            _lastPendingSyncStatusRefreshUtc = now;
             try
             {
-                int open = App.CabinetSyncQueueService.CountOpen();
-                int failed = App.CabinetSyncQueueService.CountFailed();
-                PendingSyncText.Text = open == 0 ? "待同步 0" : $"待同步 {open}";
-                PendingSyncDot.Fill = FindResource(
-                    open == 0 ? "SuccessBrush" : failed > 0 ? "DangerBrush" : "WarningBrush")
-                    as System.Windows.Media.Brush;
-                PendingSyncButton.ToolTip = open == 0
-                    ? "无待同步任务。用户可多指纹入库，并按柜选择下发一枚或多枚。"
-                    : failed > 0
-                        ? $"有 {open} 项待处理（含 {failed} 项失败），点击查看并重试"
-                        : $"有 {open} 项待下发到柜机，点击查看队列";
+                (int open, int failed) = await Task.Run(
+                    App.CabinetSyncQueueService.CountOpenAndFailed);
+                if (!IsLoaded) return;
+                ApplyPendingSyncStatus(open, failed);
             }
             catch
             {
-                PendingSyncText.Text = "待同步 —";
+                if (IsLoaded) PendingSyncText.Text = "待同步 —";
             }
+            finally
+            {
+                _pendingSyncStatusLoading = false;
+            }
+        }
+
+        private void ApplyPendingSyncStatus(int open, int failed)
+        {
+            PendingSyncText.Text = open == 0 ? "待同步 0" : $"待同步 {open}";
+            PendingSyncDot.Fill = FindResource(
+                open == 0 ? "SuccessBrush" : failed > 0 ? "DangerBrush" : "WarningBrush")
+                as System.Windows.Media.Brush;
+            PendingSyncButton.ToolTip = open == 0
+                ? "无待同步任务。用户可多指纹入库，并按柜选择下发一枚或多枚。"
+                : failed > 0
+                    ? $"有 {open} 项待处理（含 {failed} 项失败），点击查看并重试"
+                    : $"有 {open} 项待下发到柜机，点击查看队列";
         }
 
         private void PendingSyncButton_Click(object sender, RoutedEventArgs e)
         {
             var window = new SyncQueueWindow { Owner = this };
             window.ShowDialog();
-            UpdatePendingSyncStatus();
+            _ = RefreshPendingSyncStatusAsync(force: true);
         }
 
         /// <summary>

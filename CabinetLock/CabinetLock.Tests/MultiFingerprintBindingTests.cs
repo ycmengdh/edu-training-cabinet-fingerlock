@@ -24,6 +24,63 @@ public sealed class MultiFingerprintBindingTests
         Assert.Empty(selected);
     }
 
+    [Theory]
+    [InlineData("admin")]
+    [InlineData("teacher")]
+    public void GlobalStaff_WithEmptyAssignment_UsesDefaultFingerprint(string role)
+    {
+        var user = new User
+        {
+            UserId = "STAFF_01",
+            Role = role,
+            CabinetAssignments = new List<CabinetAssignment>
+            {
+                new() { DeviceId = "CAB_01", FingerprintIds = new List<int>() }
+            }
+        };
+        FingerprintTemplate[] templates =
+        {
+            new()
+            {
+                FingerprintId = 11,
+                UserId = user.UserId,
+                Enabled = true,
+                FingerIndex = 1
+            }
+        };
+
+        IReadOnlyList<int> selected = new CabinetBindingService()
+            .GetSelectedFingerprintIds(user, "CAB_01", templates);
+
+        Assert.Equal(new[] { 11 }, selected);
+        Assert.Equal(new[] { "CAB_01", "CAB_02" },
+            new CabinetBindingService().GetAssignedDeviceIds(
+                user, new[] { "CAB_01", "CAB_02" }).OrderBy(id => id));
+    }
+
+    [Fact]
+    public void Student_WithEmptyAssignment_DoesNotUseDefaultFingerprint()
+    {
+        var user = new User
+        {
+            UserId = "S001",
+            Role = "student",
+            CabinetAssignments = new List<CabinetAssignment>
+            {
+                new() { DeviceId = "CAB_01", FingerprintIds = new List<int>() }
+            }
+        };
+        FingerprintTemplate[] templates =
+        {
+            new() { FingerprintId = 11, UserId = user.UserId, Enabled = true }
+        };
+
+        IReadOnlyList<int> selected = new CabinetBindingService()
+            .GetSelectedFingerprintIds(user, "CAB_01", templates);
+
+        Assert.Empty(selected);
+    }
+
     [Fact]
     public void SetSelectedFingerprints_PersistsMultipleFingerprintsPerCabinet()
     {
@@ -292,6 +349,87 @@ public sealed class MultiFingerprintBindingTests
     }
 
     [Fact]
+    public void GlobalStaffSyncQueue_CoversEveryCabinetAndSkipsUsersWithoutFingerprint()
+    {
+        string originalPath = BusinessDatabase.ActiveDbPath;
+        string tempPath = Path.Combine(Path.GetTempPath(), $"fingerlock-{Guid.NewGuid():N}.db");
+        try
+        {
+            BusinessDatabase.SetActivePath(tempPath);
+            BusinessDatabase.Initialize();
+            BusinessDatabase.ReplaceTable("users", JArray.Parse("""
+            [
+              {"user_id":"A001","name":"管理员","role":"admin","enabled":true},
+              {"user_id":"T001","name":"教师","role":"teacher","enabled":true},
+              {"user_id":"S001","name":"学生","role":"student","enabled":true}
+            ]
+            """), 1);
+            BusinessDatabase.ReplaceTable("devices", JArray.Parse("""
+            [
+              {"device_id":"CAB_01","device_name":"一号柜","is_root":false},
+              {"device_id":"CAB_02","device_name":"二号柜","is_root":false},
+              {"device_id":"ROOT_01","device_name":"根节点","is_root":true}
+            ]
+            """), 1);
+            SaveTemplate(11, 1, "左手拇指", userId: "A001");
+            SaveTemplate(12, 1, "左手拇指", userId: "S001");
+
+            var service = new FingerprintTemplateService(App.UserService);
+
+            Assert.Equal(2, service.EnsureGlobalStaffSyncQueued());
+            CabinetSyncJob[] jobs = new CabinetSyncQueueService().GetAll().ToArray();
+            Assert.Equal(new[] { "CAB_01", "CAB_02" },
+                jobs.Select(job => job.DeviceId).OrderBy(id => id));
+            Assert.All(jobs, job => Assert.Equal("A001", job.UserId));
+            Assert.Equal(0, service.EnsureGlobalStaffSyncQueued());
+        }
+        finally
+        {
+            BusinessDatabase.SetActivePath(originalPath);
+            DeleteDatabaseFiles(tempPath);
+        }
+    }
+
+    [Fact]
+    public void CabinetSnapshot_IncludesGlobalStaffWhenStoredAssignmentIsEmpty()
+    {
+        string originalPath = BusinessDatabase.ActiveDbPath;
+        string tempPath = Path.Combine(Path.GetTempPath(), $"fingerlock-{Guid.NewGuid():N}.db");
+        try
+        {
+            BusinessDatabase.SetActivePath(tempPath);
+            BusinessDatabase.Initialize();
+            BusinessDatabase.ReplaceTable("users", JArray.Parse("""
+            [
+              {
+                "user_id":"A001","name":"管理员","role":"admin","enabled":true,
+                "cabinet_assignments":[{"device_id":"CAB_01","fingerprint_ids":[]}]
+              },
+              {
+                "user_id":"S001","name":"学生","role":"student","enabled":true,
+                "cabinet_assignments":[{"device_id":"CAB_01","fingerprint_ids":[12]}]
+              }
+            ]
+            """), 1);
+            BusinessDatabase.ReplaceTable("devices", JArray.Parse("""
+              [{"device_id":"CAB_01","device_name":"一号柜","is_root":false}]
+            """), 1);
+            SaveTemplate(11, 1, "左手拇指", userId: "A001");
+            SaveTemplate(12, 1, "左手拇指", userId: "S001");
+
+            IReadOnlyDictionary<string, CabinetExpectedSyncState> states =
+                new CabinetSyncService().GetExpectedCabinetSyncStates(new[] { "CAB_01" });
+
+            Assert.Equal(2, states["CAB_01"].ExpectedFingerprintCount);
+        }
+        finally
+        {
+            BusinessDatabase.SetActivePath(originalPath);
+            DeleteDatabaseFiles(tempPath);
+        }
+    }
+
+    [Fact]
     public void FingerprintMetadata_BusinessTableRoundtripPreservesLocalTemplateBytes()
     {
         string originalPath = BusinessDatabase.ActiveDbPath;
@@ -322,13 +460,13 @@ public sealed class MultiFingerprintBindingTests
 
     private static void SaveTemplate(
         int fingerprintId, int fingerIndex, string fingerName,
-        int quality = 0, bool enabled = true)
+        int quality = 0, bool enabled = true, string userId = "S001")
     {
         BusinessDatabase.SaveFpTemplateWithMeta(
-            fingerprintId, "S001", fingerIndex,
+            fingerprintId, userId, fingerIndex,
             Enumerable.Repeat((byte)fingerprintId, 512).ToArray(), "CAB_01");
         FingerprintTemplate meta = BusinessDatabase.ReadFpTemplateMeta(fingerprintId)!;
-        meta.UserName = "测试学生";
+        meta.UserName = userId == "S001" ? "测试学生" : userId;
         meta.FingerName = fingerName;
         meta.Quality = quality;
         meta.Enabled = enabled;

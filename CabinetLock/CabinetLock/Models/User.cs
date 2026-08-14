@@ -84,6 +84,19 @@ namespace CabinetLock
         public bool IsSelected { get; set; }
 
         [JsonIgnore]
+        public int FingerprintCount { get; set; }
+
+        [JsonIgnore]
+        public int? EffectiveFingerprintId { get; set; }
+
+        [JsonIgnore]
+        public string FingerprintSummary => FingerprintCount <= 0
+            ? "未录入"
+            : (EffectiveFingerprintId ?? FingerprintId).HasValue
+                ? $"{FingerprintCount} 枚 · 默认 #{EffectiveFingerprintId ?? FingerprintId}"
+                : $"{FingerprintCount} 枚";
+
+        [JsonIgnore]
         public bool IsSystemAdministrator =>
             string.Equals(UserId, SystemAdministratorPolicy.UserId,
                 StringComparison.OrdinalIgnoreCase);

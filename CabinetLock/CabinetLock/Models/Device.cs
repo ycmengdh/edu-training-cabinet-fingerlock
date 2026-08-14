@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using Newtonsoft.Json;
 
 namespace CabinetLock
@@ -6,8 +7,11 @@ namespace CabinetLock
     /// 设备模型（对应 devices 表）
     /// 描述已注册的 ESP32 指纹锁设备（Mesh 节点）
     /// </summary>
-    public class Device
+    public class Device : INotifyPropertyChanged
     {
+        private int _runtimeDisplayHash;
+        private bool _runtimeDisplayHashInitialized;
+
         /// <summary>设备唯一标识（主键，非自增，如 CABINET_001）</summary>
         [JsonProperty("device_id")]
         public string DeviceId { get; set; } = "";
@@ -85,6 +89,14 @@ namespace CabinetLock
         [JsonIgnore]
         public uint RootPermissionVersion { get; set; }
 
+        /// <summary>按当前业务数据生成的本柜权限/用户指纹记录数。</summary>
+        [JsonIgnore]
+        public int ExpectedFingerprintCount { get; set; } = -1;
+
+        /// <summary>本次程序运行中逐枚核验成功时对应的数据版本。</summary>
+        [JsonIgnore]
+        public uint FingerprintVerificationVersion { get; set; }
+
         [JsonIgnore]
         public bool IsSelected { get; set; }
 
@@ -118,7 +130,42 @@ namespace CabinetLock
             {
                 if (!IsOnline) return "离线";
                 if (RootPermissionVersion == 0 || Status.PermissionVersion == 0) return "未知";
-                return Status.PermissionVersion == RootPermissionVersion ? "已同步" : "落后";
+                if (Status.PermissionVersion != RootPermissionVersion) return "落后";
+                if (ExpectedFingerprintCount >= 0 &&
+                    Status.PermissionCount < ExpectedFingerprintCount) return "不完整";
+                return "已同步";
+            }
+        }
+
+        [JsonIgnore]
+        public string FingerprintSyncText
+        {
+            get
+            {
+                if (!IsOnline) return "离线";
+                if (ExpectedFingerprintCount < 0 || RootPermissionVersion == 0) return "未知";
+                if (Status.FingerprintCount < ExpectedFingerprintCount) return "缺失";
+                return FingerprintVerificationVersion == RootPermissionVersion
+                    ? "已核验" : "待核验";
+            }
+        }
+
+        [JsonIgnore]
+        public string DataSyncText
+        {
+            get
+            {
+                if (!IsOnline) return "离线";
+                if (PermissionSyncText == "落后") return "权限落后";
+                if (PermissionSyncText == "不完整") return "权限不完整";
+                if (PermissionSyncText == "未知") return "未知";
+                return FingerprintSyncText switch
+                {
+                    "已核验" => "已同步",
+                    "缺失" => "指纹缺失",
+                    "待核验" => "待核验",
+                    _ => "未知"
+                };
             }
         }
 
@@ -151,14 +198,15 @@ namespace CabinetLock
             get
             {
                 if (!IsOnline) return "offline";
-                if (PermissionSyncText == "落后") return "lagging";
-                if (PermissionSyncText == "已同步") return "ok";
+                if (DataSyncText == "已同步") return "ok";
+                if (DataSyncText is "权限落后" or "权限不完整" or "指纹缺失")
+                    return "lagging";
                 return "unknown";
             }
         }
 
         [JsonIgnore]
-        public bool NeedsAttention => AttentionKind is "offline" or "lagging";
+        public bool NeedsAttention => AttentionKind != "ok";
 
         [JsonIgnore]
         public string TimeSyncedText => Status.TimeSynced ? "是" : "否";
@@ -179,6 +227,56 @@ namespace CabinetLock
         [JsonIgnore]
         public string FingerprintPermissionCountText =>
             $"{FingerprintSlotHint} / {Status?.PermissionCount ?? 0}";
+
+        public event PropertyChangedEventHandler? PropertyChanged;
+
+        public void NotifyRuntimeDataChanged() =>
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(string.Empty));
+
+        public void CaptureRuntimeDataSnapshot()
+        {
+            _runtimeDisplayHash = ComputeRuntimeDisplayHash();
+            _runtimeDisplayHashInitialized = true;
+        }
+
+        public bool NotifyRuntimeDataChangedIfNeeded()
+        {
+            int current = ComputeRuntimeDisplayHash();
+            if (_runtimeDisplayHashInitialized && current == _runtimeDisplayHash) return false;
+            _runtimeDisplayHash = current;
+            _runtimeDisplayHashInitialized = true;
+            NotifyRuntimeDataChanged();
+            return true;
+        }
+
+        public void NotifySelectionChanged() =>
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsSelected)));
+
+        private int ComputeRuntimeDisplayHash()
+        {
+            var hash = new HashCode();
+            hash.Add(DeviceId, StringComparer.OrdinalIgnoreCase);
+            hash.Add(DeviceName, StringComparer.Ordinal);
+            hash.Add(DeviceNumber, StringComparer.Ordinal);
+            hash.Add(IsOnline);
+            DateTime? displayedLastSeen = LastSeenTime;
+            hash.Add(displayedLastSeen.HasValue
+                ? displayedLastSeen.Value.Ticks / TimeSpan.TicksPerMinute
+                : 0L);
+            hash.Add(MeshMac, StringComparer.OrdinalIgnoreCase);
+            hash.Add(FirmwareVersion, StringComparer.Ordinal);
+            hash.Add(HardwareVersion, StringComparer.Ordinal);
+            hash.Add(Status?.FingerprintCount ?? 0);
+            hash.Add(Status?.PermissionCount ?? 0);
+            hash.Add(Status?.PermissionVersion ?? 0);
+            hash.Add(RootPermissionVersion);
+            hash.Add(ExpectedFingerprintCount);
+            hash.Add(FingerprintVerificationVersion);
+            hash.Add(MaintenanceActive);
+            hash.Add(MaintenanceLockMask);
+            hash.Add(MaintenanceSource, StringComparer.Ordinal);
+            return hash.ToHashCode();
+        }
     }
 
     public class DeviceRuntimeStatus

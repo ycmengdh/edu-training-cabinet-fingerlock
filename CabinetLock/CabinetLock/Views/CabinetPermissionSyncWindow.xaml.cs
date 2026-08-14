@@ -31,10 +31,10 @@ namespace CabinetLock
                 int online = _rows.Count(row => row.IsOnline);
                 PageStatusText.Text = online == 0
                     ? "没有在线柜机可同步"
-                    : $"全部 {online} 台在线柜机权限已同步";
+                    : $"全部 {online} 台在线柜机指纹与权限已同步";
                 ProgressText.Text = online == 0
                     ? "等待柜机上线后可重新读取"
-                    : "权限版本均已一致，无需重复确认";
+                    : "指纹内容、权限版本和权限条数均已确认";
                 return;
             }
 
@@ -54,11 +54,17 @@ namespace CabinetLock
                     .ThenBy(device => device.DeviceName)
                     .ToList();
 
-                uint expectedVersion = await Task.Run(
-                    CabinetSyncService.GetExpectedPermissionVersion, _cts.Token);
+                string[] deviceIds = devices.Select(device => device.DeviceId).ToArray();
+                IReadOnlyDictionary<string, CabinetExpectedSyncState> expectedStates =
+                    await Task.Run(() => App.CabinetSyncService
+                        .GetExpectedCabinetSyncStates(deviceIds), _cts.Token);
                 _rows.Clear();
                 foreach (Device device in devices)
-                    _rows.Add(new CabinetPermissionSyncRow(device, expectedVersion));
+                {
+                    if (expectedStates.TryGetValue(device.DeviceId, out CabinetExpectedSyncState expected))
+                        App.CabinetSyncService.ApplyExpectedSyncState(device, expected);
+                    _rows.Add(new CabinetPermissionSyncRow(device));
+                }
 
                 SyncProgressBar.Value = 0;
                 ProgressText.Text = "";
@@ -84,7 +90,7 @@ namespace CabinetLock
         {
             if (_busy || rows.Count == 0) return;
 
-            SetBusy(true, "正在逐台同步柜机权限");
+            SetBusy(true, "正在逐台校验并同步柜机指纹与权限");
             int completed = 0;
             int success = 0;
             try
@@ -95,28 +101,31 @@ namespace CabinetLock
                     row.BeginSync();
                     UpdateProgress(completed, rows.Count, $"正在同步 {row.DisplayName}");
 
-                    BroadcastCommandResult result;
+                    CabinetDataSyncResult result;
                     try
                     {
-                        result = await Task.Run(
-                            () => App.CabinetSyncService.SyncCabinetPermissions(row.DeviceId),
-                            _cts.Token);
+                        var progress = new Progress<string>(stage =>
+                        {
+                            row.UpdateStage(stage);
+                            UpdateProgress(completed, rows.Count,
+                                $"{row.DisplayName}：{stage}");
+                        });
+                        result = await App.CabinetSyncService.SyncCabinetDataAsync(
+                            row.DeviceId, progress, _cts.Token);
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException)
                     {
-                        result = BroadcastCommandResult.Failed(ex.Message, new[] { row.DeviceId });
+                        result = CabinetDataSyncResult.Failed(row.DeviceId, ex.Message);
                     }
 
                     if (result.Success)
                     {
-                        row.MarkSuccess();
+                        row.MarkSuccess(result);
                         success++;
                     }
                     else
                     {
-                        row.MarkFailed(string.IsNullOrWhiteSpace(result.ErrorMessage)
-                            ? "柜机未确认权限同步"
-                            : result.ErrorMessage);
+                        row.MarkFailed(result);
                     }
 
                     completed++;
@@ -128,12 +137,12 @@ namespace CabinetLock
                 int online = _rows.Count(row => row.IsOnline);
                 int synced = _rows.Count(row => row.Status == "已同步");
                 PageStatusText.Text = failed == 0
-                    ? $"全部 {synced}/{online} 台在线柜机权限已同步"
+                    ? $"全部 {synced}/{online} 台在线柜机指纹与权限已同步"
                     : $"已完成 {completed} 台，成功 {success} 台，失败 {failed} 台";
                 if (failed == 0)
-                    AppToast.Success("全部在线柜机权限已同步");
+                    AppToast.Success("全部在线柜机指纹与权限已同步");
                 else
-                    AppToast.Warning($"{failed} 台柜机权限同步失败，可在窗口内重试");
+                    AppToast.Warning($"{failed} 台柜机同步未完成，可在窗口内重试");
             }
             catch (OperationCanceledException)
             {
@@ -166,7 +175,7 @@ namespace CabinetLock
         }
 
         private async void SyncAllButton_Click(object sender, RoutedEventArgs e) =>
-            await SyncRowsAsync(_rows.Where(row => row.NeedsSync).ToList());
+            await SyncRowsAsync(_rows.Where(row => row.IsOnline).ToList());
 
         private async void RefreshButton_Click(object sender, RoutedEventArgs e) =>
             await LoadRowsAsync();
@@ -188,7 +197,7 @@ namespace CabinetLock
             FailedCountText.Text = $"失败 {failed}";
             RetryFailedButton.IsEnabled = !_busy && failed > 0;
             if (!keepStatus && !_busy)
-                PageStatusText.Text = $"在线 {online} 台，待同步 {_rows.Count(row => row.NeedsSync)} 台";
+                PageStatusText.Text = $"在线 {online} 台，完整已同步 {success} 台";
         }
 
         private void SetBusy(bool busy, string? status = null)
@@ -196,7 +205,7 @@ namespace CabinetLock
             _busy = busy;
             RefreshButton.IsEnabled = !busy;
             RetryFailedButton.IsEnabled = !busy && _rows.Any(row => row.Status == "失败");
-            SyncAllButton.IsEnabled = !busy && _rows.Any(row => row.NeedsSync);
+            SyncAllButton.IsEnabled = !busy && _rows.Any(row => row.IsOnline);
             CabinetGrid.IsEnabled = !busy;
             CloseButton.IsEnabled = !busy;
             if (!string.IsNullOrWhiteSpace(status)) PageStatusText.Text = status;
@@ -219,7 +228,7 @@ namespace CabinetLock
         private string _status;
         private string _detail;
 
-        public CabinetPermissionSyncRow(Device device, uint expectedVersion)
+        public CabinetPermissionSyncRow(Device device, uint? expectedVersion = null)
         {
             DeviceId = device.DeviceId;
             DeviceNumber = device.DeviceNumber;
@@ -227,17 +236,26 @@ namespace CabinetLock
             MeshMac = device.MeshMac;
             IsOnline = device.IsOnline;
             _currentVersion = device.Status.PermissionVersion;
-            ExpectedVersion = expectedVersion;
-            bool alreadySynced = device.IsOnline && device.Status.PermissionVersion != 0 &&
-                expectedVersion != 0 && device.Status.PermissionVersion == expectedVersion;
+            if (expectedVersion.HasValue)
+                device.RootPermissionVersion = expectedVersion.Value;
+            ExpectedVersion = device.RootPermissionVersion;
+            ExpectedCount = device.ExpectedFingerprintCount;
+            _fingerprintCount = device.Status.FingerprintCount;
+            _permissionCount = device.Status.PermissionCount;
+            bool alreadySynced = device.DataSyncText == "已同步";
             _status = !device.IsOnline ? "离线" : alreadySynced ? "已同步" : "待同步";
             _detail = !device.IsOnline
                 ? "等待柜机上线"
                 : alreadySynced
-                    ? "当前权限版本已一致"
-                    : device.Status.PermissionVersion == 0
-                        ? "柜机权限版本未知，等待同步"
-                        : "权限版本不一致，等待同步";
+                    ? "指纹内容、权限版本和权限条数均已确认"
+                    : device.DataSyncText switch
+                    {
+                        "指纹缺失" => "柜机指纹数量不足，需要补写",
+                        "权限落后" => "权限版本不一致，需要同步",
+                        "权限不完整" => "柜机权限记录不完整，需要同步",
+                        "待核验" => "权限一致，指纹内容尚未逐枚核验",
+                        _ => "柜机状态不完整，需要重新校验"
+                    };
             _progress = alreadySynced ? 100 : 0;
         }
 
@@ -247,11 +265,15 @@ namespace CabinetLock
         public string MeshMac { get; }
         public bool IsOnline { get; }
         public uint ExpectedVersion { get; }
+        public int ExpectedCount { get; }
+        private int _fingerprintCount;
+        private int _permissionCount;
         public string OnlineText => IsOnline ? "在线" : "离线";
         public string DisplayName => string.IsNullOrWhiteSpace(DeviceNumber)
             ? DeviceName
             : $"{DeviceNumber} · {DeviceName}";
         public string VersionText => $"{FormatVersion(_currentVersion)} / {FormatVersion(ExpectedVersion)}";
+        public string CountText => $"{_fingerprintCount} / {_permissionCount}";
         public double Progress
         {
             get => _progress;
@@ -287,27 +309,39 @@ namespace CabinetLock
             IsIndeterminate = true;
             Status = "同步中";
             OnPropertyChanged(nameof(NeedsSync));
-            Detail = "正在下发并提交柜机权限";
+            Detail = "正在逐枚校验用户指纹";
         }
 
-        public void MarkSuccess()
+        public void UpdateStage(string stage) => Detail = stage;
+
+        public void MarkSuccess(CabinetDataSyncResult result)
         {
             _currentVersion = ExpectedVersion;
+            _fingerprintCount = result.ConfirmedFingerprintCount;
+            _permissionCount = result.PermissionRecordCount;
             OnPropertyChanged(nameof(VersionText));
+            OnPropertyChanged(nameof(CountText));
             IsIndeterminate = false;
             Progress = 100;
             Status = "已同步";
             OnPropertyChanged(nameof(NeedsSync));
-            Detail = $"权限版本 {FormatVersion(ExpectedVersion)} 已确认";
+            Detail = $"指纹 {result.ConfirmedFingerprintCount} 枚，权限 {result.PermissionRecordCount} 条已确认";
         }
 
-        public void MarkFailed(string error)
+        public void MarkFailed(CabinetDataSyncResult result)
         {
+            if (result.PermissionResult.Success)
+            {
+                _currentVersion = ExpectedVersion;
+                _permissionCount = result.PermissionRecordCount;
+                OnPropertyChanged(nameof(VersionText));
+                OnPropertyChanged(nameof(CountText));
+            }
             IsIndeterminate = false;
             Progress = 100;
             Status = "失败";
             OnPropertyChanged(nameof(NeedsSync));
-            Detail = error;
+            Detail = result.FormatForDisplay().Replace(Environment.NewLine, "；");
         }
 
         public event PropertyChangedEventHandler? PropertyChanged;

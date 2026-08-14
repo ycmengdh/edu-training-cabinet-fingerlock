@@ -52,6 +52,8 @@ namespace CabinetLock
         private SingleInstanceGuard? _singleInstanceGuard;
         private int _exitStarted;
         private int _cabinetBackgroundServicesStarted;
+        private int _devicePersistencePending;
+        private int _devicePersistenceWorkerRunning;
         private static int _exitPromptOpen;
 
         public static bool ExitApproved { get; private set; }
@@ -159,6 +161,7 @@ namespace CabinetLock
         internal void StartCabinetBackgroundServicesOnce()
         {
             if (Interlocked.Exchange(ref _cabinetBackgroundServicesStarted, 1) != 0) return;
+            try { FingerprintTemplateService.EnsureGlobalStaffSyncQueued(); } catch { }
             _ = CabinetSyncQueueService.RunAsync(_shutdownCts.Token);
             CabinetSyncQueueService.Trigger();
             _ = MaintenanceService.SyncOnlineDevicesAsync(_shutdownCts.Token);
@@ -213,12 +216,7 @@ namespace CabinetLock
         {
             if (CabinetBackgroundServicesStarted)
             {
-                _ = Task.Run(() =>
-                {
-                    try { DeviceService.GetAllDevices(); }
-                    catch { }
-                });
-                CabinetSyncQueueService.Trigger();
+                QueueDevicePersistenceRefresh();
             }
         }
 
@@ -252,16 +250,50 @@ namespace CabinetLock
             System.Diagnostics.Debug.WriteLine($"[APP] device registered: {deviceId} {deviceName}");
             if (CabinetBackgroundServicesStarted)
             {
-                _ = Task.Run(() =>
-                {
-                    try { DeviceService.GetAllDevices(); }
-                    catch { }
-                });
-                CabinetSyncQueueService.Trigger();
+                QueueDevicePersistenceRefresh();
                 DeviceClient? registered = MeshBridge.GetOnlineDevices().FirstOrDefault(device =>
                     string.Equals(device.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase));
                 if (registered?.IsRoot != true)
                     _ = MaintenanceService.SyncDeviceAsync(deviceId);
+            }
+        }
+
+        private void QueueDevicePersistenceRefresh()
+        {
+            Interlocked.Exchange(ref _devicePersistencePending, 1);
+            if (Interlocked.CompareExchange(
+                    ref _devicePersistenceWorkerRunning, 1, 0) != 0)
+                return;
+
+            _ = Task.Run(ProcessDevicePersistenceRefreshesAsync);
+        }
+
+        private async Task ProcessDevicePersistenceRefreshesAsync()
+        {
+            try
+            {
+                do
+                {
+                    await Task.Delay(400, _shutdownCts.Token).ConfigureAwait(false);
+                    Interlocked.Exchange(ref _devicePersistencePending, 0);
+                    try { DeviceService.GetAllDevices(); }
+                    catch { }
+                    try { FingerprintTemplateService.EnsureGlobalStaffSyncQueued(); }
+                    catch { }
+                    CabinetSyncQueueService.Trigger();
+                }
+                while (Volatile.Read(ref _devicePersistencePending) != 0 &&
+                       !_shutdownCts.IsCancellationRequested);
+            }
+            catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested)
+            {
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _devicePersistenceWorkerRunning, 0);
+                if (Volatile.Read(ref _devicePersistencePending) != 0 &&
+                    !_shutdownCts.IsCancellationRequested)
+                    QueueDevicePersistenceRefresh();
             }
         }
 
@@ -430,11 +462,7 @@ namespace CabinetLock
         private void OnConfigResponse(string deviceId, string configJson)
         {
             if (!CabinetBackgroundServicesStarted) return;
-            _ = Task.Run(() =>
-            {
-                try { DeviceService.GetAllDevices(); }
-                catch { }
-            });
+            QueueDevicePersistenceRefresh();
         }
     }
 }

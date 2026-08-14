@@ -27,7 +27,8 @@
                 <Button x:Name="FirmwareUpgradeButton" Style="{StaticResource SecondaryButton}"
                         Content="柜机升级" Click="FirmwareUpgradeButton_Click" Margin="0,0,8,0"/>
                 <Button x:Name="ResyncButton" Style="{StaticResource SecondaryButton}"
-                        Content="同步全部柜子" Click="ResyncButton_Click"/>
+                        Content="同步全部柜子" ToolTip="逐柜校验并补写用户指纹，再提交柜门权限"
+                        Click="ResyncButton_Click"/>
                 <Button x:Name="RefreshButton" Style="{StaticResource IconButton}"
                         Content="&#xE72C;" ToolTip="仅更新柜子数据，保留当前筛选、排序和表格布局" Margin="8,0,0,0"
                         Click="RefreshButton_Click"/>
@@ -60,7 +61,7 @@
                 <StackPanel Grid.Column="4" HorizontalAlignment="Center" VerticalAlignment="Center">
                     <TextBlock x:Name="SyncedCabinetText" Text="0" FontSize="20" FontWeight="SemiBold"
                                HorizontalAlignment="Center"/>
-                    <TextBlock Text="权限已同步" Style="{StaticResource LabelText}"/>
+                    <TextBlock Text="完整已同步" Style="{StaticResource LabelText}"/>
                 </StackPanel>
                 <Border Grid.Column="5" Width="1" Height="36" Background="{StaticResource BorderBrush}"/>
                 <StackPanel Grid.Column="6" HorizontalAlignment="Center" VerticalAlignment="Center">
@@ -99,12 +100,12 @@
                             <ComboBoxItem Content="在线" Tag="online"/>
                             <ComboBoxItem Content="离线" Tag="offline"/>
                         </ComboBox>
-                        <ComboBox x:Name="PermissionSyncFilter" Width="112" Height="34" Margin="8,0,0,0"
-                                  SelectionChanged="CabinetFilter_Changed">
-                            <ComboBoxItem Content="全部权限同步" Tag="all" IsSelected="True"/>
-                            <ComboBoxItem Content="已同步" Tag="synced"/>
-                            <ComboBoxItem Content="权限落后" Tag="lagging"/>
-                            <ComboBoxItem Content="未知" Tag="unknown"/>
+                        <ComboBox x:Name="PermissionSyncFilter" Width="124" Height="34" Margin="8,0,0,0"
+                                   SelectionChanged="CabinetFilter_Changed">
+                            <ComboBoxItem Content="全部同步状态" Tag="all" IsSelected="True"/>
+                            <ComboBoxItem Content="完整已同步" Tag="synced"/>
+                            <ComboBoxItem Content="需要同步" Tag="lagging"/>
+                            <ComboBoxItem Content="待核验/未知" Tag="unknown"/>
                         </ComboBox>
                         <ComboBox x:Name="MaintenanceStatusFilter" Width="112" Height="34" Margin="8,0,0,0"
                                   SelectionChanged="CabinetFilter_Changed">
@@ -128,7 +129,13 @@
                 <Grid Grid.Row="1">
                     <DataGrid x:Name="CabinetDataGrid" BorderThickness="0" IsReadOnly="True"
                               SelectionMode="Extended" MouseDoubleClick="CabinetDataGrid_MouseDoubleClick"
-                              KeyDown="CabinetDataGrid_KeyDown" EnableRowVirtualization="True">
+                              KeyDown="CabinetDataGrid_KeyDown"
+                              PreviewMouseWheel="CabinetDataGrid_PreviewMouseWheel"
+                              ScrollViewer.ScrollChanged="CabinetDataGrid_ScrollChanged"
+                              EnableRowVirtualization="True" EnableColumnVirtualization="True"
+                              ScrollViewer.CanContentScroll="True"
+                              VirtualizingPanel.IsVirtualizing="True"
+                              VirtualizingPanel.VirtualizationMode="Recycling">
                         <DataGrid.Resources>
                             <Style TargetType="TextBlock" BasedOn="{StaticResource DataGridTextBlockStyle}"/>
                             <Style TargetType="DataGridRow" BasedOn="{StaticResource {x:Type DataGridRow}}">
@@ -195,28 +202,25 @@
                             <DataGridTextColumn Header="通讯 ID" Binding="{Binding DeviceId}" Width="*" MinWidth="120"
                                                 ElementStyle="{StaticResource DataGridLeftTextBlockStyle}"/>
                             <DataGridTextColumn Header="指纹/权限" Binding="{Binding FingerprintPermissionCountText}" Width="92"
-                                                ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                            <DataGridTemplateColumn Header="权限同步" Width="88">
+                                                 ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
+                            <DataGridTemplateColumn Header="同步状态" Width="100">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
-                                        <TextBlock Text="{Binding PermissionSyncText}" HorizontalAlignment="Center" VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding DataSyncText}" HorizontalAlignment="Center" VerticalAlignment="Center">
                                             <TextBlock.Style>
                                                 <Style TargetType="TextBlock" BasedOn="{StaticResource DataGridTextBlockStyle}">
                                                     <Setter Property="Foreground" Value="{StaticResource SubTextBrush}"/>
                                                     <Style.Triggers>
-                                                        <DataTrigger Binding="{Binding PermissionSyncText}" Value="已同步">
+                                                        <DataTrigger Binding="{Binding DataSyncText}" Value="已同步">
                                                             <Setter Property="Foreground" Value="{StaticResource SuccessBrush}"/>
                                                             <Setter Property="FontWeight" Value="SemiBold"/>
                                                         </DataTrigger>
-                                                        <DataTrigger Binding="{Binding PermissionSyncText}" Value="落后">
+                                                        <DataTrigger Binding="{Binding AttentionKind}" Value="lagging">
                                                             <Setter Property="Foreground" Value="{StaticResource WarningBrush}"/>
                                                             <Setter Property="FontWeight" Value="SemiBold"/>
                                                         </DataTrigger>
-                                                        <DataTrigger Binding="{Binding PermissionSyncText}" Value="离线">
+                                                        <DataTrigger Binding="{Binding DataSyncText}" Value="离线">
                                                             <Setter Property="Foreground" Value="{StaticResource DangerBrush}"/>
-                                                        </DataTrigger>
-                                                        <DataTrigger Binding="{Binding PermissionSyncText}" Value="未知">
-                                                            <Setter Property="Foreground" Value="{StaticResource SubTextBrush}"/>
                                                         </DataTrigger>
                                                     </Style.Triggers>
                                                 </Style>

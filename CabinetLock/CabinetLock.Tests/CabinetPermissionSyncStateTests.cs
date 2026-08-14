@@ -5,22 +5,28 @@ namespace CabinetLock.Tests;
 public class CabinetPermissionSyncStateTests
 {
     [Fact]
-    public void Row_WithMatchingReportedVersion_IsAlreadySynced()
+    public void Row_WithMatchingPermissionVersion_StillNeedsFingerprintVerification()
     {
         var device = new Device
         {
             DeviceId = "CAB_01",
             IsOnline = true,
-            Status = new DeviceRuntimeStatus { PermissionVersion = 42 }
+            ExpectedFingerprintCount = 1,
+            Status = new DeviceRuntimeStatus
+            {
+                PermissionVersion = 42,
+                PermissionCount = 1,
+                FingerprintCount = 1
+            }
         };
 
         var row = new CabinetPermissionSyncRow(device, expectedVersion: 42);
 
-        Assert.Equal("已同步", row.Status);
-        Assert.Equal(100, row.Progress);
-        Assert.False(row.NeedsSync);
-        Assert.False(row.CanSync);
-        Assert.Equal("当前权限版本已一致", row.Detail);
+        Assert.Equal("待同步", row.Status);
+        Assert.Equal(0, row.Progress);
+        Assert.True(row.NeedsSync);
+        Assert.True(row.CanSync);
+        Assert.Contains("核验", row.Detail);
     }
 
     [Theory]
@@ -59,6 +65,33 @@ public class CabinetPermissionSyncStateTests
         Assert.Equal(42u, client.Status.PermissionVersion);
         Assert.Equal(6, client.Status.PermissionCount);
         Assert.NotNull(client.LastStatusAt);
+    }
+
+    [Fact]
+    public void ConfirmedFingerprintSync_UpdatesMeshRuntimeStatusImmediately()
+    {
+        var bridge = new MeshBridge();
+        var client = new DeviceClient
+        {
+            DeviceId = "CAB_01",
+            IsOnline = true,
+            Status = new DeviceRuntimeStatus { FingerprintCount = 1 }
+        };
+        DeviceDictionary(bridge)["CAB_01"] = client;
+
+        bridge.MarkFingerprintSyncConfirmed("CAB_01", fingerprintCount: 6);
+
+        Assert.Equal(6, client.Status.FingerprintCount);
+        Assert.NotNull(client.LastStatusAt);
+    }
+
+    [Fact]
+    public void PermissionVersion_IncludesRolePermissionVersion()
+    {
+        uint before = CabinetSyncService.ComposePermissionVersion(1, 2, 3, 4, 5);
+        uint after = CabinetSyncService.ComposePermissionVersion(1, 2, 3, 6, 5);
+
+        Assert.NotEqual(before, after);
     }
 
     private static Dictionary<string, DeviceClient> DeviceDictionary(MeshBridge bridge)

@@ -262,6 +262,9 @@ namespace CabinetLock
             {
                 App.CabinetSyncQueueService.EnqueueUserDeletion(
                     userId, affectedDevices, "删除用户并清理柜机数据");
+                foreach (string deviceId in affectedDevices)
+                    App.CabinetSyncQueueService.EnqueueCabinet(
+                        deviceId, "删除用户并清理残留指纹槽位");
                 App.CabinetSyncQueueService.Trigger();
             }
             return true;

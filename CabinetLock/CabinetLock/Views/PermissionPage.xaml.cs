@@ -127,7 +127,7 @@ namespace CabinetLock
                 StudentAuthorizationGrid.ItemsSource = null;
                 SelectedUserName.Text = "未选择用户";
                 ApplyRoleBadge(null);
-                SelectedUserFp.Text = "指纹 ID：-";
+                SelectedUserFp.Text = "指纹模板：-";
                 return;
             }
 
@@ -145,6 +145,9 @@ namespace CabinetLock
             // 显示用户信息
             SelectedUserName.Text = user.Name;
             ApplyRoleBadge(user.Role);
+            bool canModifyFingerprint = DataScopeContext.Instance.CanModify(user);
+            ManageFingerprintButton.IsEnabled = canModifyFingerprint;
+            ManageStudentFingerprintButton.IsEnabled = canModifyFingerprint;
             bool isStudent = string.Equals(user.Role, "student", StringComparison.OrdinalIgnoreCase);
             ShowStudentAuthorizationEditor(isStudent);
             if (isStudent)
@@ -154,10 +157,6 @@ namespace CabinetLock
                 return;
             }
 
-            SelectedUserFp.Text = user.FingerprintId.HasValue
-                ? $"指纹ID：{user.FingerprintId.Value}"
-                : "指纹ID：未分配";
-
             // 系统锁（界面 Lock1，内部索引 0）仅 admin 可勾选
             bool isAdmin = user.Role == "admin";
             Lock0CheckBox.IsEnabled = isAdmin;
@@ -165,12 +164,26 @@ namespace CabinetLock
             // 第一层：角色默认权限
             RolePermission rolePerm;
             List<UserPermission> overrides;
+            int fingerprintCount;
+            int? effectiveFingerprintId;
             SetBusy(true, $"正在读取 {user.Name} 的权限");
             try
             {
-                (rolePerm, overrides) = await Task.Run(() => (
-                    App.RolePermissionService.GetRolePermission(user.Role),
-                    App.PermissionService.GetUserPermissions(user.UserId)));
+                (rolePerm, overrides, fingerprintCount, effectiveFingerprintId) = await Task.Run(() =>
+                {
+                    List<FingerprintTemplate> templates = App.FingerprintTemplateService
+                        .GetTemplatesForUser(user.UserId)
+                        .Where(item => item.Enabled && item.FingerprintId > 0)
+                        .GroupBy(item => item.FingerprintId)
+                        .Select(group => group.Last()).ToList();
+                    return (
+                        App.RolePermissionService.GetRolePermission(user.Role),
+                        App.PermissionService.GetUserPermissions(user.UserId),
+                        templates.Count,
+                        App.CabinetBindingService.ResolveDefaultFingerprintId(user, templates));
+                });
+                SelectedUserFp.Text = FormatFingerprintSummary(
+                    user, fingerprintCount, effectiveFingerprintId);
             }
             catch (RootDataUnavailableException ex)
             {
@@ -499,6 +512,30 @@ namespace CabinetLock
             window.ShowDialog();
             _selectedUser = App.UserService.GetUser(_selectedUser.UserId) ?? _selectedUser;
             await LoadUserPermissionsAsync(_selectedUser);
+        }
+
+        private async void ManageFingerprintButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_selectedUser == null) return;
+            var window = new UserFingerprintManageWindow(_selectedUser)
+            {
+                Owner = Window.GetWindow(this)
+            };
+            window.ShowDialog();
+            if (!window.Changed) return;
+            _selectedUser = App.UserService.GetUser(_selectedUser.UserId) ?? _selectedUser;
+            await LoadUserPermissionsAsync(_selectedUser);
+        }
+
+        private static string FormatFingerprintSummary(
+            User user, int count, int? effectiveFingerprintId)
+        {
+            if (count <= 0) return "指纹模板：未录入";
+            return effectiveFingerprintId.HasValue
+                ? user.FingerprintId == effectiveFingerprintId
+                    ? $"指纹模板：{count} 枚 · 默认 #{effectiveFingerprintId.Value}"
+                    : $"指纹模板：{count} 枚 · 自动默认 #{effectiveFingerprintId.Value}"
+                : $"指纹模板：{count} 枚 · 未设置默认";
         }
 
         private void UpdateSelectedPermissionTime(DateTime? updateTime)

@@ -100,7 +100,9 @@ namespace CabinetLock
             List<int> selected = NormalizeFingerprintIds(assignment)
                 .Where(enabledIds.Contains).ToList();
             if (selected.Count > 0) return selected;
-            if (assignment != null) return Array.Empty<int>();
+            // 管理员和教师天然作用于全部柜机。历史空绑定不能覆盖这条规则；
+            // 只有学生的空绑定表示该柜未分配指纹。
+            if (IsStudent(user)) return Array.Empty<int>();
             int? fallback = ResolveDefaultFingerprintId(user, userTemplates);
             return fallback.HasValue ? new[] { fallback.Value } : Array.Empty<int>();
         }

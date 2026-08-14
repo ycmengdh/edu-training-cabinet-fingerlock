@@ -285,6 +285,24 @@ namespace CabinetLock
             }
         }
 
+        public void MarkFingerprintSyncConfirmed(string deviceId, int fingerprintCount)
+        {
+            if (string.IsNullOrWhiteSpace(deviceId)) return;
+            lock (_devicesLock)
+            {
+                DeviceClient? device = _devices.Values.FirstOrDefault(candidate =>
+                    string.Equals(candidate.DeviceId, deviceId,
+                        StringComparison.OrdinalIgnoreCase) ||
+                    (!string.IsNullOrWhiteSpace(candidate.MeshMac) &&
+                     string.Equals(candidate.MeshMac, deviceId,
+                         StringComparison.OrdinalIgnoreCase)));
+                if (device == null) return;
+                device.Status ??= new DeviceRuntimeStatus();
+                device.Status.FingerprintCount = Math.Max(0, fingerprintCount);
+                device.LastStatusAt = DateTime.Now;
+            }
+        }
+
         public void ForgetDevice(string deviceId, string? meshMac = null)
         {
             if (string.IsNullOrWhiteSpace(deviceId) && string.IsNullOrWhiteSpace(meshMac)) return;

@@ -7,14 +7,27 @@ namespace CabinetLock
 {
     public partial class CabinetManagePage : Page
     {
-        private System.Windows.Threading.DispatcherTimer? _refreshTimer;
+        private static readonly TimeSpan ScrollRefreshDelay = TimeSpan.FromMilliseconds(700);
+        private System.Windows.Threading.DispatcherTimer? _deferredApplyTimer;
         private List<Device> _allCabinets = new();
         private readonly ObservableCollection<Device> _visibleCabinets = new();
         private readonly HashSet<string> _metadataQueried =
             new(StringComparer.OrdinalIgnoreCase);
         private CancellationTokenSource? _metadataQueryCts;
         private bool _metadataQueryRunning;
+        private bool _syncStateQueryRunning;
+        private bool _syncStateQueryPending;
         private bool _loading;
+        private bool _missingDeviceReloadPending;
+        private DateTime _lastScrollInteractionUtc = DateTime.MinValue;
+        private List<Device>? _pendingCabinetSnapshot;
+        private IReadOnlyDictionary<string, CabinetExpectedSyncState>? _pendingSyncStates;
+        private readonly Dictionary<string, Device> _pendingLiveUpdates =
+            new(StringComparer.OrdinalIgnoreCase);
+        private readonly object _liveUpdateQueueLock = new();
+        private readonly Dictionary<string, Device> _liveUpdateQueue =
+            new(StringComparer.OrdinalIgnoreCase);
+        private bool _liveUpdateDispatchScheduled;
 
         public CabinetManagePage()
         {
@@ -34,6 +47,8 @@ namespace CabinetLock
         {
             App.MeshBridge.DeviceConnected += OnDevicePresenceChanged;
             App.MeshBridge.DeviceDisconnected += OnDevicePresenceChanged;
+            App.MeshBridge.MessageReceived += OnDeviceMessageReceived;
+            App.CabinetSyncService.SyncStateChanged += OnCabinetSyncStateChanged;
             App.MaintenanceService.StateChanged += OnMaintenanceStateChanged;
             _metadataQueried.Clear();
             _metadataQueryCts?.Cancel();
@@ -41,85 +56,257 @@ namespace CabinetLock
             _metadataQueryCts = new CancellationTokenSource();
             await LoadCabinetsAsync();
 
-            _refreshTimer = new System.Windows.Threading.DispatcherTimer
+            _deferredApplyTimer = new System.Windows.Threading.DispatcherTimer(
+                System.Windows.Threading.DispatcherPriority.Background)
             {
-                Interval = TimeSpan.FromSeconds(3)
+                Interval = ScrollRefreshDelay
             };
-            _refreshTimer.Tick += RefreshTimer_Tick;
-            _refreshTimer.Start();
+            _deferredApplyTimer.Tick += DeferredApplyTimer_Tick;
         }
 
         private void CabinetManagePage_Unloaded(object sender, RoutedEventArgs e)
         {
             App.MeshBridge.DeviceConnected -= OnDevicePresenceChanged;
             App.MeshBridge.DeviceDisconnected -= OnDevicePresenceChanged;
+            App.MeshBridge.MessageReceived -= OnDeviceMessageReceived;
+            App.CabinetSyncService.SyncStateChanged -= OnCabinetSyncStateChanged;
             App.MaintenanceService.StateChanged -= OnMaintenanceStateChanged;
             _metadataQueryCts?.Cancel();
             _metadataQueryCts?.Dispose();
             _metadataQueryCts = null;
-            if (_refreshTimer != null)
+            _pendingCabinetSnapshot = null;
+            _pendingSyncStates = null;
+            _pendingLiveUpdates.Clear();
+            lock (_liveUpdateQueueLock)
             {
-                _refreshTimer.Stop();
-                _refreshTimer.Tick -= RefreshTimer_Tick;
-                _refreshTimer = null;
+                _liveUpdateQueue.Clear();
+                _liveUpdateDispatchScheduled = false;
+            }
+            if (_deferredApplyTimer != null)
+            {
+                _deferredApplyTimer.Stop();
+                _deferredApplyTimer.Tick -= DeferredApplyTimer_Tick;
+                _deferredApplyTimer = null;
             }
         }
 
         private void OnMaintenanceStateChanged(string deviceId)
         {
-            Dispatcher.BeginInvoke(new Action(async () =>
+            Dispatcher.BeginInvoke(new Action(() =>
             {
-                if (IsLoaded && !_loading) await LoadCabinetsAsync(quiet: true);
-            }));
-        }
-
-        private async void RefreshTimer_Tick(object? sender, EventArgs e)
-        {
-            if (IsLoaded && !_loading) await LoadCabinetsAsync(quiet: true);
+                if (!IsLoaded) return;
+                Device? device = _allCabinets.FirstOrDefault(candidate =>
+                    string.Equals(candidate.DeviceId, deviceId,
+                        StringComparison.OrdinalIgnoreCase));
+                if (device == null) return;
+                int filterHash = ComputeFilterHash(device);
+                int overviewHash = ComputeOverviewHash(device);
+                App.MaintenanceService.ApplyState(device);
+                bool displayChanged = device.NotifyRuntimeDataChangedIfNeeded();
+                if (filterHash != ComputeFilterHash(device)) ApplyFilter();
+                if (displayChanged && overviewHash != ComputeOverviewHash(device))
+                    UpdateOverview();
+            }), System.Windows.Threading.DispatcherPriority.Background);
         }
 
         private void OnDevicePresenceChanged(DeviceClient device)
         {
-            Dispatcher.BeginInvoke(new Action(async () =>
-            {
-                if (IsLoaded && !_loading) await LoadCabinetsAsync(quiet: true);
-            }));
+            if (DeviceService.IsTrueRoot(device)) return;
+            QueueLiveDeviceUpdate(CaptureLiveDevice(device));
         }
 
-        private async Task LoadCabinetsAsync(bool quiet = false)
+        private void OnDeviceMessageReceived(DeviceClient? device, Message message)
+        {
+            if (device == null || DeviceService.IsTrueRoot(device)) return;
+            if (!IsDisplayUpdateMessage(message.Cmd)) return;
+            QueueLiveDeviceUpdate(CaptureLiveDevice(device));
+        }
+
+        private static bool IsDisplayUpdateMessage(string command) =>
+            string.Equals(command, Protocol.CmdStatusReport, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(command, Protocol.CmdStatusResponse, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(command, Protocol.CmdRegister, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(command, Protocol.CmdConfigResponse, StringComparison.OrdinalIgnoreCase);
+
+        private void OnCabinetSyncStateChanged(
+            string deviceId, CabinetExpectedSyncState expected)
+        {
+            DeviceClient? live = App.MeshBridge.Devices.FirstOrDefault(candidate =>
+                string.Equals(candidate.DeviceId, deviceId,
+                    StringComparison.OrdinalIgnoreCase));
+            if (live != null) QueueLiveDeviceUpdate(CaptureLiveDevice(live));
+
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (!IsLoaded) return;
+                var updates = _pendingSyncStates?.ToDictionary(
+                    item => item.Key, item => item.Value,
+                    StringComparer.OrdinalIgnoreCase) ??
+                    new Dictionary<string, CabinetExpectedSyncState>(
+                        StringComparer.OrdinalIgnoreCase);
+                updates[deviceId] = expected;
+                if (IsScrollRefreshDeferred())
+                {
+                    _pendingSyncStates = updates;
+                    ScheduleDeferredApply();
+                }
+                else
+                    ApplySyncStates(updates);
+            }), System.Windows.Threading.DispatcherPriority.Background);
+        }
+
+        private void QueueLiveDeviceUpdate(Device snapshot)
+        {
+            string key = DeviceUpdateKey(snapshot);
+            lock (_liveUpdateQueueLock)
+            {
+                _liveUpdateQueue[key] = snapshot;
+                if (_liveUpdateDispatchScheduled) return;
+                _liveUpdateDispatchScheduled = true;
+            }
+            Dispatcher.BeginInvoke(new Action(ProcessLiveDeviceUpdates),
+                System.Windows.Threading.DispatcherPriority.Background);
+        }
+
+        private void ProcessLiveDeviceUpdates()
+        {
+            List<Device> updates;
+            lock (_liveUpdateQueueLock)
+            {
+                updates = _liveUpdateQueue.Values.ToList();
+                _liveUpdateQueue.Clear();
+                _liveUpdateDispatchScheduled = false;
+            }
+            if (!IsLoaded) return;
+
+            bool missingDevice = false;
+            bool filterChanged = false;
+            bool overviewChanged = false;
+            bool sortChanged = false;
+            foreach (Device update in updates)
+            {
+                Device? target = _allCabinets.FirstOrDefault(candidate =>
+                    IsSameCabinet(candidate, update));
+                if (target == null)
+                {
+                    missingDevice = true;
+                    continue;
+                }
+                if (IsScrollRefreshDeferred())
+                    _pendingLiveUpdates[DeviceUpdateKey(update)] = update;
+                else
+                {
+                    LiveUpdateResult result = ApplyLiveDeviceData(target, update);
+                    filterChanged |= result.FilterChanged;
+                    overviewChanged |= result.OverviewChanged;
+                    sortChanged |= result.SortChanged;
+                }
+            }
+
+            CompleteLiveDeviceUpdates(filterChanged, overviewChanged, sortChanged);
+
+            if (_pendingLiveUpdates.Count > 0) ScheduleDeferredApply();
+            if (missingDevice) RequestMissingDeviceReload();
+        }
+
+        private void RequestMissingDeviceReload()
+        {
+            _missingDeviceReloadPending = true;
+            if (_loading) return;
+            _missingDeviceReloadPending = false;
+            _ = LoadCabinetsAsync(quiet: true, deferForScrolling: true);
+        }
+
+        private LiveUpdateResult ApplyLiveDeviceData(Device target, Device source)
+        {
+            if (source.LastSeenUnix > 0 && target.LastSeenUnix > source.LastSeenUnix)
+                return default;
+            int filterHash = ComputeFilterHash(target);
+            int overviewHash = ComputeOverviewHash(target);
+            bool sortMayHaveChanged = target.IsOnline != source.IsOnline;
+
+            target.IsOnline = source.IsOnline;
+            target.LastOnlineTime = source.LastOnlineTime;
+            target.LastSeenUnix = source.LastSeenUnix;
+            target.OfflineTimeUnix = source.OfflineTimeUnix;
+            if (!string.IsNullOrWhiteSpace(source.DeviceId)) target.DeviceId = source.DeviceId;
+            if (!string.IsNullOrWhiteSpace(source.MeshMac)) target.MeshMac = source.MeshMac;
+            if (!string.IsNullOrWhiteSpace(source.FirmwareVersion))
+                target.FirmwareVersion = source.FirmwareVersion;
+            if (!string.IsNullOrWhiteSpace(source.HardwareVersion))
+                target.HardwareVersion = source.HardwareVersion;
+            target.Status = source.Status;
+            App.MaintenanceService.ApplyState(target);
+
+            bool displayChanged = target.NotifyRuntimeDataChangedIfNeeded();
+            bool filterChanged = filterHash != ComputeFilterHash(target);
+            return new LiveUpdateResult(
+                filterChanged,
+                displayChanged && overviewHash != ComputeOverviewHash(target),
+                sortMayHaveChanged);
+        }
+
+        private void CompleteLiveDeviceUpdates(
+            bool filterChanged, bool overviewChanged, bool sortChanged)
+        {
+            if (sortChanged) _allCabinets = SortCabinets(_allCabinets);
+            if (filterChanged || sortChanged) ApplyFilter();
+            if (overviewChanged) UpdateOverview();
+        }
+
+        private static Device CaptureLiveDevice(DeviceClient source)
+        {
+            DateTime lastSeen = source.LastSeen == default ? source.ConnectTime : source.LastSeen;
+            return new Device
+            {
+                DeviceId = source.DeviceId,
+                DeviceName = source.DeviceName,
+                IsOnline = source.IsOnline,
+                LastOnlineTime = lastSeen == default ? null : lastSeen,
+                LastSeenUnix = lastSeen == default
+                    ? 0 : new DateTimeOffset(lastSeen).ToUnixTimeSeconds(),
+                MeshMac = source.MeshMac,
+                IsRoot = source.IsRoot,
+                FirmwareVersion = source.FirmwareVersion,
+                HardwareVersion = source.HardwareVersion,
+                Status = source.Status ?? new DeviceRuntimeStatus()
+            };
+        }
+
+        private static string DeviceUpdateKey(Device device) =>
+            string.IsNullOrWhiteSpace(device.MeshMac)
+                ? device.DeviceId.Trim()
+                : device.MeshMac.Trim();
+
+        private async Task LoadCabinetsAsync(
+            bool quiet = false, bool deferForScrolling = false)
         {
             if (_loading) return;
             _loading = true;
             if (!quiet) SetBusy(true, "正在读取柜子列表");
             try
             {
-                var cabinets = await Task.Run(App.DeviceService.GetAllDevices);
-                cabinets = cabinets
-                    .Where(device => !DeviceService.IsTrueRoot(device))
-                    .OrderByDescending(device => device.IsOnline)
-                    .ThenBy(device => device.DeviceName)
-                    .ThenBy(device => device.DeviceId)
-                    .ToList();
-
-                uint globalVersion = 0;
-                try
+                List<Device> cabinets = await Task.Run(() =>
                 {
-                    globalVersion = await Task.Run(CabinetSyncService.GetExpectedPermissionVersion);
-                }
-                catch
-                {
-                }
+                    List<Device> loaded = App.DeviceService.GetAllDevices()
+                        .Where(device => !DeviceService.IsTrueRoot(device))
+                        .ToList();
+                    foreach (Device cabinet in loaded)
+                        App.MaintenanceService.ApplyState(cabinet);
+                    return SortCabinets(loaded);
+                });
+                if (!IsLoaded) return;
 
-                foreach (var cabinet in cabinets)
+                if (deferForScrolling && IsScrollRefreshDeferred())
                 {
-                    cabinet.RootPermissionVersion = globalVersion;
-                    App.MaintenanceService.ApplyState(cabinet);
+                    _pendingCabinetSnapshot = cabinets;
+                    ScheduleDeferredApply();
                 }
-
-                MergeCabinetData(cabinets);
-                ApplyFilter();
-                UpdateOverview();
-                StartMissingMetadataQueries();
+                else
+                {
+                    _pendingCabinetSnapshot = null;
+                    ApplyCabinetSnapshot(cabinets);
+                }
             }
             catch (Exception ex)
             {
@@ -130,7 +317,87 @@ namespace CabinetLock
             {
                 if (!quiet) SetBusy(false);
                 _loading = false;
+                if (_missingDeviceReloadPending && IsLoaded)
+                    RequestMissingDeviceReload();
             }
+        }
+
+        private void ApplyCabinetSnapshot(IReadOnlyList<Device> cabinets)
+        {
+            CabinetMergeResult result = MergeCabinetData(cabinets);
+            if (result.VisibleSetMayHaveChanged) ApplyFilter();
+            if (result.DisplayChanged) UpdateOverview();
+            StartMissingMetadataQueries();
+            StartSyncStateQuery();
+        }
+
+        private void StartSyncStateQuery()
+        {
+            if (!IsLoaded) return;
+            if (_syncStateQueryRunning)
+            {
+                _syncStateQueryPending = true;
+                return;
+            }
+            string[] deviceIds = _allCabinets
+                .Select(device => device.DeviceId)
+                .Where(deviceId => !string.IsNullOrWhiteSpace(deviceId))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (deviceIds.Length == 0) return;
+
+            _syncStateQueryRunning = true;
+            _ = RefreshSyncStatesAsync(deviceIds);
+        }
+
+        private async Task RefreshSyncStatesAsync(string[] deviceIds)
+        {
+            try
+            {
+                IReadOnlyDictionary<string, CabinetExpectedSyncState> states =
+                    await Task.Run(() => App.CabinetSyncService
+                        .GetExpectedCabinetSyncStates(deviceIds));
+                if (!IsLoaded) return;
+                if (IsScrollRefreshDeferred())
+                {
+                    _pendingSyncStates = states;
+                    ScheduleDeferredApply();
+                }
+                else
+                    ApplySyncStates(states);
+            }
+            catch
+            {
+                if (IsLoaded)
+                    PageStatusText.Text = $"共 {_allCabinets.Count} 台柜子，同步状态稍后重试";
+            }
+            finally
+            {
+                _syncStateQueryRunning = false;
+                if (_syncStateQueryPending && IsLoaded)
+                {
+                    _syncStateQueryPending = false;
+                    StartSyncStateQuery();
+                }
+            }
+        }
+
+        private void ApplySyncStates(
+            IReadOnlyDictionary<string, CabinetExpectedSyncState> states)
+        {
+            bool displayChanged = false;
+            bool visibleSetMayHaveChanged = false;
+            foreach (Device device in _allCabinets)
+            {
+                if (!states.TryGetValue(device.DeviceId, out CabinetExpectedSyncState expected))
+                    continue;
+                int filterHash = ComputeFilterHash(device);
+                App.CabinetSyncService.ApplyExpectedSyncState(device, expected);
+                displayChanged |= device.NotifyRuntimeDataChangedIfNeeded();
+                visibleSetMayHaveChanged |= filterHash != ComputeFilterHash(device);
+            }
+            if (visibleSetMayHaveChanged) ApplyFilter();
+            if (displayChanged) UpdateOverview();
         }
 
         private void MaintenancePasswordButton_Click(object sender, RoutedEventArgs e)
@@ -159,33 +426,49 @@ namespace CabinetLock
             Device[] selectable = _visibleCabinets.ToArray();
             bool selectAll = selectable.Any(device => !device.IsSelected);
             foreach (Device device in selectable)
+            {
                 device.IsSelected = selectAll;
-            CabinetDataGrid.Items.Refresh();
+                device.NotifySelectionChanged();
+            }
             UpdateMaintenanceSelectionState();
         }
 
         private void CabinetSelectionCheckBox_Click(object sender, RoutedEventArgs e) =>
             UpdateMaintenanceSelectionState();
 
-        private void MergeCabinetData(IReadOnlyList<Device> refreshed)
+        private CabinetMergeResult MergeCabinetData(IReadOnlyList<Device> refreshed)
         {
+            List<Device> previous = _allCabinets;
             var unmatched = new List<Device>(_allCabinets);
             var merged = new List<Device>(refreshed.Count);
+            bool displayChanged = false;
+            bool filterDataChanged = false;
             foreach (Device source in refreshed)
             {
                 Device? target = unmatched.FirstOrDefault(candidate =>
                     IsSameCabinet(candidate, source));
                 if (target == null)
                 {
+                    source.CaptureRuntimeDataSnapshot();
                     merged.Add(source);
+                    displayChanged = true;
+                    filterDataChanged = true;
                     continue;
                 }
 
                 unmatched.Remove(target);
-                CopyCabinetData(target, source);
+                int filterHash = ComputeFilterHash(target);
+                displayChanged |= CopyCabinetData(target, source);
+                filterDataChanged |= filterHash != ComputeFilterHash(target);
                 merged.Add(target);
             }
+            bool orderChanged = previous.Count != merged.Count ||
+                previous.Where((device, index) =>
+                    index >= merged.Count || !ReferenceEquals(device, merged[index])).Any();
             _allCabinets = merged;
+            return new CabinetMergeResult(
+                displayChanged || unmatched.Count > 0,
+                filterDataChanged || unmatched.Count > 0 || orderChanged);
         }
 
         private static bool IsSameCabinet(Device left, Device right)
@@ -199,7 +482,7 @@ namespace CabinetLock
                        StringComparison.OrdinalIgnoreCase);
         }
 
-        private static void CopyCabinetData(Device target, Device source)
+        private static bool CopyCabinetData(Device target, Device source)
         {
             target.DeviceId = source.DeviceId;
             target.DeviceName = source.DeviceName;
@@ -215,11 +498,39 @@ namespace CabinetLock
             target.FirmwareVersion = source.FirmwareVersion;
             target.HardwareVersion = source.HardwareVersion;
             target.Status = source.Status;
-            target.RootPermissionVersion = source.RootPermissionVersion;
             target.MaintenanceActive = source.MaintenanceActive;
             target.MaintenanceLockMask = source.MaintenanceLockMask;
             target.MaintenanceSource = source.MaintenanceSource;
+            return target.NotifyRuntimeDataChangedIfNeeded();
         }
+
+        private static int ComputeFilterHash(Device device)
+        {
+            var hash = new HashCode();
+            hash.Add(device.DeviceId, StringComparer.OrdinalIgnoreCase);
+            hash.Add(device.DeviceName, StringComparer.OrdinalIgnoreCase);
+            hash.Add(device.DeviceNumber, StringComparer.OrdinalIgnoreCase);
+            hash.Add(device.MeshMac, StringComparer.OrdinalIgnoreCase);
+            hash.Add(device.IsOnline);
+            hash.Add(device.AttentionKind, StringComparer.Ordinal);
+            hash.Add(device.MaintenanceActive);
+            return hash.ToHashCode();
+        }
+
+        private static int ComputeOverviewHash(Device device)
+        {
+            var hash = new HashCode();
+            hash.Add(device.IsOnline);
+            hash.Add(device.DataSyncText, StringComparer.Ordinal);
+            hash.Add(device.NeedsAttention);
+            return hash.ToHashCode();
+        }
+
+        private static List<Device> SortCabinets(IEnumerable<Device> cabinets) => cabinets
+            .OrderByDescending(device => device.IsOnline)
+            .ThenBy(device => device.DeviceName)
+            .ThenBy(device => device.DeviceId)
+            .ToList();
 
         private void StartMissingMetadataQueries()
         {
@@ -270,9 +581,9 @@ namespace CabinetLock
         {
             int online = _allCabinets.Count(device => device.IsOnline);
             int synced = _allCabinets.Count(device =>
-                device.IsOnline && device.PermissionSyncText == "已同步");
+                device.IsOnline && device.DataSyncText == "已同步");
             int attention = _allCabinets.Count(device =>
-                !device.IsOnline || device.PermissionSyncText == "落后");
+                device.NeedsAttention);
 
             TotalCabinetText.Text = _allCabinets.Count.ToString();
             OnlineCabinetText.Text = online.ToString();
@@ -280,9 +591,9 @@ namespace CabinetLock
             AttentionCabinetText.Text = attention.ToString();
 
             int lagging = _allCabinets.Count(device =>
-                device.IsOnline && device.PermissionSyncText == "落后");
+                device.IsOnline && device.NeedsAttention);
             PageStatusText.Text = lagging > 0
-                ? $"共 {_allCabinets.Count} 台柜子，在线 {online}，{lagging} 台权限待同步"
+                ? $"共 {_allCabinets.Count} 台柜子，在线 {online}，{lagging} 台待同步或核验"
                 : $"共 {_allCabinets.Count} 台柜子，在线 {online}";
         }
 
@@ -314,9 +625,9 @@ namespace CabinetLock
                 };
                 bool permissionMatched = permissionSync switch
                 {
-                    "synced" => device.PermissionSyncText == "已同步",
-                    "lagging" => device.IsOnline && device.PermissionSyncText == "落后",
-                    "unknown" => device.IsOnline && device.PermissionSyncText == "未知",
+                    "synced" => device.DataSyncText == "已同步",
+                    "lagging" => device.IsOnline && device.AttentionKind == "lagging",
+                    "unknown" => device.IsOnline && device.AttentionKind == "unknown",
                     _ => true
                 };
                 bool maintenanceMatched = maintenanceStatus switch
@@ -372,8 +683,63 @@ namespace CabinetLock
 
             while (_visibleCabinets.Count > visible.Count)
                 _visibleCabinets.RemoveAt(_visibleCabinets.Count - 1);
+        }
 
-            CabinetDataGrid.Items.Refresh();
+        private void CabinetDataGrid_PreviewMouseWheel(object sender, MouseWheelEventArgs e) =>
+            MarkScrollInteraction();
+
+        private void CabinetDataGrid_ScrollChanged(object sender, ScrollChangedEventArgs e)
+        {
+            if (Math.Abs(e.VerticalChange) > double.Epsilon)
+                MarkScrollInteraction();
+        }
+
+        private void MarkScrollInteraction()
+        {
+            _lastScrollInteractionUtc = DateTime.UtcNow;
+            if (_pendingCabinetSnapshot != null || _pendingSyncStates != null)
+                ScheduleDeferredApply();
+        }
+
+        private bool IsScrollRefreshDeferred() =>
+            DateTime.UtcNow - _lastScrollInteractionUtc < ScrollRefreshDelay;
+
+        private void ScheduleDeferredApply()
+        {
+            if (_deferredApplyTimer == null) return;
+            _deferredApplyTimer.Stop();
+            _deferredApplyTimer.Interval = ScrollRefreshDelay;
+            _deferredApplyTimer.Start();
+        }
+
+        private void DeferredApplyTimer_Tick(object? sender, EventArgs e)
+        {
+            if (IsScrollRefreshDeferred()) return;
+            _deferredApplyTimer?.Stop();
+
+            List<Device>? cabinets = _pendingCabinetSnapshot;
+            IReadOnlyDictionary<string, CabinetExpectedSyncState>? states = _pendingSyncStates;
+            List<Device> liveUpdates = _pendingLiveUpdates.Values.ToList();
+            _pendingCabinetSnapshot = null;
+            _pendingSyncStates = null;
+            _pendingLiveUpdates.Clear();
+
+            if (cabinets != null) ApplyCabinetSnapshot(cabinets);
+            if (states != null) ApplySyncStates(states);
+            bool filterChanged = false;
+            bool overviewChanged = false;
+            bool sortChanged = false;
+            foreach (Device update in liveUpdates)
+            {
+                Device? target = _allCabinets.FirstOrDefault(candidate =>
+                    IsSameCabinet(candidate, update));
+                if (target == null) continue;
+                LiveUpdateResult result = ApplyLiveDeviceData(target, update);
+                filterChanged |= result.FilterChanged;
+                overviewChanged |= result.OverviewChanged;
+                sortChanged |= result.SortChanged;
+            }
+            CompleteLiveDeviceUpdates(filterChanged, overviewChanged, sortChanged);
         }
 
         private async void RefreshButton_Click(object sender, RoutedEventArgs e) =>
@@ -745,5 +1111,11 @@ namespace CabinetLock
                 ? 0
                 : Math.Clamp(completed * 100d / total, 0d, 100d);
         }
+
+        private readonly record struct CabinetMergeResult(
+            bool DisplayChanged, bool VisibleSetMayHaveChanged);
+
+        private readonly record struct LiveUpdateResult(
+            bool FilterChanged, bool OverviewChanged, bool SortChanged);
     }
 }

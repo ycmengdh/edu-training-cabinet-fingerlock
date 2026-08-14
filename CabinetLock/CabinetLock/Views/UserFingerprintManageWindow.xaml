@@ -1,0 +1,92 @@
+<local:BorderlessWindow x:Class="CabinetLock.UserFingerprintManageWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:CabinetLock"
+        Title="用户指纹管理" Width="940" Height="680" MinWidth="820" MinHeight="560"
+        WindowStartupLocation="CenterOwner" Background="{StaticResource BackgroundBrush}">
+    <Grid Margin="24,20,24,22">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <StackPanel>
+                <TextBlock x:Name="UserNameText" Text="用户指纹" Style="{StaticResource TitleText}"/>
+                <TextBlock x:Name="UserMetaText" Style="{StaticResource PageStatusText}" Margin="0,5,0,0"/>
+            </StackPanel>
+            <Button x:Name="RefreshButton" Grid.Column="1" Style="{StaticResource IconButton}"
+                    Content="&#xE72C;" ToolTip="刷新指纹列表" VerticalAlignment="Bottom"
+                    Click="RefreshButton_Click"/>
+        </Grid>
+
+        <Border Grid.Row="1" Style="{StaticResource ToolbarPanel}" Margin="0,16,0,12">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock x:Name="TemplateCountText" Text="指纹 0 枚" FontWeight="SemiBold"/>
+                    <TextBlock x:Name="DefaultFingerprintText" Text="默认指纹：未设置"
+                               Foreground="{StaticResource SubTextBrush}" Margin="18,0,0,0"/>
+                </StackPanel>
+                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                    <Button x:Name="EnrollButton" Content="录入指纹" Click="EnrollButton_Click"/>
+                    <Button x:Name="TestButton" Content="测试" Style="{StaticResource SecondaryButton}"
+                            Margin="8,0,0,0" Click="TestButton_Click" IsEnabled="False"/>
+                    <Button x:Name="SetDefaultButton" Content="设为默认" Style="{StaticResource SecondaryButton}"
+                            Margin="8,0,0,0" Click="SetDefaultButton_Click" IsEnabled="False"/>
+                    <Button x:Name="SyncButton" Content="校验并同步" Style="{StaticResource SecondaryButton}"
+                            Margin="8,0,0,0" Click="SyncButton_Click" IsEnabled="False"/>
+                    <Button x:Name="DeleteButton" Content="删除" Style="{StaticResource DangerButton}"
+                            Margin="8,0,0,0" Click="DeleteButton_Click" IsEnabled="False"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <Border Grid.Row="2" Style="{StaticResource Panel}">
+            <Grid>
+                <DataGrid x:Name="FingerprintGrid" BorderThickness="0" IsReadOnly="True"
+                          SelectionMode="Single" SelectionChanged="FingerprintGrid_SelectionChanged"
+                          EnableRowVirtualization="True" VirtualizingPanel.VirtualizationMode="Recycling">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="手指" Binding="{Binding FingerName}" Width="1.1*" MinWidth="130"/>
+                        <DataGridTextColumn Header="模板 ID" Binding="{Binding FingerprintId}" Width="90"/>
+                        <DataGridTextColumn Header="默认" Binding="{Binding DefaultText}" Width="72"/>
+                        <DataGridTextColumn Header="来源柜机" Binding="{Binding SourceDevice}" Width="1.25*" MinWidth="145"/>
+                        <DataGridTextColumn Header="SD 备份" Binding="{Binding BackupStatusText}" Width="105"/>
+                        <DataGridTextColumn Header="使用柜机" Binding="{Binding UsedCabinetText}" Width="90"/>
+                        <DataGridTextColumn Header="录入时间" Binding="{Binding EnrollTime, StringFormat=yyyy-MM-dd HH:mm}"
+                                            Width="150"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+                <StackPanel x:Name="EmptyPanel" HorizontalAlignment="Center" VerticalAlignment="Center"
+                            Visibility="Collapsed" IsHitTestVisible="False">
+                    <TextBlock Text="&#xE928;" FontFamily="{StaticResource AppIconFont}" FontSize="34"
+                               Foreground="{StaticResource SubTextBrush}" HorizontalAlignment="Center"/>
+                    <TextBlock Text="该用户还没有指纹模板" FontWeight="SemiBold" Margin="0,10,0,0"/>
+                    <TextBlock Text="录入完成后可在此设置默认指纹、测试或删除"
+                               Foreground="{StaticResource SubTextBrush}" FontSize="11"
+                               Margin="0,5,0,0"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <Grid Grid.Row="3" Margin="0,12,0,0">
+            <StackPanel>
+                <TextBlock x:Name="StatusText" Text="正在读取指纹模板" Style="{StaticResource PageStatusText}"/>
+                <TextBlock x:Name="PolicyText" Text="管理员和教师默认只向每台柜机下发默认指纹；其他指纹可在柜机绑定中按需选择。"
+                           Foreground="{StaticResource SubTextBrush}" FontSize="11" Margin="0,4,0,0"/>
+            </StackPanel>
+            <Button Content="关闭" Style="{StaticResource SecondaryButton}" HorizontalAlignment="Right"
+                    VerticalAlignment="Bottom" Click="CloseButton_Click"/>
+        </Grid>
+    </Grid>
+</local:BorderlessWindow>

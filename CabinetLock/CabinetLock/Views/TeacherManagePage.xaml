@@ -80,7 +80,7 @@
                     </DataGridTextColumn>
                     <DataGridTextColumn Header="班级数" Binding="{Binding ResponsibleClassCount}" Width="76"
                                         ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                    <DataGridTextColumn Header="指纹 ID" Binding="{Binding FingerprintId}" Width="100"
+                    <DataGridTextColumn Header="指纹概况" Binding="{Binding FingerprintSummary}" Width="150"
                                         ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
                     <DataGridTextColumn Header="状态" Binding="{Binding StatusText}" Width="90"
                                         ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
@@ -95,7 +95,7 @@
                                             Width="32" MinWidth="32" Height="30" MinHeight="30" Margin="0,0,6,0"
                                             Click="EditRowButton_Click"/>
                                     <Button Content="&#xE928;" FontFamily="{StaticResource AppIconFont}" Tag="{Binding}"
-                                            Style="{StaticResource IconButton}" ToolTip="录入教师指纹"
+                                            Style="{StaticResource IconButton}" ToolTip="管理教师指纹"
                                             Width="32" MinWidth="32" Height="30" MinHeight="30" Margin="0,0,6,0"
                                             Click="EnrollFingerprintRowButton_Click"/>
                                     <Button Content="&#xE712;" FontFamily="{StaticResource AppIconFont}" Tag="{Binding}"

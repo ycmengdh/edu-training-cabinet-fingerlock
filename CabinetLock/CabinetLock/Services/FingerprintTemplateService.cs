@@ -64,6 +64,45 @@ namespace CabinetLock
                 .ToList();
         }
 
+        public void ApplyFingerprintSummaries(IReadOnlyCollection<User> users)
+        {
+            if (users == null || users.Count == 0) return;
+            List<FingerprintTemplate> templates = BusinessDatabase.ReadFpTemplateMetasForUsers(
+                users.Select(user => user.UserId));
+            Dictionary<string, List<FingerprintTemplate>> templatesByUser = templates
+                .Where(template => template.Enabled && template.FingerprintId > 0 &&
+                    !string.IsNullOrWhiteSpace(template.UserId))
+                .GroupBy(template => template.UserId!, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(
+                    group => group.Key,
+                    group => group.GroupBy(template => template.FingerprintId)
+                        .Select(items => items.Last())
+                        .OrderBy(template => template.FingerIndex)
+                        .ThenBy(template => template.FingerprintId)
+                        .ToList(),
+                    StringComparer.OrdinalIgnoreCase);
+            foreach (User user in users)
+            {
+                List<FingerprintTemplate> owned = templatesByUser.GetValueOrDefault(user.UserId)
+                    ?? new List<FingerprintTemplate>();
+                user.FingerprintCount = owned.Count;
+                user.EffectiveFingerprintId = owned.Any(template =>
+                        template.FingerprintId == user.FingerprintId)
+                    ? user.FingerprintId
+                    : owned.Select(template => (int?)template.FingerprintId).FirstOrDefault();
+            }
+        }
+
+        public static Dictionary<string, int> BuildEnabledTemplateCounts(
+            IEnumerable<FingerprintTemplate> templates) => (templates ?? Array.Empty<FingerprintTemplate>())
+            .Where(template => template.Enabled && template.FingerprintId > 0 &&
+                !string.IsNullOrWhiteSpace(template.UserId))
+            .GroupBy(template => template.UserId!, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(
+                group => group.Key,
+                group => group.Select(template => template.FingerprintId).Distinct().Count(),
+                StringComparer.OrdinalIgnoreCase);
+
         /// <summary>获取指定指纹 ID 的模板元数据；不存在返回 null</summary>
         public FingerprintTemplate? GetTemplate(int fingerprintId)
         {
@@ -180,11 +219,12 @@ namespace CabinetLock
             if (fingerprintId <= 0 || string.IsNullOrWhiteSpace(userId)) return false;
 
             string? userName = null;
+            User? boundUser = null;
             try
             {
-                var user = _userService.GetUser(userId);
-                if (user == null) return false;
-                userName = user.Name;
+                boundUser = _userService.GetUser(userId);
+                if (boundUser == null) return false;
+                userName = boundUser.Name;
             }
             catch (RootDataUnavailableException)
             {
@@ -196,14 +236,89 @@ namespace CabinetLock
             try
             {
                 User? user = _userService.GetUser(userId);
-                return user?.FingerprintId.HasValue == true ||
+                bool assigned = user?.FingerprintId.HasValue == true ||
                     _userService.AssignFingerprint(userId, fingerprintId);
+                if (!assigned) return false;
+
+                if (IsGlobalStaff(user ?? boundUser))
+                    QueueGlobalStaffSync(user ?? boundUser!);
+                return true;
             }
             catch (RootDataUnavailableException)
             {
                 return true;
             }
         }
+
+        /// <summary>
+        /// 为升级前已存在的管理员/教师指纹补建全柜同步任务。
+        /// 已有用户级任务（含已完成任务）不会在每次启动时重复创建。
+        /// </summary>
+        public int EnsureGlobalStaffSyncQueued()
+        {
+            List<User> staff = _userService.GetAllUsers()
+                .Where(user => user.Enabled && IsGlobalStaff(user))
+                .ToList();
+            if (staff.Count == 0) return 0;
+
+            HashSet<string> ownersWithFingerprint = BusinessDatabase.ReadAllFpTemplateMetas()
+                .Where(template => template.Enabled && template.FingerprintId > 0 &&
+                    !string.IsNullOrWhiteSpace(template.UserId))
+                .Select(template => template.UserId!)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            string[] deviceIds = App.DeviceService.GetAllDevices()
+                .Where(device => !DeviceService.IsTrueRoot(device) &&
+                    !string.IsNullOrWhiteSpace(device.DeviceId))
+                .Select(device => device.DeviceId)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (deviceIds.Length == 0) return 0;
+
+            HashSet<string> existing = App.CabinetSyncQueueService.GetAll()
+                .Where(job => string.Equals(job.JobKind, "user", StringComparison.OrdinalIgnoreCase))
+                .Select(job => GlobalStaffJobKey(job.UserId, job.DeviceId))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            int queued = 0;
+            foreach (User user in staff.Where(user => ownersWithFingerprint.Contains(user.UserId)))
+            {
+                foreach (string deviceId in deviceIds)
+                {
+                    if (!existing.Add(GlobalStaffJobKey(user.UserId, deviceId))) continue;
+                    App.CabinetSyncQueueService.EnqueueUser(
+                        user.UserId, new[] { deviceId }, "管理员/教师指纹自动同步");
+                    queued++;
+                }
+            }
+            if (queued > 0) App.CabinetSyncQueueService.Trigger();
+            return queued;
+        }
+
+        private static void QueueGlobalStaffSync(User user)
+        {
+            try
+            {
+                string[] deviceIds = App.DeviceService.GetAllDevices()
+                    .Where(device => !DeviceService.IsTrueRoot(device) &&
+                        !string.IsNullOrWhiteSpace(device.DeviceId))
+                    .Select(device => device.DeviceId)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+                App.CabinetSyncQueueService.EnqueueUser(
+                    user.UserId, deviceIds, "管理员/教师指纹自动同步");
+                App.CabinetSyncQueueService.Trigger();
+            }
+            catch
+            {
+                // 指纹已落库；队列将在启动补偿阶段再次建立。
+            }
+        }
+
+        private static bool IsGlobalStaff(User? user) => user != null &&
+            (string.Equals(user.Role, "admin", StringComparison.OrdinalIgnoreCase) ||
+             string.Equals(user.Role, "teacher", StringComparison.OrdinalIgnoreCase));
+
+        private static string GlobalStaffJobKey(string userId, string deviceId) =>
+            $"{userId.Trim()}\n{deviceId.Trim()}";
 
         // ===== 下发到柜子 =====
 

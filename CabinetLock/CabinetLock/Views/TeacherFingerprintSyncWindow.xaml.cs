@@ -26,8 +26,14 @@ namespace CabinetLock
             SetBusy(true, "正在检测教师指纹与权限");
             try
             {
-                _teachers = (await Task.Run(() => App.UserService.GetUsersByRole("teacher")))
-                    .Where(user => user.Enabled && user.FingerprintId.HasValue)
+                _teachers = await Task.Run(() =>
+                {
+                    List<User> teachers = App.UserService.GetUsersByRole("teacher");
+                    App.FingerprintTemplateService.ApplyFingerprintSummaries(teachers);
+                    return teachers;
+                });
+                _teachers = _teachers
+                    .Where(user => user.Enabled && user.FingerprintCount > 0)
                     .OrderBy(user => user.Name).ToList();
                 var devices = (await Task.Run(App.DeviceService.GetAllDevices))
                     .Where(device => !DeviceService.IsTrueRoot(device))

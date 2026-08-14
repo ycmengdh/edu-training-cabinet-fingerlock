@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+
 namespace CabinetLock
 {
     /// <summary>
@@ -13,6 +15,12 @@ namespace CabinetLock
         /// <summary>柜与柜之间的间隔（毫秒）。</summary>
         private const int InterNodeDelayMs = 100;
         private const int MaxProbeConcurrency = 3;
+        private readonly ConcurrentDictionary<string, FingerprintVerification>
+            _fingerprintVerifications = new(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, CabinetExpectedSyncState>
+            _expectedStateCache = new(StringComparer.OrdinalIgnoreCase);
+
+        public event Action<string, CabinetExpectedSyncState>? SyncStateChanged;
 
         public async Task<IReadOnlyList<UserCabinetSyncResult>> VerifyAndSyncUserAsync(
             User user, IEnumerable<string>? targetDeviceIds = null,
@@ -282,9 +290,41 @@ namespace CabinetLock
                 return CabinetDataSyncResult.Failed(deviceId, snapshotError);
 
             var rows = BuildRowsForDevice(snapshot.Rows, deviceId);
+            var permissionRows = new List<Dictionary<string, object>>(rows);
             var failures = new List<string>();
             int currentCount = 0;
             int restoredCount = 0;
+
+            progress?.Report("正在读取柜机实际指纹槽位");
+            IReadOnlyList<FingerprintSlotRecord>? slots = await App.CommandService
+                .GetFingerprintSlotsAsync(deviceId).ConfigureAwait(false);
+            if (slots == null)
+            {
+                failures.Add("无法读取柜机实际指纹槽位，未提交权限以保护本机副指纹");
+            }
+            else
+            {
+                HashSet<int> expectedFingerprintIds = rows
+                    .Select(row => Convert.ToInt32(row["fingerprint_id"]))
+                    .ToHashSet();
+                FingerprintSlotRecord[] staleSlots = slots.Where(slot =>
+                        slot.Slot > 0 && !slot.IsBackup &&
+                        !expectedFingerprintIds.Contains(slot.Slot))
+                    .ToArray();
+                for (int index = 0; index < staleSlots.Length; index++)
+                {
+                    FingerprintSlotRecord stale = staleSlots[index];
+                    progress?.Report($"正在清理残留指纹 {index + 1}/{staleSlots.Length}：槽位 {stale.Slot}");
+                    CommandResult deleted = await DeleteFingerprintFromCabinetIdempotentAsync(
+                        deviceId, stale.Slot).ConfigureAwait(false);
+                    if (!deleted.Success)
+                        failures.Add($"残留槽位 {stale.Slot}：{deleted.ErrorMessage}");
+                }
+                permissionRows.AddRange(slots
+                    .Where(slot => slot.IsBackup && slot.Slot > 0 && slot.FingerprintId > 0 &&
+                        !string.IsNullOrWhiteSpace(slot.UserId))
+                    .Select(BuildBackupPermissionRow));
+            }
 
             for (int index = 0; index < rows.Count; index++)
             {
@@ -332,30 +372,106 @@ namespace CabinetLock
             }
 
             cancellationToken.ThrowIfCancellationRequested();
-            progress?.Report($"正在提交 {rows.Count} 条柜机权限");
-            CommandResult permissionTransaction = await Task.Run(
-                () => SyncOneCabinet(deviceId, rows, snapshot.Version), cancellationToken)
-                .ConfigureAwait(false);
-            BroadcastCommandResult permissionResult = permissionTransaction.Success
-                ? BroadcastCommandResult.Succeeded(new[] { deviceId })
-                : new BroadcastCommandResult
-                {
-                    ErrorMessage = string.IsNullOrWhiteSpace(permissionTransaction.ErrorMessage)
-                        ? $"柜子 {deviceId} 未确认权限同步"
-                        : permissionTransaction.ErrorMessage,
-                    FailedDeviceIds = new[] { deviceId }
-                };
+            BroadcastCommandResult permissionResult;
+            if (slots == null)
+            {
+                permissionResult = BroadcastCommandResult.Failed(
+                    "未读取到柜机实际槽位，已跳过权限提交", new[] { deviceId });
+            }
+            else
+            {
+                progress?.Report($"正在提交 {permissionRows.Count} 条柜机权限");
+                CommandResult permissionTransaction = await Task.Run(
+                    () => SyncOneCabinet(deviceId, permissionRows, snapshot.Version), cancellationToken)
+                    .ConfigureAwait(false);
+                permissionResult = permissionTransaction.Success
+                    ? BroadcastCommandResult.Succeeded(new[] { deviceId })
+                    : new BroadcastCommandResult
+                    {
+                        ErrorMessage = string.IsNullOrWhiteSpace(permissionTransaction.ErrorMessage)
+                            ? $"柜子 {deviceId} 未确认权限同步"
+                            : permissionTransaction.ErrorMessage,
+                        FailedDeviceIds = new[] { deviceId }
+                    };
+            }
 
             var syncResult = new CabinetDataSyncResult
             {
                 DeviceId = deviceId,
                 ExpectedFingerprintCount = rows.Count,
+                PermissionRecordCount = permissionRows.Count,
                 CurrentFingerprintCount = currentCount,
                 RestoredFingerprintCount = restoredCount,
                 FingerprintFailures = failures.ToArray(),
                 PermissionResult = permissionResult
             };
+            string verificationKey = deviceId.Trim();
+            if (failures.Count == 0)
+            {
+                _fingerprintVerifications[verificationKey] =
+                    new FingerprintVerification(snapshot.Version, rows.Count);
+                App.MeshBridge.MarkFingerprintSyncConfirmed(
+                    deviceId, rows.Count + permissionRows.Count(row =>
+                        row.TryGetValue("is_backup", out object? value) && value is true));
+            }
+            else
+                _fingerprintVerifications.TryRemove(verificationKey, out _);
+            try
+            {
+                SyncStateChanged?.Invoke(deviceId,
+                    new CabinetExpectedSyncState(snapshot.Version, rows.Count));
+            }
+            catch
+            {
+            }
             return syncResult;
+        }
+
+        public IReadOnlyDictionary<string, CabinetExpectedSyncState>
+            GetExpectedCabinetSyncStates(IEnumerable<string> deviceIds)
+        {
+            string[] requested = (deviceIds ?? Array.Empty<string>())
+                .Where(deviceId => !string.IsNullOrWhiteSpace(deviceId))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            uint currentVersion = GetExpectedPermissionVersion();
+            if (requested.All(deviceId =>
+                    _expectedStateCache.TryGetValue(deviceId, out CabinetExpectedSyncState cached) &&
+                    cached.Version == currentVersion))
+            {
+                return requested.ToDictionary(
+                    deviceId => deviceId,
+                    deviceId => _expectedStateCache[deviceId],
+                    StringComparer.OrdinalIgnoreCase);
+            }
+
+            PermissionSnapshot? snapshot = ReadStableSnapshot(out string error);
+            if (snapshot == null) throw new InvalidOperationException(error);
+
+            IReadOnlyDictionary<string, List<Dictionary<string, object>>> rowsByDevice =
+                BuildRowsForDevices(snapshot.Rows, requested);
+            var result = new Dictionary<string, CabinetExpectedSyncState>(
+                StringComparer.OrdinalIgnoreCase);
+            foreach (string deviceId in requested)
+            {
+                var expected = new CabinetExpectedSyncState(
+                    snapshot.Version, rowsByDevice[deviceId].Count);
+                _expectedStateCache[deviceId] = expected;
+                result[deviceId] = expected;
+            }
+            return result;
+        }
+
+        public void ApplyExpectedSyncState(Device device, CabinetExpectedSyncState expected)
+        {
+            ArgumentNullException.ThrowIfNull(device);
+            device.RootPermissionVersion = expected.Version;
+            device.ExpectedFingerprintCount = expected.ExpectedFingerprintCount;
+            device.FingerprintVerificationVersion =
+                _fingerprintVerifications.TryGetValue(device.DeviceId, out FingerprintVerification verified) &&
+                verified.Version == expected.Version &&
+                verified.ExpectedFingerprintCount == expected.ExpectedFingerprintCount
+                    ? verified.Version : 0;
         }
 
         private static PermissionSnapshot? ReadStableSnapshot(out string error)
@@ -394,14 +510,20 @@ namespace CabinetLock
 
         private static uint ComposePermissionVersion(PermissionDataVersions versions)
             => ComposePermissionVersion(versions.Users, versions.Classes,
-                versions.Permissions, versions.Fingerprints);
+                versions.Permissions, versions.RolePermissions, versions.Fingerprints);
 
         public static uint ComposePermissionVersion(uint usersVersion, uint permissionsVersion)
-            => ComposePermissionVersion(usersVersion, 0, permissionsVersion, 0);
+            => ComposePermissionVersion(usersVersion, 0, permissionsVersion, 0, 0);
 
         public static uint ComposePermissionVersion(
             uint usersVersion, uint classesVersion, uint permissionsVersion,
             uint fingerprintsVersion)
+            => ComposePermissionVersion(usersVersion, classesVersion, permissionsVersion,
+                0, fingerprintsVersion);
+
+        public static uint ComposePermissionVersion(
+            uint usersVersion, uint classesVersion, uint permissionsVersion,
+            uint rolePermissionsVersion, uint fingerprintsVersion)
         {
             unchecked
             {
@@ -409,6 +531,7 @@ namespace CabinetLock
                 value = (value ^ usersVersion) * 16777619;
                 value = (value ^ classesVersion) * 16777619;
                 value = (value ^ permissionsVersion) * 16777619;
+                value = (value ^ rolePermissionsVersion) * 16777619;
                 value = (value ^ fingerprintsVersion) * 16777619;
                 return value == 0 ? 1u : value;
             }
@@ -486,6 +609,24 @@ namespace CabinetLock
             return permissions;
         }
 
+        private static Dictionary<string, object> BuildBackupPermissionRow(
+            FingerprintSlotRecord slot) => new()
+        {
+            ["fingerprint_id"] = slot.FingerprintId,
+            ["local_fp_id"] = slot.Slot,
+            ["is_backup"] = true,
+            ["user_id"] = slot.UserId,
+            ["name"] = slot.Name,
+            ["role"] = slot.Role,
+            ["lock_permissions"] = new
+            {
+                lock_0 = (slot.LockMask & 0x01) != 0,
+                lock_1 = (slot.LockMask & 0x02) != 0,
+                lock_2 = (slot.LockMask & 0x04) != 0,
+                lock_3 = (slot.LockMask & 0x08) != 0
+            }
+        };
+
         /// <summary>
         /// 生成单柜权限行：每条记录以 user_id + fingerprint_id 唯一。
         /// 学生仅分配到该柜才下发；未特殊选择时默认下发第一枚有效指纹。
@@ -493,21 +634,82 @@ namespace CabinetLock
         private static List<Dictionary<string, object>> BuildRowsForDevice(
             IEnumerable<Dictionary<string, object>> rows, string deviceId)
         {
-            Dictionary<string, User> users = App.UserService.GetAllUsers()
-                .ToDictionary(user => user.UserId, StringComparer.OrdinalIgnoreCase);
+            List<User> userList = App.UserService.GetAllUsers();
             List<FingerprintTemplate> templates = BusinessDatabase.ReadAllFpTemplateMetas();
+            Dictionary<string, IReadOnlyList<CabinetAssignment>> assignments =
+                App.CabinetBindingService.GetAssignments(userList, new[] { deviceId });
+            return BuildRowsForDevice(rows, deviceId, userList, templates, assignments);
+        }
+
+        private static IReadOnlyDictionary<string, List<Dictionary<string, object>>>
+            BuildRowsForDevices(
+                IEnumerable<Dictionary<string, object>> rows,
+                IReadOnlyCollection<string> deviceIds)
+        {
+            string[] requested = deviceIds
+                .Where(deviceId => !string.IsNullOrWhiteSpace(deviceId))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            List<User> users = App.UserService.GetAllUsers();
+            List<FingerprintTemplate> templates = BusinessDatabase.ReadAllFpTemplateMetas();
+            Dictionary<string, IReadOnlyList<CabinetAssignment>> assignments =
+                App.CabinetBindingService.GetAssignments(users, requested);
+            return requested.ToDictionary(
+                deviceId => deviceId,
+                deviceId => BuildRowsForDevice(
+                    rows, deviceId, users, templates, assignments),
+                StringComparer.OrdinalIgnoreCase);
+        }
+
+        private static List<Dictionary<string, object>> BuildRowsForDevice(
+            IEnumerable<Dictionary<string, object>> rows, string deviceId,
+            IReadOnlyCollection<User> userList,
+            IReadOnlyCollection<FingerprintTemplate> templates,
+            IReadOnlyDictionary<string, IReadOnlyList<CabinetAssignment>> assignments)
+        {
+            Dictionary<string, User> users = userList
+                .ToDictionary(user => user.UserId, StringComparer.OrdinalIgnoreCase);
             var result = new List<Dictionary<string, object>>();
             foreach (Dictionary<string, object> row in rows)
             {
                 string userId = row["user_id"]?.ToString() ?? "";
                 if (string.IsNullOrWhiteSpace(userId) || !users.TryGetValue(userId, out User? user))
                     continue;
-                IReadOnlyList<int> fingerprintIds = App.CabinetBindingService
-                    .GetSelectedFingerprintIds(user, deviceId, templates);
+                assignments.TryGetValue(user.UserId,
+                    out IReadOnlyList<CabinetAssignment>? userAssignments);
+                CabinetAssignment? assignment = userAssignments?.FirstOrDefault(item =>
+                    string.Equals(item.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase));
+                List<FingerprintTemplate> userTemplates = templates.Where(item =>
+                    string.Equals(item.UserId, user.UserId,
+                        StringComparison.OrdinalIgnoreCase)).ToList();
+                HashSet<int> enabledIds = userTemplates.Where(item => item.Enabled)
+                    .Select(item => item.FingerprintId).ToHashSet();
+                IReadOnlyList<int> fingerprintIds = (assignment?.FingerprintIds ?? new List<int>())
+                    .Where(id => id > 0 && enabledIds.Contains(id))
+                    .Distinct().OrderBy(id => id).ToArray();
+                if (fingerprintIds.Count == 0)
+                {
+                    // 管理员和教师自动绑定全部柜机，历史空绑定仍回退到其默认指纹。
+                    // 学生必须在当前柜机存在有效的显式指纹选择。
+                    if (string.Equals(
+                            user.Role, "student", StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    int? fallback = App.CabinetBindingService
+                        .ResolveDefaultFingerprintId(user, userTemplates);
+                    fingerprintIds = fallback.HasValue
+                        ? new[] { fallback.Value } : Array.Empty<int>();
+                }
                 bool[] fallbackPermissions = row.TryGetValue("_resolved_permissions", out object? resolved) &&
                     resolved is bool[] values ? values : new bool[4];
-                bool[] devicePermissions = App.CabinetBindingService
-                    .GetLockPermissions(user, deviceId, fallbackPermissions);
+                bool[] devicePermissions = fallbackPermissions.Take(4).ToArray();
+                Array.Resize(ref devicePermissions, 4);
+                if (assignment?.LockIds != null)
+                {
+                    devicePermissions = new bool[4];
+                    foreach (int lockId in assignment.LockIds.Where(id => id >= 0 && id < 4))
+                        devicePermissions[lockId] = true;
+                }
+                PermissionPolicy.Enforce(user.Role, devicePermissions);
                 foreach (int fingerprintId in fingerprintIds)
                 {
                     var deviceRow = new Dictionary<string, object>(row)
@@ -551,11 +753,13 @@ namespace CabinetLock
             var failed = new List<string>();
             string lastError = "";
 
+            IReadOnlyDictionary<string, List<Dictionary<string, object>>> rowsByDevice =
+                BuildRowsForDevices(rows, expectedDevices);
             foreach (string deviceId in expectedDevices)
             {
                 try
                 {
-                    var deviceRows = BuildRowsForDevice(rows, deviceId);
+                    List<Dictionary<string, object>> deviceRows = rowsByDevice[deviceId];
                     CommandResult transaction = SyncOneCabinet(deviceId, deviceRows, version);
                     if (transaction.Success) confirmed.Add(deviceId);
                     else
@@ -807,7 +1011,13 @@ namespace CabinetLock
 
         private readonly record struct PermissionDataVersions(
             uint Users, uint Classes, uint Permissions, uint RolePermissions, uint Fingerprints);
+
+        private readonly record struct FingerprintVerification(
+            uint Version, int ExpectedFingerprintCount);
     }
+
+    public readonly record struct CabinetExpectedSyncState(
+        uint Version, int ExpectedFingerprintCount);
 
     public sealed class UserCabinetSyncResult
     {
@@ -839,6 +1049,7 @@ namespace CabinetLock
     {
         public string DeviceId { get; init; } = "";
         public int ExpectedFingerprintCount { get; init; }
+        public int PermissionRecordCount { get; init; }
         public int CurrentFingerprintCount { get; init; }
         public int RestoredFingerprintCount { get; init; }
         public string[] FingerprintFailures { get; init; } = Array.Empty<string>();
@@ -855,7 +1066,7 @@ namespace CabinetLock
             var lines = new List<string>
             {
                 PermissionResult.Success
-                    ? $"权限已确认：{ExpectedFingerprintCount} 条"
+                    ? $"权限已确认：{PermissionRecordCountOrExpected} 条"
                     : $"权限未完成：{PermissionResult.ErrorMessage}",
                 $"用户指纹已确认：{ConfirmedFingerprintCount}/{ExpectedFingerprintCount}（原有 {CurrentFingerprintCount}，补写 {RestoredFingerprintCount}）"
             };
@@ -866,6 +1077,9 @@ namespace CabinetLock
             }
             return string.Join(Environment.NewLine, lines);
         }
+
+        private int PermissionRecordCountOrExpected => PermissionRecordCount > 0
+            ? PermissionRecordCount : ExpectedFingerprintCount;
 
         public static CabinetDataSyncResult Failed(string deviceId, string error) => new()
         {

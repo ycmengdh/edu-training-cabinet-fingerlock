@@ -69,11 +69,11 @@ namespace CabinetLock
                     string.Equals(user.UserId, _presetUserId, StringComparison.OrdinalIgnoreCase));
                 if (!string.IsNullOrWhiteSpace(_presetUserId) && preset == null)
                 {
-                    FixedStudentNameText.Text = "学生信息不可用";
-                    FixedStudentMetaText.Text = "当前学生不存在，或没有该学生的管理权限";
-                    StepHint.Text = "无法读取当前学生";
-                    StepDetail.Text = "请关闭窗口并刷新学生详情后重试";
-                    ResultText.Text = "为了避免将指纹录入到其他学生，已停止本次录入。";
+                    FixedStudentNameText.Text = "用户信息不可用";
+                    FixedStudentMetaText.Text = "当前用户不存在，或没有该用户的管理权限";
+                    StepHint.Text = "无法读取当前用户";
+                    StepDetail.Text = "请关闭窗口并刷新用户数据后重试";
+                    ResultText.Text = "为了避免将指纹录入到其他用户，已停止本次录入。";
                     return;
                 }
                 if (preset != null)
@@ -81,7 +81,7 @@ namespace CabinetLock
                     RoleCombo.SelectedValue = preset.Role;
                     if (string.Equals(preset.Role, "student", StringComparison.OrdinalIgnoreCase))
                         ClassCombo.SelectedValue = preset.ClassId;
-                    if (_fixedUserMode) LoadFixedStudent(preset);
+                    if (_fixedUserMode) LoadFixedUser(preset);
                 }
                 else if (RoleCombo.Items.Count > 0)
                 {
@@ -218,25 +218,23 @@ namespace CabinetLock
                 };
             }).ToList();
             FingerCombo.ItemsSource = options;
-            if (_fixedUserMode)
-            {
-                FingerCombo.SelectedValue = 6;
-            }
-            else
-            {
-                int firstUnused = options.FindIndex(item => !item.ExistingFingerprintId.HasValue);
-                FingerCombo.SelectedIndex = firstUnused >= 0 ? firstUnused : 0;
-            }
+            int firstUnused = options.FindIndex(item => !item.ExistingFingerprintId.HasValue);
+            FingerCombo.SelectedIndex = firstUnused >= 0 ? firstUnused : 0;
         }
 
-        private void LoadFixedStudent(User student)
+        private void LoadFixedUser(User user)
         {
             string className = _classes.FirstOrDefault(item => string.Equals(
-                item.ClassId, student.ClassId, StringComparison.OrdinalIgnoreCase))?.Name ??
-                (string.IsNullOrWhiteSpace(student.ClassId) ? "未分班" : student.ClassId);
-            FixedStudentNameText.Text = string.IsNullOrWhiteSpace(student.Name)
-                ? student.DisplayId : student.Name;
-            FixedStudentMetaText.Text = $"学号：{student.DisplayId}  ·  班级：{className}  ·  学生信息已锁定";
+                item.ClassId, user.ClassId, StringComparison.OrdinalIgnoreCase))?.Name ??
+                (string.IsNullOrWhiteSpace(user.ClassId) ? "未分班" : user.ClassId);
+            FixedStudentNameText.Text = string.IsNullOrWhiteSpace(user.Name)
+                ? user.DisplayId : user.Name;
+            FixedStudentMetaText.Text = user.Role switch
+            {
+                "student" => $"学号：{user.DisplayId}  ·  班级：{className}  ·  用户已锁定",
+                "teacher" => $"教师 ID：{user.DisplayId}  ·  用户已锁定",
+                _ => $"账号 ID：{user.DisplayId}  ·  用户已锁定"
+            };
         }
 
         private void UpdateSelectionState(bool updateMessage = true)
@@ -252,7 +250,7 @@ namespace CabinetLock
                     StepHint.Text = DeviceCombo.Items.Count == 0
                         ? "没有在线采集设备" : "请选择采集设备";
                     StepDetail.Text = DeviceCombo.Items.Count == 0
-                        ? "请检查柜机连接状态后重试" : "学生信息已锁定，可调整要录入的手指";
+                        ? "请检查柜机连接状态后重试" : "用户信息已锁定，可调整要录入的手指";
                 }
                 return;
             }
@@ -433,7 +431,9 @@ namespace CabinetLock
                     summary += "\nSD 当前不可用，模板暂存本机。";
                 }
 
-                summary += "\n柜机 0 号临时槽已清空。需要使用时，请在柜子详情中点击“绑定用户”再下发。";
+                summary += string.Equals(user.Role, "student", StringComparison.OrdinalIgnoreCase)
+                    ? "\n柜机 0 号临时槽已清空。需要使用时，请在柜子详情中点击“绑定用户”再下发。"
+                    : "\n柜机 0 号临时槽已清空。管理员和教师指纹已自动绑定全部柜机；在线柜立即处理，离线柜上线后继续同步。";
                 StepIcon.Text = "\uE73E";
                 StepHint.Text = "指纹录入成功";
                 StepDetail.Text = $"两次验证均已通过 · 用户模板 ID：{result.FingerprintId}";

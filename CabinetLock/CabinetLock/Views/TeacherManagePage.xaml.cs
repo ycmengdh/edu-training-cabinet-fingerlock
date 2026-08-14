@@ -24,8 +24,12 @@ namespace CabinetLock
             try
             {
                 PagedResult<User> result = await Task.Run(() =>
-                    App.UserService.QueryVisibleUsersPage(
-                        _pager.PageIndex, _pager.PageSize, role: "teacher"));
+                {
+                    PagedResult<User> page = App.UserService.QueryVisibleUsersPage(
+                        _pager.PageIndex, _pager.PageSize, role: "teacher");
+                    App.FingerprintTemplateService.ApplyFingerprintSummaries(page.Items);
+                    return page;
+                });
                 _teachers = result.Items.ToList();
                 _pager.SetTotalCount(result.TotalCount);
                 Dictionary<string, string> classNames = await Task.Run(
@@ -119,12 +123,12 @@ namespace CabinetLock
                 MessageBox.Show("请先选择教师", "提示");
                 return;
             }
-            var window = new EnrollFingerprintWindow(null, teacher.UserId)
+            var window = new UserFingerprintManageWindow(teacher)
             {
                 Owner = Window.GetWindow(this)
             };
             window.ShowDialog();
-            if (window.EnrolledFingerprintId > 0) await LoadTeachersAsync();
+            if (window.Changed) await LoadTeachersAsync(resetPage: false);
         }
 
         private async void AddTeacherButton_Click(object sender, RoutedEventArgs e)
@@ -249,6 +253,11 @@ namespace CabinetLock
             {
                 TeacherDataGrid.SelectedItem = teacher;
                 ResetPasswordButton_Click(button, new RoutedEventArgs());
+            }));
+            menu.Items.Add(CreateRowMenuItem("\uE928", "管理指纹", () =>
+            {
+                TeacherDataGrid.SelectedItem = teacher;
+                EnrollTeacherFingerprintButton_Click(button, new RoutedEventArgs());
             }));
             menu.Items.Add(CreateRowMenuItem(teacher.Enabled ? "\uE711" : "\uE73E",
                 teacher.Enabled ? "停用教师" : "启用教师", () =>
@@ -406,6 +415,10 @@ namespace CabinetLock
             {
                 foreach (User teacher in targets)
                 {
+                    int[] fingerprintIds = App.FingerprintTemplateService
+                        .GetTemplatesForUser(teacher.UserId)
+                        .Where(item => item.FingerprintId > 0)
+                        .Select(item => item.FingerprintId).Distinct().ToArray();
                     bool deleted;
                     try
                     {
@@ -426,8 +439,11 @@ namespace CabinetLock
                     }
 
                     success++;
-                    if (teacher.FingerprintId.HasValue)
-                        App.CabinetSyncService.DeleteFingerprintFromAll(teacher.FingerprintId.Value);
+                    foreach (int fingerprintId in fingerprintIds)
+                    {
+                        App.CabinetSyncService.DeleteFingerprintFromAll(fingerprintId);
+                        App.FingerprintTemplateService.DeleteTemplate(fingerprintId);
+                    }
                     App.CabinetBindingService.RemoveFromAll(teacher.UserId);
                     try
                     {

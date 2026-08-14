@@ -61,20 +61,25 @@
                                  ToolTip="搜索姓名 / 学号或工号 / 班级" TextChanged="UserSearchBox_TextChanged"/>
                     </Grid>
                     <DataGrid x:Name="UserListBox" Grid.Row="2" BorderThickness="0" IsReadOnly="True"
+                              CanUserResizeColumns="False" CanUserReorderColumns="False"
+                              EnableRowVirtualization="True" EnableColumnVirtualization="True"
+                              VirtualizingPanel.IsVirtualizing="True"
+                              VirtualizingPanel.VirtualizationMode="Recycling"
+                              ScrollViewer.HorizontalScrollBarVisibility="Auto"
                               SelectionChanged="UserListBox_SelectionChanged">
                         <DataGrid.Resources>
                             <Style TargetType="TextBlock" BasedOn="{StaticResource DataGridTextBlockStyle}"/>
                         </DataGrid.Resources>
                         <DataGrid.Columns>
-                            <DataGridTextColumn Header="姓名" Binding="{Binding Name}" Width="110"
+                            <DataGridTextColumn Header="姓名" Binding="{Binding Name}" Width="0.85*" MinWidth="90"
                                                 ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                            <DataGridTextColumn Header="账号 / 学号" Binding="{Binding IdentityText}" Width="150"
+                            <DataGridTextColumn Header="账号 / 学号" Binding="{Binding IdentityText}" Width="1.2*" MinWidth="130"
                                                 ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                            <DataGridTextColumn Header="角色" Binding="{Binding RoleText}" Width="72"
+                            <DataGridTextColumn Header="角色" Binding="{Binding RoleText}" Width="0.65*" MinWidth="72"
                                                 ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
-                            <DataGridTextColumn Header="班级" Binding="{Binding ClassText}" Width="*" MinWidth="110"
+                            <DataGridTextColumn Header="班级" Binding="{Binding ClassText}" Width="1.4*" MinWidth="130"
                                                 ElementStyle="{StaticResource PermissionGridLeftTextBlockStyle}"/>
-                            <DataGridTextColumn Header="权限更新" Binding="{Binding PermissionUpdateText}" Width="155"
+                            <DataGridTextColumn Header="权限更新" Binding="{Binding PermissionUpdateText}" Width="1.15*" MinWidth="150"
                                                 ElementStyle="{StaticResource DataGridTextBlockStyle}"/>
                         </DataGrid.Columns>
                     </DataGrid>
@@ -97,7 +102,7 @@
                             </Grid.ColumnDefinitions>
                             <StackPanel>
                                 <TextBlock x:Name="SelectedUserName" Text="未选择用户" FontSize="17" FontWeight="SemiBold"/>
-                                <TextBlock x:Name="SelectedUserFp" Text="指纹 ID：-" Foreground="{StaticResource SubTextBrush}" FontSize="11" Margin="0,5,0,0"/>
+                                <TextBlock x:Name="SelectedUserFp" Text="指纹模板：-" Foreground="{StaticResource SubTextBrush}" FontSize="11" Margin="0,5,0,0"/>
                             </StackPanel>
                             <Border x:Name="RoleBadge" Grid.Column="1"
                                     Background="{StaticResource SurfaceAltBrush}"
@@ -184,14 +189,21 @@
 
                     <Border x:Name="StandardPermissionActions" Grid.Row="2" Padding="14,0">
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
-                            <Button x:Name="ResetButton" Content="按模板重置" Style="{StaticResource SecondaryButton}" Click="ResetButton_Click"/>
+                            <Button x:Name="ManageFingerprintButton" Content="管理指纹" Style="{StaticResource SecondaryButton}"
+                                    Click="ManageFingerprintButton_Click"/>
+                            <Button x:Name="ResetButton" Content="按模板重置" Style="{StaticResource SecondaryButton}"
+                                    Margin="8,0,0,0" Click="ResetButton_Click"/>
                             <Button x:Name="SaveButton" Content="保存权限" Margin="8,0,0,0" Click="SaveButton_Click" Foreground="White"/>
                         </StackPanel>
                     </Border>
                     <Border x:Name="StudentAuthorizationActions" Grid.Row="2" Padding="14,0"
                             Visibility="Collapsed">
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                            <Button x:Name="ManageStudentFingerprintButton" Content="管理指纹"
+                                    Style="{StaticResource SecondaryButton}"
+                                    Click="ManageFingerprintButton_Click"/>
                             <Button x:Name="ManageStudentAuthorizationButton" Content="管理柜机授权"
+                                    Margin="8,0,0,0"
                                     Click="ManageStudentAuthorizationButton_Click"/>
                         </StackPanel>
                     </Border>
