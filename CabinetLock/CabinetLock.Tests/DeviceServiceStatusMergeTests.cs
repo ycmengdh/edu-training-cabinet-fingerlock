@@ -49,6 +49,7 @@ public class DeviceServiceStatusMergeTests
     [Theory]
     [InlineData("", "", "CAB_AABBCCDDEE01", "CAB_AABBCCDDEE01")]
     [InlineData("Cabinet Node", "", "CAB_AABBCCDDEE01", "CAB_AABBCCDDEE01")]
+    [InlineData("ESP-IDF Cabinet", "CAB_AABBCCDDEE01", "CAB_AABBCCDDEE01", "CAB_AABBCCDDEE01")]
     [InlineData("实训柜", "", "CAB_AABBCCDDEE01", "CAB_AABBCCDDEE01")]
     [InlineData("一号柜", "现场-01", "一号柜", "现场-01")]
     public void ApplyDefaultIdentity_UsesCabMacWithoutOverwritingUserValues(
@@ -72,11 +73,55 @@ public class DeviceServiceStatusMergeTests
         Assert.Equal("CAB_OLD", device.DeviceId);
     }
 
+    [Fact]
+    public void ApplyDefaultIdentity_ClearsRootName()
+    {
+        var root = new Device
+        {
+            DeviceId = "ROOT_AABBCCDDEE01",
+            DeviceName = "ESP-IDF Root",
+            DeviceNumber = "ROOT-01"
+        };
+
+        ApplyDefaultIdentity(root);
+
+        Assert.Equal("", root.DeviceName);
+        Assert.Equal("ROOT-01", root.DeviceNumber);
+    }
+
+    [Fact]
+    public void IsTrueRoot_RecognizesReservedIdWithoutPersistedFlag()
+    {
+        Assert.True(DeviceService.IsTrueRoot(new Device
+        {
+            DeviceId = "ROOT_AABBCCDDEE01",
+            IsRoot = false
+        }));
+        Assert.True(DeviceService.IsTrueRoot(new DeviceClient
+        {
+            DeviceId = "ROOT_AABBCCDDEE01",
+            IsRoot = false
+        }));
+        Assert.False(DeviceService.IsTrueRoot(new Device
+        {
+            DeviceId = "CABINET_AABBCCDDEE01",
+            IsRoot = true
+        }));
+    }
+
     private static void ApplyLiveRuntimeStatus(Device target, DeviceClient source)
     {
         MethodInfo method = typeof(DeviceService).GetMethod(
             "ApplyLiveRuntimeStatus", BindingFlags.Static | BindingFlags.NonPublic)
             ?? throw new InvalidOperationException("DeviceService.ApplyLiveRuntimeStatus not found");
         method.Invoke(null, new object[] { target, source });
+    }
+
+    private static void ApplyDefaultIdentity(Device device)
+    {
+        MethodInfo method = typeof(DeviceService).GetMethod(
+            "ApplyDefaultIdentity", BindingFlags.Static | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("DeviceService.ApplyDefaultIdentity not found");
+        method.Invoke(null, new object[] { device });
     }
 }

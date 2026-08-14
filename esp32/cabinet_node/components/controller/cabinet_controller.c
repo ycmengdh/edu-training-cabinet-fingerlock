@@ -441,7 +441,7 @@ static void handle_register(const cab_app_view_t *request, bool ingress) {
     char json[768];
     cab_mesh_stats_t stats = cab_mesh_stats();
     snprintf(json, sizeof(json),
-        "{\"device_id\":\"%s\",\"device_name\":\"%s\","
+        "{\"device_id\":\"%s\","
         "\"is_root\":false,\"firmware_version\":\"%s\","
         "\"hardware_version\":\"%s\","
         "\"mesh_layer\":%d,\"mesh_node_type\":2,\"child_count\":%d,"
@@ -454,7 +454,7 @@ static void handle_register(const cab_app_view_t *request, bool ingress) {
         "\"maintenance_config_version\":%lu,"
         "\"maintenance_active\":%s,\"maintenance_source\":\"%s\","
         "\"maintenance_lock_mask\":%u}",
-        s_device_id, config.device_name, esp_app_get_description()->version,
+        s_device_id, esp_app_get_description()->version,
         CABINET_HARDWARE_VERSION,
         cab_mesh_layer(),
         cab_mesh_child_count(), (unsigned long)esp_get_free_heap_size(),
@@ -507,7 +507,7 @@ static void handle_read_config(const cab_app_view_t *request, bool ingress) {
     cab_storage_load_config(&config);
     char json[768];
     snprintf(json, sizeof(json),
-        "{\"device_id\":\"%s\",\"device_name\":\"%s\","
+        "{\"device_id\":\"%s\","
         "\"is_root\":false,\"work_mode\":\"mesh\","
         "\"uplink_mode\":0,\"mesh_channel\":6,"
         "\"fingerprint_count\":%u,\"perm_version\":%lu,"
@@ -520,7 +520,7 @@ static void handle_read_config(const cab_app_view_t *request, bool ingress) {
         "\"maintenance_active\":%s,\"maintenance_source\":\"%s\","
         "\"maintenance_lock_mask\":%u,"
         "\"firmware_version\":\"%s\",\"hardware_version\":\"%s\"}",
-        s_device_id, config.device_name, config.fingerprint_count,
+        s_device_id, config.fingerprint_count,
         (unsigned long)cab_storage_permission_version(),
         cab_fp_ready() ? "true" : "false", cab_fp_last_error(),
         (unsigned long)cab_fp_error_count(),
@@ -541,11 +541,9 @@ static void handle_read_config(const cab_app_view_t *request, bool ingress) {
 
 static void handle_write_config(const cab_app_view_t *request, cJSON *json,
                                 bool ingress) {
+    (void)json;
     cab_device_config_t config;
     cab_storage_load_config(&config);
-    const char *name = json_string(json, "device_name", NULL);
-    if (name != NULL) snprintf(config.device_name, sizeof(config.device_name),
-                               "%s", name);
     // Channel and work mode stay fixed; changing either would split the mesh.
     config.work_mode = 0;
     config.mesh_channel = 6;

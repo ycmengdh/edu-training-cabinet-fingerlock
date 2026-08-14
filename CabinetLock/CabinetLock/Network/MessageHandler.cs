@@ -243,22 +243,13 @@ namespace CabinetLock
         private void HandleRegister(DeviceClient? device, Message msg)
         {
             MergeReportedMetadata(device, msg);
-            var deviceName = TryGetStringData(msg, "device_name")
-                ?? TryGetStringData(msg, "deviceName")
-                ?? "未命名设备";
-
-            if (device != null && string.IsNullOrEmpty(device.DeviceName))
-            {
-                device.DeviceName = deviceName;
-            }
-
             var deviceId = device?.DeviceId ?? msg.DeviceId;
             bool isRoot = TryGetBoolData(msg, "is_root");
             if (device != null) device.IsRoot = isRoot;
             if (msg.Data is JObject maintenanceData)
                 OnMaintenanceStatus?.Invoke(deviceId, maintenanceData);
             // 先记录柜机上报的维护版本，再让注册回调判断是否需要入队。
-            OnDeviceRegistered?.Invoke(deviceId, deviceName);
+            OnDeviceRegistered?.Invoke(deviceId, "");
 
             // 检测根节点（is_root=true），通知 SdStorageService
             if (isRoot && !string.IsNullOrEmpty(deviceId))

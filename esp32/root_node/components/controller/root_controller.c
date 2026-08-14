@@ -152,18 +152,15 @@ static const char *firmware_version(void) {
 }
 
 static void handle_register(const cab_app_view_t *request) {
-    cab_device_config_t config;
-    cab_storage_load_config(&config);
     cab_mesh_stats_t stats = cab_mesh_stats();
     char json[512];
     snprintf(json, sizeof(json),
-        "{\"device_id\":\"%s\",\"device_name\":\"%s\","
+        "{\"device_id\":\"%s\","
         "\"is_root\":true,\"firmware_version\":\"%s\","
         "\"mesh_layer\":1,\"mesh_node_type\":1,\"child_count\":%d,"
         "\"route_count\":%d,\"mesh_to_ds_ready\":true,"
         "\"mesh_rx_drops\":%lu,"
-        "\"sd_ready\":%s}", s_root_id, config.device_name,
-        firmware_version(),
+        "\"sd_ready\":%s}", s_root_id, firmware_version(),
         cab_mesh_child_count(), cab_mesh_route_count(),
         (unsigned long)stats.receive_drops,
         root_storage_ready() ? "true" : "false");
@@ -202,24 +199,20 @@ static void handle_status(const cab_app_view_t *request) {
 }
 
 static void handle_read_config(const cab_app_view_t *request) {
-    cab_device_config_t config;
-    cab_storage_load_config(&config);
     char json[512];
     snprintf(json, sizeof(json),
-        "{\"device_id\":\"%s\",\"device_name\":\"%s\","
+        "{\"device_id\":\"%s\","
         "\"is_root\":true,\"work_mode\":\"mesh\","
         "\"uplink_mode\":0,\"mesh_channel\":6,"
         "\"firmware_version\":\"%s\"}",
-        s_root_id, config.device_name, firmware_version());
+        s_root_id, firmware_version());
     send_json(CAB_CMD_CONFIG_RESPONSE, request, json, true);
 }
 
 static void handle_write_config(const cab_app_view_t *request, cJSON *json) {
+    (void)json;
     cab_device_config_t config;
     cab_storage_load_config(&config);
-    const char *name = json_string(json, "device_name", NULL);
-    if (name != NULL) snprintf(config.device_name, sizeof(config.device_name),
-                               "%s", name);
     config.work_mode = 0;
     config.mesh_channel = 6;
     if (!cab_storage_save_config(&config)) {

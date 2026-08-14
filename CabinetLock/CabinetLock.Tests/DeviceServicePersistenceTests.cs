@@ -131,6 +131,95 @@ public class DeviceServicePersistenceTests
         });
     }
 
+    [Fact]
+    public void PersistNewlySeenDevices_MigratesFirmwareNameAndKeepsCustomName()
+    {
+        WithTemporaryDatabase(() =>
+        {
+            BusinessDatabase.ReplaceTable("devices", JArray.FromObject(new[]
+            {
+                new Device
+                {
+                    DeviceId = "CAB_AABBCCDDEE01",
+                    DeviceName = "ESP-IDF Cabinet",
+                    DeviceNumber = "CAB_AABBCCDDEE01",
+                    MeshMac = "AA:BB:CC:DD:EE:01"
+                },
+                new Device
+                {
+                    DeviceId = "CAB_AABBCCDDEE02",
+                    DeviceName = "二号实验柜",
+                    DeviceNumber = "CAB_AABBCCDDEE02",
+                    MeshMac = "AA:BB:CC:DD:EE:02"
+                }
+            }), 1);
+
+            Persist(
+                new Device
+                {
+                    DeviceId = "CAB_AABBCCDDEE01",
+                    DeviceName = "CAB_AABBCCDDEE01",
+                    DeviceNumber = "CAB_AABBCCDDEE01",
+                    MeshMac = "AA:BB:CC:DD:EE:01"
+                },
+                new Device
+                {
+                    DeviceId = "CAB_AABBCCDDEE02",
+                    DeviceName = "CAB_AABBCCDDEE02",
+                    DeviceNumber = "CAB_AABBCCDDEE02",
+                    MeshMac = "AA:BB:CC:DD:EE:02"
+                });
+
+            Device[] stored = BusinessDatabase.ReadArray("devices")
+                .ToObject<Device[]>()!;
+            Assert.Equal("CAB_AABBCCDDEE01", stored[0].DeviceName);
+            Assert.Equal("二号实验柜", stored[1].DeviceName);
+            Assert.Equal(2U, BusinessDatabase.GetTableVersion("devices"));
+        });
+    }
+
+    [Fact]
+    public void NormalizeManagedDeviceNames_MigratesDefaultsAndClearsRootName()
+    {
+        WithTemporaryDatabase(() =>
+        {
+            BusinessDatabase.ReplaceTable("devices", JArray.FromObject(new[]
+            {
+                new Device
+                {
+                    DeviceId = "CAB_AABBCCDDEE01",
+                    DeviceName = "ESP-IDF Cabinet",
+                    DeviceNumber = "CAB_AABBCCDDEE01",
+                    MeshMac = "AA:BB:CC:DD:EE:01"
+                },
+                new Device
+                {
+                    DeviceId = "CAB_AABBCCDDEE02",
+                    DeviceName = "二号实验柜",
+                    MeshMac = "AA:BB:CC:DD:EE:02"
+                },
+                new Device
+                {
+                    DeviceId = "ROOT_AABBCCDDEE03",
+                    DeviceName = "ESP-IDF Root",
+                    DeviceNumber = "ROOT-01",
+                    MeshMac = "AA:BB:CC:DD:EE:03"
+                }
+            }), 1);
+
+            int changed = new DeviceService().NormalizeManagedDeviceNames();
+
+            Device[] stored = BusinessDatabase.ReadArray("devices")
+                .ToObject<Device[]>()!;
+            Assert.Equal(3, changed);
+            Assert.Equal("CAB_AABBCCDDEE01", stored[0].DeviceName);
+            Assert.Equal("二号实验柜", stored[1].DeviceName);
+            Assert.Equal("CAB_AABBCCDDEE02", stored[1].DeviceNumber);
+            Assert.Equal("", stored[2].DeviceName);
+            Assert.Equal("ROOT-01", stored[2].DeviceNumber);
+        });
+    }
+
     private static void Persist(params Device[] devices)
     {
         MethodInfo method = typeof(DeviceService).GetMethod(

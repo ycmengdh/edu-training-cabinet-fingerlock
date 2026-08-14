@@ -12,10 +12,6 @@ namespace CabinetLock
         [JsonProperty("device_id")]
         public string DeviceId { get; set; } = "";
 
-        /// <summary>设备名称</summary>
-        [JsonProperty("device_name")]
-        public string DeviceName { get; set; } = "";
-
         /// <summary>WiFi SSID</summary>
         [JsonProperty("wifi_ssid")]
         public string WifiSsid { get; set; } = "";

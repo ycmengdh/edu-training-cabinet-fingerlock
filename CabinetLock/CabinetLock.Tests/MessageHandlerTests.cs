@@ -1,3 +1,4 @@
+using System.Reflection;
 using Newtonsoft.Json.Linq;
 
 namespace CabinetLock.Tests;
@@ -228,6 +229,7 @@ public class MessageHandlerTests
             DeviceId = device.DeviceId,
             Data = JObject.FromObject(new
             {
+                device_name = "ESP-IDF Cabinet",
                 firmware_version = "3.4.0-idf",
                 hardware_version = ""
             })
@@ -235,6 +237,60 @@ public class MessageHandlerTests
 
         Assert.Equal("3.4.0-idf", device.FirmwareVersion);
         Assert.Equal("cabinet-v1", device.HardwareVersion);
+        Assert.Equal("", device.DeviceName);
+    }
+
+    [Fact]
+    public void Register_DoesNotImportFirmwareDeviceName()
+    {
+        var handler = new MessageHandler();
+        var device = new DeviceClient
+        {
+            DeviceId = "CAB_AABBCCDDEE01",
+            DeviceName = "上位机名称"
+        };
+        string reportedName = "not-raised";
+        handler.OnDeviceRegistered += (_, name) => reportedName = name;
+
+        handler.HandleMessage(device, new Message
+        {
+            Cmd = Protocol.CmdRegister,
+            DeviceId = device.DeviceId,
+            Data = JObject.FromObject(new
+            {
+                device_name = "ESP-IDF Cabinet",
+                is_root = false
+            })
+        });
+
+        Assert.Equal("上位机名称", device.DeviceName);
+        Assert.Equal("", reportedName);
+    }
+
+    [Fact]
+    public void MeshBridge_DoesNotImportFirmwareDeviceName()
+    {
+        var device = new DeviceClient
+        {
+            DeviceId = "CAB_AABBCCDDEE01",
+            DeviceName = "上位机名称"
+        };
+        MethodInfo merge = typeof(MeshBridge).GetMethod(
+            "MergeReportedMetadata", BindingFlags.Static | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("MeshBridge.MergeReportedMetadata not found");
+
+        merge.Invoke(null, new object[]
+        {
+            device,
+            JObject.FromObject(new
+            {
+                device_name = "ESP-IDF Cabinet",
+                firmware_version = "26081501-cab"
+            })
+        });
+
+        Assert.Equal("上位机名称", device.DeviceName);
+        Assert.Equal("26081501-cab", device.FirmwareVersion);
     }
 
     [Theory]

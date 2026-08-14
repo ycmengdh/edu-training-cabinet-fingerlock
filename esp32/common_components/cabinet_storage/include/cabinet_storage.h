@@ -34,7 +34,6 @@ typedef struct {
 
 typedef struct {
     char device_id[25];
-    char device_name[33];
     uint8_t work_mode;
     uint8_t mesh_channel;
     uint8_t fingerprint_count;

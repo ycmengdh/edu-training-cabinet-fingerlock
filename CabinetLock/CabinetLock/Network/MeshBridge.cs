@@ -659,10 +659,6 @@ namespace CabinetLock
         private static void MergeReportedMetadata(
             DeviceClient device, Newtonsoft.Json.Linq.JObject data)
         {
-            string? name = data["device_name"]?.ToString();
-            if (!string.IsNullOrWhiteSpace(name))
-                device.DeviceName = name.Trim();
-
             string? firmwareVersion = data["firmware_version"]?.ToString();
             if (!string.IsNullOrWhiteSpace(firmwareVersion))
                 device.FirmwareVersion = firmwareVersion.Trim();

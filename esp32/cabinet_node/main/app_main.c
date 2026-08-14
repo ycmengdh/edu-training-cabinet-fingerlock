@@ -134,7 +134,7 @@ static int encode_periodic(uint8_t *output, size_t output_size,
             format_mac(parent_text, parent_bssid);
         }
         payload_length = snprintf((char *)payload, sizeof(payload),
-            "{\"device_id\":\"%s\",\"device_name\":\"ESP-IDF Cabinet\","
+            "{\"device_id\":\"%s\","
             "\"is_root\":false,\"firmware_version\":\"%s\","
             "\"hardware_version\":\"%s\","
             "\"ota_validated\":%s,"

@@ -25,12 +25,23 @@ static bool s_time_synced;
 
 typedef struct {
     char device_id[25];
-    char device_name[33];
+    char reserved_name[33];
     uint8_t work_mode;
     uint8_t mesh_channel;
     uint8_t fingerprint_count;
     uint32_t permission_version;
 } legacy_device_config_t;
+
+typedef struct {
+    char device_id[25];
+    char reserved_name[33];
+    uint8_t work_mode;
+    uint8_t mesh_channel;
+    uint8_t fingerprint_count;
+    uint32_t permission_version;
+    char maintenance_pin[CAB_MAINTENANCE_PIN_LENGTH + 1];
+    uint32_t maintenance_config_version;
+} previous_device_config_t;
 
 static bool maintenance_pin_valid(const char *pin) {
     for (size_t index = 0; index < CAB_MAINTENANCE_PIN_LENGTH; ++index) {
@@ -203,6 +214,7 @@ static bool persist_permissions(void) {
 }
 
 bool cab_storage_init(const char *default_device_id, bool is_root) {
+    (void)is_root;
     if (s_initialized) return true;
     if (nvs_open(STORAGE_NAMESPACE, NVS_READWRITE, &s_nvs) != ESP_OK) {
         return false;
@@ -223,12 +235,6 @@ bool cab_storage_init(const char *default_device_id, bool is_root) {
         memset(&config, 0, sizeof(config));
         snprintf(config.device_id, sizeof(config.device_id), "%s",
                  default_device_id == NULL ? "CABINET" : default_device_id);
-        size_t legacy_name_length = sizeof(config.device_name);
-        if (nvs_get_str(s_nvs, "device_name", config.device_name,
-                        &legacy_name_length) != ESP_OK) {
-            snprintf(config.device_name, sizeof(config.device_name), "%s",
-                     is_root ? "ESP-IDF Root" : "ESP-IDF Cabinet");
-        }
         config.work_mode = 0;
         config.mesh_channel = 6;
         nvs_get_u8(s_nvs, "fp_count", &config.fingerprint_count);
@@ -238,6 +244,7 @@ bool cab_storage_init(const char *default_device_id, bool is_root) {
         config.maintenance_config_version = 1;
         cab_storage_save_config(&config);
     }
+    if (nvs_erase_key(s_nvs, "device_name") == ESP_OK) nvs_commit(s_nvs);
     if (!maintenance_pin_valid(config.maintenance_pin)) {
         snprintf(config.maintenance_pin, sizeof(config.maintenance_pin), "%s",
                  CAB_DEFAULT_MAINTENANCE_PIN);
@@ -256,6 +263,22 @@ bool cab_storage_load_config(cab_device_config_t *config) {
     if (length == sizeof(*config)) {
         return nvs_get_blob(s_nvs, "config", config, &length) == ESP_OK;
     }
+    if (length == sizeof(previous_device_config_t)) {
+        previous_device_config_t previous;
+        if (nvs_get_blob(s_nvs, "config", &previous, &length) != ESP_OK) {
+            return false;
+        }
+        memset(config, 0, sizeof(*config));
+        memcpy(config->device_id, previous.device_id, sizeof(previous.device_id));
+        config->work_mode = previous.work_mode;
+        config->mesh_channel = previous.mesh_channel;
+        config->fingerprint_count = previous.fingerprint_count;
+        config->permission_version = previous.permission_version;
+        memcpy(config->maintenance_pin, previous.maintenance_pin,
+               sizeof(previous.maintenance_pin));
+        config->maintenance_config_version = previous.maintenance_config_version;
+        return cab_storage_save_config(config);
+    }
     if (length != sizeof(legacy_device_config_t)) return false;
 
     legacy_device_config_t legacy;
@@ -264,7 +287,6 @@ bool cab_storage_load_config(cab_device_config_t *config) {
     }
     memset(config, 0, sizeof(*config));
     memcpy(config->device_id, legacy.device_id, sizeof(legacy.device_id));
-    memcpy(config->device_name, legacy.device_name, sizeof(legacy.device_name));
     config->work_mode = legacy.work_mode;
     config->mesh_channel = legacy.mesh_channel;
     config->fingerprint_count = legacy.fingerprint_count;

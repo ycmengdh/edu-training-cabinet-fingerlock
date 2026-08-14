@@ -8,6 +8,7 @@ namespace CabinetLock
     {
         private const string LegacyDefaultCabinetName = "实训柜";
         private const string FirmwareDefaultCabinetName = "Cabinet Node";
+        private const string EspIdfDefaultCabinetName = "ESP-IDF Cabinet";
         private static readonly object DevicePersistenceLock = new();
         private readonly RootDataService _root = new RootDataService();
 
@@ -60,7 +61,7 @@ namespace CabinetLock
                 {
                     DeviceId = string.IsNullOrWhiteSpace(client.DeviceId)
                         ? (client.MeshMac ?? "") : client.DeviceId,
-                    DeviceName = client.DeviceName,
+                    DeviceName = "",
                     IpAddress = "",
                     IsOnline = client.IsOnline,
                     RegisterTime = client.ConnectTime == default ? lastSeen : client.ConnectTime,
@@ -127,18 +128,16 @@ namespace CabinetLock
 
         /// <summary>
         /// 判断是否为真正的 Mesh 根节点（柜子列表应过滤）。
-        /// 规则收紧：只有明确 is_root 且 ID 像 ROOT 时才过滤；
-        /// 宁可把根节点显示出来，也不要把柜子误过滤成空列表。
+        /// ROOT_* 是协议保留的根节点 ID；CABINET_* 即使误报 is_root 仍按柜机处理。
         /// </summary>
         public static bool IsTrueRoot(DeviceClient client)
         {
             if (client == null) return false;
             string id = client.DeviceId ?? "";
             if (id.Contains("CABINET", StringComparison.OrdinalIgnoreCase)) return false;
-            // 必须同时满足：标记为根 + 名称像根节点
+            if (id.StartsWith("ROOT_", StringComparison.OrdinalIgnoreCase)) return true;
             if (client.IsRoot && id.Contains("ROOT", StringComparison.OrdinalIgnoreCase))
                 return true;
-            // 仅有 is_root、没有 CABINET/ROOT 关键字时，也当根（Root 默认 device_id）
             if (client.IsRoot && !string.IsNullOrWhiteSpace(id))
                 return true;
             return false;
@@ -149,6 +148,7 @@ namespace CabinetLock
             if (device == null) return false;
             string id = device.DeviceId ?? "";
             if (id.Contains("CABINET", StringComparison.OrdinalIgnoreCase)) return false;
+            if (id.StartsWith("ROOT_", StringComparison.OrdinalIgnoreCase)) return true;
             if (device.IsRoot && id.Contains("ROOT", StringComparison.OrdinalIgnoreCase))
                 return true;
             if (device.IsRoot && !string.IsNullOrWhiteSpace(id))
@@ -172,12 +172,32 @@ namespace CabinetLock
                 devices.Add(device);
             }
 
-            if (!string.IsNullOrWhiteSpace(deviceName)) device.DeviceName = deviceName;
+            // 名称只由上位机业务库维护，注册报文中的名称不落库。
             ApplyDefaultIdentity(device);
             device.IpAddress = ipAddress;
             device.IsOnline = true;
             device.LastOnlineTime = DateTime.Now;
             _root.Save("devices", devices);
+        }
+
+        /// <summary>迁移固件占位名，并清空根节点的历史名称。</summary>
+        public int NormalizeManagedDeviceNames()
+        {
+            List<Device> devices = _root.Read<Device>("devices");
+            int changed = 0;
+            foreach (Device device in devices)
+            {
+                string oldName = device.DeviceName ?? "";
+                string oldNumber = device.DeviceNumber ?? "";
+                ApplyDefaultIdentity(device);
+                if (!string.Equals(oldName, device.DeviceName, StringComparison.Ordinal) ||
+                    !string.Equals(oldNumber, device.DeviceNumber, StringComparison.Ordinal))
+                    changed++;
+            }
+
+            if (changed > 0 && !_root.Save("devices", devices))
+                throw new InvalidOperationException("柜机名称规范化保存失败");
+            return changed;
         }
 
         /// <summary>更新设备在线状态</summary>
@@ -242,6 +262,20 @@ namespace CabinetLock
         private static bool MergeStableReportedMetadata(Device target, Device source)
         {
             bool changed = false;
+            if (!HasStoredCabinetName(target.DeviceName, target.DeviceNumber) &&
+                !string.IsNullOrWhiteSpace(source.DeviceName) &&
+                !string.Equals(target.DeviceName, source.DeviceName,
+                    StringComparison.Ordinal))
+            {
+                target.DeviceName = source.DeviceName.Trim();
+                changed = true;
+            }
+            if (string.IsNullOrWhiteSpace(target.DeviceNumber) &&
+                !string.IsNullOrWhiteSpace(source.DeviceNumber))
+            {
+                target.DeviceNumber = source.DeviceNumber.Trim();
+                changed = true;
+            }
             if (!string.IsNullOrWhiteSpace(source.FirmwareVersion) &&
                 !string.Equals(target.FirmwareVersion, source.FirmwareVersion,
                     StringComparison.Ordinal))
@@ -453,7 +487,7 @@ namespace CabinetLock
                     devices.Add(new Device
                     {
                         DeviceId = client.DeviceId,
-                        DeviceName = client.DeviceName,
+                        DeviceName = "",
                         IsOnline = true,
                         RegisterTime = client.ConnectTime == default ? DateTime.Now : client.ConnectTime,
                         LastOnlineTime = client.LastSeen == default ? DateTime.Now : client.LastSeen,
@@ -476,8 +510,6 @@ namespace CabinetLock
                     DateTime lastSeen = client.LastSeen == default ? DateTime.Now : client.LastSeen;
                     existing.LastOnlineTime = lastSeen;
                     existing.LastSeenUnix = new DateTimeOffset(lastSeen).ToUnixTimeSeconds();
-                    if (!HasStoredCabinetName(existing.DeviceName, existing.DeviceNumber))
-                        existing.DeviceName = client.DeviceName;
                     if (!string.IsNullOrWhiteSpace(client.DeviceId))
                         existing.DeviceId = client.DeviceId;
                     if (!string.IsNullOrWhiteSpace(client.MeshMac))
@@ -514,6 +546,12 @@ namespace CabinetLock
 
         private static void ApplyDefaultIdentity(Device device)
         {
+            if (IsTrueRoot(device))
+            {
+                device.DeviceName = "";
+                return;
+            }
+
             string identity = BuildCabinetIdentity(device.DeviceId, device.MeshMac);
             if (string.IsNullOrWhiteSpace(identity)) return;
 
@@ -536,6 +574,8 @@ namespace CabinetLock
             string value = name?.Trim() ?? "";
             if (string.IsNullOrWhiteSpace(value) ||
                 string.Equals(value, FirmwareDefaultCabinetName,
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(value, EspIdfDefaultCabinetName,
                     StringComparison.OrdinalIgnoreCase))
                 return false;
 
