@@ -252,9 +252,10 @@ namespace CabinetLock
             var deviceId = device?.DeviceId ?? msg.DeviceId;
             bool isRoot = TryGetBoolData(msg, "is_root");
             if (device != null) device.IsRoot = isRoot;
-            OnDeviceRegistered?.Invoke(deviceId, deviceName);
             if (msg.Data is JObject maintenanceData)
                 OnMaintenanceStatus?.Invoke(deviceId, maintenanceData);
+            // 先记录柜机上报的维护版本，再让注册回调判断是否需要入队。
+            OnDeviceRegistered?.Invoke(deviceId, deviceName);
 
             // 检测根节点（is_root=true），通知 SdStorageService
             if (isRoot && !string.IsNullOrEmpty(deviceId))

@@ -49,6 +49,84 @@ public sealed class CabinetSyncQueueServiceTests : IDisposable
         Assert.Equal("startup", jobs[1].Reason);
     }
 
+    [Fact]
+    public void AutomaticPass_FinishesPermissionPhaseBeforeMaintenance()
+    {
+        DateTime now = DateTime.Now;
+        var jobs = new[]
+        {
+            new CabinetSyncJob
+            {
+                JobKey = "maintenance:CABINET_001:",
+                JobKind = "maintenance",
+                DeviceId = "CABINET_001",
+                State = "pending",
+                UpdateTime = now.AddMinutes(-2)
+            },
+            new CabinetSyncJob
+            {
+                JobKey = "user:CABINET_002:ADMIN",
+                JobKind = "user",
+                UserId = "admin",
+                DeviceId = "CABINET_002",
+                State = "pending",
+                UpdateTime = now.AddMinutes(-1)
+            }
+        };
+        var online = new HashSet<string>(
+            new[] { "CABINET_001", "CABINET_002" },
+            StringComparer.OrdinalIgnoreCase);
+
+        CabinetSyncJob selected = Assert.Single(
+            CabinetSyncQueueService.SelectAutomaticPass(jobs, online, now));
+
+        Assert.Equal("user", selected.JobKind);
+        Assert.Equal("CABINET_002", selected.DeviceId);
+    }
+
+    [Fact]
+    public void AutomaticPass_SkipsOfflineAndBackoffJobs()
+    {
+        DateTime now = DateTime.Now;
+        var jobs = new[]
+        {
+            new CabinetSyncJob
+            {
+                JobKey = "user:CABINET_OFFLINE:ADMIN",
+                JobKind = "user",
+                UserId = "admin",
+                DeviceId = "CABINET_OFFLINE",
+                State = "pending",
+                UpdateTime = now.AddMinutes(-3)
+            },
+            new CabinetSyncJob
+            {
+                JobKey = "user:CABINET_001:ADMIN",
+                JobKind = "user",
+                UserId = "admin",
+                DeviceId = "CABINET_001",
+                State = "failed",
+                NextAttemptTime = now.AddMinutes(1),
+                UpdateTime = now.AddMinutes(-2)
+            },
+            new CabinetSyncJob
+            {
+                JobKey = "maintenance:CABINET_001:",
+                JobKind = "maintenance",
+                DeviceId = "CABINET_001",
+                State = "pending",
+                UpdateTime = now.AddMinutes(-1)
+            }
+        };
+        var online = new HashSet<string>(
+            new[] { "CABINET_001" }, StringComparer.OrdinalIgnoreCase);
+
+        CabinetSyncJob selected = Assert.Single(
+            CabinetSyncQueueService.SelectAutomaticPass(jobs, online, now));
+
+        Assert.Equal("maintenance", selected.JobKind);
+    }
+
     public void Dispose()
     {
         BusinessDatabase.SetActivePath(_originalPath);

@@ -14,6 +14,17 @@ namespace CabinetLock
 
         public MaintenanceSettings GetSettings() => BusinessDatabase.GetMaintenanceSettings();
 
+        public bool NeedsConfigurationSync(string deviceId, string? firmwareVersion)
+        {
+            if (string.IsNullOrWhiteSpace(deviceId) ||
+                !MaintenanceSettings.SupportsDevicePinEncoding(firmwareVersion))
+                return false;
+
+            uint expectedVersion = GetSettings().Version;
+            return _states.TryGetValue(deviceId, out MaintenanceRuntimeState? state) &&
+                state.ConfigVersion < expectedVersion;
+        }
+
         public async Task<MaintenancePasswordUpdateResult> ChangePinAsync(
             string pin, CancellationToken cancellationToken = default)
         {
@@ -151,12 +162,25 @@ namespace CabinetLock
         public void HandleReported(string deviceId, JObject data)
         {
             if (string.IsNullOrWhiteSpace(deviceId) || data == null) return;
-            bool active = data.Value<bool?>("maintenance_active") ??
-                data.Value<bool?>("active") ?? false;
-            int mask = data.Value<int?>("maintenance_lock_mask") ?? 0;
-            string source = data.Value<string>("maintenance_source") ??
-                data.Value<string>("source") ?? "local";
-            _states[deviceId] = new MaintenanceRuntimeState(active, mask & 0x0F, source);
+            bool? active = data.Value<bool?>("maintenance_active") ??
+                data.Value<bool?>("active");
+            int? mask = data.Value<int?>("maintenance_lock_mask");
+            string? source = data.Value<string>("maintenance_source") ??
+                data.Value<string>("source");
+            uint? configVersion = data.Value<uint?>("maintenance_config_version");
+            if (!active.HasValue && !mask.HasValue && source == null &&
+                !configVersion.HasValue)
+                return;
+
+            _states.AddOrUpdate(deviceId,
+                _ => new MaintenanceRuntimeState(
+                    active ?? false, (mask ?? 0) & 0x0F,
+                    source ?? "local", configVersion ?? 0),
+                (_, current) => new MaintenanceRuntimeState(
+                    active ?? current.Active,
+                    (mask ?? current.LockMask) & 0x0F,
+                    source ?? current.Source,
+                    configVersion ?? current.ConfigVersion));
             StateChanged?.Invoke(deviceId);
         }
 
@@ -194,7 +218,8 @@ namespace CabinetLock
             App.CurrentUser?.Role, "admin", StringComparison.OrdinalIgnoreCase);
     }
 
-    public sealed record MaintenanceRuntimeState(bool Active, int LockMask, string Source);
+    public sealed record MaintenanceRuntimeState(
+        bool Active, int LockMask, string Source, uint ConfigVersion);
 
     public sealed class MaintenancePasswordUpdateResult
     {

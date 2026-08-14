@@ -4,7 +4,8 @@ namespace CabinetLock
 {
     public sealed class CabinetSyncQueueService
     {
-        private const int MaxJobsPerPass = 20;
+        // 自动流水线每次只认领一个任务，确保 OTA 可以在下一柜边界立即获得优先权。
+        private const int MaxJobsPerPass = 1;
         private readonly SemaphoreSlim _processor = new(1, 1);
 
         public void EnqueueUser(string userId, IEnumerable<string> deviceIds, string reason)
@@ -140,7 +141,7 @@ FROM cabinet_sync_queue WHERE state<>'completed'";
         {
             while (!cancellationToken.IsCancellationRequested)
             {
-                try { await ProcessPendingAsync(cancellationToken).ConfigureAwait(false); }
+                try { Trigger(); }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
                 catch { }
                 await Task.Delay(TimeSpan.FromSeconds(12), cancellationToken).ConfigureAwait(false);
@@ -149,11 +150,9 @@ FROM cabinet_sync_queue WHERE state<>'completed'";
 
         public void Trigger()
         {
-            _ = Task.Run(async () =>
-            {
-                try { await ProcessPendingAsync(CancellationToken.None).ConfigureAwait(false); }
-                catch { }
-            });
+            if (System.Windows.Application.Current is App app &&
+                app.CabinetBackgroundServicesStarted)
+                app.QueueAutomaticCommunicationPipeline();
         }
 
         public async Task<int> ProcessPendingAsync(CancellationToken cancellationToken)
@@ -169,11 +168,9 @@ FROM cabinet_sync_queue WHERE state<>'completed'";
                 if (online.Count == 0) return 0;
 
                 DateTime now = DateTime.Now;
-                List<CabinetSyncJob> due = GetAll().Where(job =>
-                        job.State != "completed" && online.Contains(job.DeviceId) &&
-                        (!job.NextAttemptTime.HasValue || job.NextAttemptTime.Value <= now))
-                    .Take(MaxJobsPerPass).ToList();
-                int completed = 0;
+                List<CabinetSyncJob> due = SelectAutomaticPass(
+                    GetAll(), online, now, MaxJobsPerPass).ToList();
+                int processed = 0;
                 foreach (CabinetSyncJob job in due)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
@@ -198,9 +195,10 @@ FROM cabinet_sync_queue WHERE state<>'completed'";
                                 cancellationToken)
                             .ConfigureAwait(false);
                         if (!claimed) continue;
+                        processed++;
                         if (success)
                         {
-                            if (MarkCompleted(job.JobKey, lease)) completed++;
+                            MarkCompleted(job.JobKey, lease);
                         }
                         else MarkFailed(job, error, lease);
                     }
@@ -211,7 +209,7 @@ FROM cabinet_sync_queue WHERE state<>'completed'";
                     }
                     await Task.Delay(100, cancellationToken).ConfigureAwait(false);
                 }
-                return completed;
+                return processed;
             }
             finally
             {
@@ -260,12 +258,36 @@ FROM cabinet_sync_queue WHERE state<>'completed'";
                 item?.ErrorMessage ?? "柜机未返回同步结果");
         }
 
+        public static IReadOnlyList<CabinetSyncJob> SelectAutomaticPass(
+            IEnumerable<CabinetSyncJob> jobs,
+            IReadOnlySet<string> onlineDeviceIds,
+            DateTime now,
+            int maximumJobs = 1)
+        {
+            if (jobs == null || onlineDeviceIds == null || maximumJobs <= 0)
+                return Array.Empty<CabinetSyncJob>();
+
+            return jobs.Where(job =>
+                    !string.Equals(job.State, "completed", StringComparison.OrdinalIgnoreCase) &&
+                    onlineDeviceIds.Contains(job.DeviceId) &&
+                    (!job.NextAttemptTime.HasValue || job.NextAttemptTime.Value <= now))
+                .OrderBy(AutomaticPhasePriority)
+                .ThenBy(job => job.UpdateTime)
+                .ThenBy(job => job.DeviceId, StringComparer.OrdinalIgnoreCase)
+                .Take(maximumJobs)
+                .ToList();
+        }
+
+        private static int AutomaticPhasePriority(CabinetSyncJob job) =>
+            string.Equals(job.JobKind, "maintenance", StringComparison.OrdinalIgnoreCase)
+                ? 1 : 0;
+
         private static string DescribeJob(CabinetSyncJob job) => job.JobKind switch
         {
-            "cabinet" => $"同步柜机 {job.DeviceId}",
-            "delete_user" => $"清理柜机 {job.DeviceId} 用户权限",
-            "maintenance" => $"同步柜机 {job.DeviceId} 维护配置",
-            _ => $"同步柜机 {job.DeviceId} 用户 {job.UserId}"
+            "cabinet" => $"自动流程 2/3 · 同步柜机 {job.DeviceId} 权限与指纹",
+            "delete_user" => $"自动流程 2/3 · 清理柜机 {job.DeviceId} 用户权限",
+            "maintenance" => $"自动流程 3/3 · 同步柜机 {job.DeviceId} 维护配置",
+            _ => $"自动流程 2/3 · 同步柜机 {job.DeviceId} 用户 {job.UserId}"
         };
 
         public void RecordUserOutcome(

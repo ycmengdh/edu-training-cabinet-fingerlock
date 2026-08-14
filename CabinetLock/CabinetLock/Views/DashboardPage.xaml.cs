@@ -175,6 +175,9 @@ namespace CabinetLock
         private async Task LoadSnapshotAsync(bool showProgress = false)
         {
             if (_loading) return;
+            if (!showProgress && Application.Current is App app &&
+                app.AutomaticCommunicationPipelineActive)
+                return;
             _loading = true;
             RefreshButton.IsEnabled = false;
             if (showProgress ||

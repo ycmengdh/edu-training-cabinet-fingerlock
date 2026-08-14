@@ -448,14 +448,16 @@ namespace CabinetLock
             try
             {
                 bool connected = App.MeshBridge.IsConnected;
-                var online = App.MeshBridge.GetOnlineDevices();
-                // 与设备页一致：CABINET_* 算柜子；真正 ROOT 不算
-                int onlineCabinets = online.Count(d => !DeviceService.IsTrueRoot(d));
-                int onlineRoots = online.Count(d => DeviceService.IsTrueRoot(d));
-                int known = App.MeshBridge.KnownDeviceCount;
+                List<Device> cabinets = App.DeviceService.GetAllDevices()
+                    .Where(device => !DeviceService.IsTrueRoot(device))
+                    .ToList();
+                int onlineCabinets = cabinets.Count(device => device.IsOnline);
+                int totalCabinets = cabinets.Count;
+                int transportIdentities = App.MeshBridge.GetOnlineDevices().Count;
                 OnlineDeviceCount.Text = onlineCabinets.ToString();
                 OnlineDeviceCount.ToolTip =
-                    $"在线柜子={onlineCabinets}, 在线根节点={onlineRoots}, 已知={known}, 收包={App.MeshBridge.ReceivedCount}";
+                    $"业务柜机：在线 {onlineCabinets} / 总数 {totalCabinets}；" +
+                    $"通讯身份 {transportIdentities}（仅用于诊断）；收包 {App.MeshBridge.ReceivedCount}";
 
                 if (connected)
                 {

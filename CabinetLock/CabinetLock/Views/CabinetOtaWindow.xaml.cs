@@ -293,6 +293,7 @@ namespace CabinetLock
                 _cancellation = null;
                 SetRunning(false);
                 RefreshEnvironment();
+                App.CabinetSyncQueueService.Trigger();
                 if (_pollingCancellation != null)
                     await RefreshSnapshotAsync(false, _pollingCancellation.Token);
             }

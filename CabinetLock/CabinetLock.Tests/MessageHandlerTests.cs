@@ -155,6 +155,37 @@ public class MessageHandlerTests
     }
 
     [Fact]
+    public void Register_ReportsMaintenanceVersionBeforeDeviceRegistration()
+    {
+        var handler = new MessageHandler();
+        var device = new DeviceClient { DeviceId = "CABINET_001" };
+        var order = new List<string>();
+        uint reportedVersion = 0;
+        handler.OnMaintenanceStatus += (_, data) =>
+        {
+            reportedVersion = data.Value<uint>("maintenance_config_version");
+            order.Add("maintenance");
+        };
+        handler.OnDeviceRegistered += (_, _) => order.Add("registered");
+
+        handler.HandleMessage(device, new Message
+        {
+            MsgId = "register-maintenance-version",
+            Cmd = Protocol.CmdRegister,
+            DeviceId = device.DeviceId,
+            Data = JObject.FromObject(new
+            {
+                device_id = device.DeviceId,
+                is_root = false,
+                maintenance_config_version = 7
+            })
+        });
+
+        Assert.Equal(7U, reportedVersion);
+        Assert.Equal(new[] { "maintenance", "registered" }, order);
+    }
+
+    [Fact]
     public void ConfigResponse_MergesNonEmptyReportedVersions()
     {
         var handler = new MessageHandler();

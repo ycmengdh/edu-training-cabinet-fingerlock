@@ -32,16 +32,16 @@ namespace CabinetLock
             try
             {
                 int before = App.CabinetSyncQueueService.CountOpen();
-                int done = await Task.Run(() =>
-                        App.CabinetSyncQueueService.ProcessPendingAsync(CancellationToken.None))
-                    .ConfigureAwait(true);
+                if (Application.Current is App app)
+                    app.QueueAutomaticCommunicationPipeline(requireOtaCheck: true);
+                await Task.Delay(600);
                 int after = App.CabinetSyncQueueService.CountOpen();
-                if (done > 0 || after < before)
+                if (after < before)
                     AppToast.Success(after == 0 ? "待同步队列已清空" : $"已处理部分任务，剩余 {after}");
                 else if (before == 0)
                     AppToast.Info("当前没有可处理的待同步任务");
                 else
-                    AppToast.Warning("本轮未能完成待同步（柜可能离线）");
+                    AppToast.Info("已按 OTA、权限、维护顺序加入自动处理");
             }
             catch (Exception ex)
             {

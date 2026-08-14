@@ -49,7 +49,6 @@ namespace CabinetLock
         private DateTime _lastPolicyDenyAt = DateTime.MinValue;
 
         private const int MaxTraceEntries = 5000;
-        private static readonly TimeSpan CabinetOfflineTimeout = TimeSpan.FromSeconds(7);
         private static readonly TimeSpan RootOfflineTimeout = TimeSpan.FromSeconds(5);
         private static readonly TimeSpan ProtocolSilenceTimeout = TimeSpan.FromMilliseconds(4500);
         private const int HealthProbeIntervalMs = 1000;
@@ -699,6 +698,9 @@ namespace CabinetLock
         private void ExpireInactiveDevices(DateTime now)
         {
             List<DeviceClient> expired = new List<DeviceClient>();
+            int configuredTimeoutSeconds = ConfigHelper.Current.OfflineTimeoutSeconds;
+            TimeSpan cabinetOfflineTimeout = TimeSpan.FromSeconds(
+                Math.Clamp(configuredTimeoutSeconds, 10, 3600));
             lock (_devicesLock)
             {
                 foreach (var device in _devices.Values)
@@ -706,7 +708,7 @@ namespace CabinetLock
                     if (!device.IsOnline || device.LastSeen == default) continue;
                     TimeSpan timeout = device.IsRoot
                         ? RootOfflineTimeout
-                        : CabinetOfflineTimeout;
+                        : cabinetOfflineTimeout;
                     if (now - device.LastSeen < timeout) continue;
 
                     device.IsOnline = false;

@@ -6,7 +6,7 @@ namespace CabinetLock.Tests;
 public class MeshBridgePresenceTests
 {
     [Fact]
-    public void CabinetWithoutHeartbeat_IsExpired_AndNextMessageReconnectsIt()
+    public void CabinetWithoutHeartbeat_PastConfiguredTimeout_IsExpired_AndReconnects()
     {
         var bridge = new MeshBridge();
         int connected = 0;
@@ -16,7 +16,9 @@ public class MeshBridgePresenceTests
 
         Receive(bridge, "{\"cmd\":\"HEARTBEAT\",\"device_id\":\"CABINET_001\",\"data\":{}}");
         DeviceClient cabinet = Assert.Single(bridge.Devices);
-        cabinet.LastSeen = DateTime.Now - TimeSpan.FromSeconds(8);
+        int configuredTimeout = Math.Clamp(
+            ConfigHelper.Current.OfflineTimeoutSeconds, 10, 3600);
+        cabinet.LastSeen = DateTime.Now - TimeSpan.FromSeconds(configuredTimeout + 1);
 
         Assert.Empty(bridge.GetOnlineDevices());
         Assert.False(cabinet.IsOnline);
