@@ -11,7 +11,8 @@ namespace CabinetLock
         public void EnqueueUser(string userId, IEnumerable<string> deviceIds, string reason)
         {
             if (string.IsNullOrWhiteSpace(userId) || deviceIds == null) return;
-            foreach (string deviceId in deviceIds.Where(id => !string.IsNullOrWhiteSpace(id))
+            foreach (string deviceId in deviceIds.Where(id =>
+                             !string.IsNullOrWhiteSpace(id) && !IsRootTarget(id))
                          .Distinct(StringComparer.OrdinalIgnoreCase))
                 Upsert("user", userId.Trim(), deviceId.Trim(), reason);
         }
@@ -20,21 +21,23 @@ namespace CabinetLock
             string userId, IEnumerable<string> deviceIds, string reason)
         {
             if (string.IsNullOrWhiteSpace(userId) || deviceIds == null) return;
-            foreach (string deviceId in deviceIds.Where(id => !string.IsNullOrWhiteSpace(id))
+            foreach (string deviceId in deviceIds.Where(id =>
+                             !string.IsNullOrWhiteSpace(id) && !IsRootTarget(id))
                          .Distinct(StringComparer.OrdinalIgnoreCase))
                 Upsert("delete_user", userId.Trim(), deviceId.Trim(), reason);
         }
 
         public void EnqueueCabinet(string deviceId, string reason)
         {
-            if (string.IsNullOrWhiteSpace(deviceId)) return;
+            if (string.IsNullOrWhiteSpace(deviceId) || IsRootTarget(deviceId)) return;
             Upsert("cabinet", "", deviceId.Trim(), reason);
         }
 
         public void EnqueueMaintenance(IEnumerable<string> deviceIds, string reason)
         {
             if (deviceIds == null) return;
-            foreach (string deviceId in deviceIds.Where(id => !string.IsNullOrWhiteSpace(id))
+            foreach (string deviceId in deviceIds.Where(id =>
+                             !string.IsNullOrWhiteSpace(id) && !IsRootTarget(id))
                          .Distinct(StringComparer.OrdinalIgnoreCase))
                 Upsert("maintenance", "", deviceId.Trim(), reason);
         }
@@ -46,7 +49,8 @@ namespace CabinetLock
             using SqliteCommand command = connection.CreateCommand();
             command.CommandText = @"SELECT job_key,job_kind,user_id,device_id,reason,state,
 attempt_count,next_attempt_time,last_error,update_time,complete_time
-FROM cabinet_sync_queue ORDER BY update_time DESC";
+FROM cabinet_sync_queue WHERE UPPER(TRIM(device_id)) NOT LIKE 'ROOT\_%' ESCAPE '\'
+ORDER BY update_time DESC";
             using SqliteDataReader reader = command.ExecuteReader();
             var jobs = new List<CabinetSyncJob>();
             while (reader.Read()) jobs.Add(Map(reader));
@@ -81,7 +85,8 @@ FROM cabinet_sync_queue ORDER BY update_time DESC";
             }
             command.CommandText = $@"SELECT job_key,job_kind,user_id,device_id,reason,state,
 attempt_count,next_attempt_time,last_error,update_time,complete_time
-FROM cabinet_sync_queue WHERE {string.Join(" OR ", conditions)}
+FROM cabinet_sync_queue WHERE UPPER(TRIM(device_id)) NOT LIKE 'ROOT\_%' ESCAPE '\'
+AND ({string.Join(" OR ", conditions)})
 ORDER BY update_time DESC";
             using SqliteDataReader reader = command.ExecuteReader();
             var jobs = new List<CabinetSyncJob>();
@@ -102,7 +107,8 @@ ORDER BY update_time DESC";
             using SqliteCommand command = connection.CreateCommand();
             command.CommandText = @"
 SELECT COUNT(1),COALESCE(SUM(CASE WHEN state='failed' THEN 1 ELSE 0 END),0)
-FROM cabinet_sync_queue WHERE state<>'completed'";
+FROM cabinet_sync_queue WHERE state<>'completed'
+AND UPPER(TRIM(device_id)) NOT LIKE 'ROOT\_%' ESCAPE '\'";
             using SqliteDataReader reader = command.ExecuteReader();
             return reader.Read()
                 ? (reader.GetInt32(0), reader.GetInt32(1))
@@ -137,6 +143,17 @@ FROM cabinet_sync_queue WHERE state<>'completed'";
             command.ExecuteNonQuery();
         }
 
+        /// <summary>删除旧版本误写入的根节点同步任务。</summary>
+        public int RemoveInvalidRootJobs()
+        {
+            BusinessDatabase.Initialize();
+            using SqliteConnection connection = BusinessDatabase.Open();
+            using SqliteCommand command = connection.CreateCommand();
+            command.CommandText = @"DELETE FROM cabinet_sync_queue
+WHERE UPPER(TRIM(device_id)) LIKE 'ROOT\_%' ESCAPE '\'";
+            return command.ExecuteNonQuery();
+        }
+
         public async Task RunAsync(CancellationToken cancellationToken)
         {
             while (!cancellationToken.IsCancellationRequested)
@@ -162,7 +179,8 @@ FROM cabinet_sync_queue WHERE state<>'completed'";
             {
                 HashSet<string> online = App.MeshBridge.GetOnlineDevices()
                     .Where(device => device.IsOnline && !device.IsRoot &&
-                        !string.IsNullOrWhiteSpace(device.DeviceId))
+                        !string.IsNullOrWhiteSpace(device.DeviceId) &&
+                        !IsRootTarget(device.DeviceId))
                     .Select(device => device.DeviceId)
                     .ToHashSet(StringComparer.OrdinalIgnoreCase);
                 if (online.Count == 0) return 0;
@@ -269,6 +287,7 @@ FROM cabinet_sync_queue WHERE state<>'completed'";
 
             return jobs.Where(job =>
                     !string.Equals(job.State, "completed", StringComparison.OrdinalIgnoreCase) &&
+                    !IsRootTarget(job.DeviceId) &&
                     onlineDeviceIds.Contains(job.DeviceId) &&
                     (!job.NextAttemptTime.HasValue || job.NextAttemptTime.Value <= now))
                 .OrderBy(AutomaticPhasePriority)
@@ -318,6 +337,7 @@ FROM cabinet_sync_queue WHERE state<>'completed'";
 
         private static void Upsert(string kind, string userId, string deviceId, string reason)
         {
+            if (string.IsNullOrWhiteSpace(deviceId) || IsRootTarget(deviceId)) return;
             BusinessDatabase.Initialize();
             using SqliteConnection connection = BusinessDatabase.Open();
             using SqliteCommand command = connection.CreateCommand();
@@ -339,6 +359,10 @@ next_attempt_time=NULL,last_error='',update_time=excluded.update_time,complete_t
             command.Parameters.AddWithValue("$now", DateTime.Now.ToString("o"));
             command.ExecuteNonQuery();
         }
+
+        internal static bool IsRootTarget(string? deviceId) =>
+            !string.IsNullOrWhiteSpace(deviceId) &&
+            deviceId.Trim().StartsWith("ROOT_", StringComparison.OrdinalIgnoreCase);
 
         private static string MarkRunning(CabinetSyncJob job)
         {

@@ -173,6 +173,7 @@ namespace CabinetLock
         internal void StartCabinetBackgroundServicesOnce()
         {
             if (Interlocked.Exchange(ref _cabinetBackgroundServicesStarted, 1) != 0) return;
+            try { CabinetSyncQueueService.RemoveInvalidRootJobs(); } catch { }
             try { FingerprintTemplateService.EnsureGlobalStaffSyncQueued(); } catch { }
             try
             {

@@ -275,7 +275,8 @@ namespace CabinetLock
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
             string[] deviceIds = App.DeviceService.GetAllDevices()
                 .Where(device => !DeviceService.IsTrueRoot(device) &&
-                    !string.IsNullOrWhiteSpace(device.DeviceId))
+                    !string.IsNullOrWhiteSpace(device.DeviceId) &&
+                    !CabinetSyncQueueService.IsRootTarget(device.DeviceId))
                 .Select(device => device.DeviceId)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
@@ -306,7 +307,8 @@ namespace CabinetLock
             {
                 string[] deviceIds = App.DeviceService.GetAllDevices()
                     .Where(device => !DeviceService.IsTrueRoot(device) &&
-                        !string.IsNullOrWhiteSpace(device.DeviceId))
+                        !string.IsNullOrWhiteSpace(device.DeviceId) &&
+                        !CabinetSyncQueueService.IsRootTarget(device.DeviceId))
                     .Select(device => device.DeviceId)
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .ToArray();

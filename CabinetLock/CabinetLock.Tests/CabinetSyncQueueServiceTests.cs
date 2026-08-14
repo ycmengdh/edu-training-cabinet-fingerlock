@@ -50,11 +50,58 @@ public sealed class CabinetSyncQueueServiceTests : IDisposable
     }
 
     [Fact]
+    public void QueueEntryPoints_RejectRootTargets()
+    {
+        var queue = new CabinetSyncQueueService();
+
+        queue.EnqueueUser("admin", new[] { "ROOT_A001", "", "CABINET_001" }, "upsert");
+        queue.EnqueueUserDeletion("admin", new[] { "root_a002" }, "delete");
+        queue.EnqueueCabinet(" ROOT_A003 ", "cabinet");
+        queue.EnqueueCabinet(" ", "blank");
+        queue.EnqueueMaintenance(new[] { "ROOT_A004" }, "maintenance");
+
+        CabinetSyncJob job = Assert.Single(queue.GetAll());
+        Assert.Equal("CABINET_001", job.DeviceId);
+        Assert.Equal((1, 0), queue.CountOpenAndFailed());
+    }
+
+    [Fact]
+    public void RemoveInvalidRootJobs_DeletesHistoryAndKeepsCabinetJobs()
+    {
+        var queue = new CabinetSyncQueueService();
+        queue.EnqueueCabinet("CABINET_001", "valid");
+        using (Microsoft.Data.Sqlite.SqliteConnection connection = BusinessDatabase.Open())
+        using (Microsoft.Data.Sqlite.SqliteCommand command = connection.CreateCommand())
+        {
+            command.CommandText = @"INSERT INTO cabinet_sync_queue(
+job_key,job_kind,user_id,device_id,reason,state,attempt_count,update_time)
+VALUES('USER:ROOT_A001:ADMIN','user','admin','ROOT_A001','history','pending',0,$now)";
+            command.Parameters.AddWithValue("$now", DateTime.Now.ToString("o"));
+            command.ExecuteNonQuery();
+        }
+
+        Assert.Single(queue.GetAll());
+        Assert.Equal((1, 0), queue.CountOpenAndFailed());
+        Assert.Equal(1, queue.RemoveInvalidRootJobs());
+        Assert.Equal("CABINET_001", Assert.Single(queue.GetAll()).DeviceId);
+        Assert.Equal(0, queue.RemoveInvalidRootJobs());
+    }
+
+    [Fact]
     public void AutomaticPass_FinishesPermissionPhaseBeforeMaintenance()
     {
         DateTime now = DateTime.Now;
         var jobs = new[]
         {
+            new CabinetSyncJob
+            {
+                JobKey = "user:ROOT_A001:ADMIN",
+                JobKind = "user",
+                UserId = "admin",
+                DeviceId = "ROOT_A001",
+                State = "pending",
+                UpdateTime = now.AddMinutes(-3)
+            },
             new CabinetSyncJob
             {
                 JobKey = "maintenance:CABINET_001:",
@@ -74,7 +121,7 @@ public sealed class CabinetSyncQueueServiceTests : IDisposable
             }
         };
         var online = new HashSet<string>(
-            new[] { "CABINET_001", "CABINET_002" },
+            new[] { "ROOT_A001", "CABINET_001", "CABINET_002" },
             StringComparer.OrdinalIgnoreCase);
 
         CabinetSyncJob selected = Assert.Single(
