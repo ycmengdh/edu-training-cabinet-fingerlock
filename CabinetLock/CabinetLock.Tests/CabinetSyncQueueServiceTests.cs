@@ -31,6 +31,24 @@ public sealed class CabinetSyncQueueServiceTests : IDisposable
         Assert.Equal((1, 0), queue.CountOpenAndFailed());
     }
 
+    [Fact]
+    public void MaintenanceJobs_AreDurableAndDeduplicatedPerCabinet()
+    {
+        var queue = new CabinetSyncQueueService();
+
+        queue.EnqueueMaintenance(
+            new[] { "CABINET_001", "CABINET_001", "CABINET_002" }, "startup");
+        queue.EnqueueMaintenance(new[] { "CABINET_001" }, "pin changed");
+
+        CabinetSyncJob[] jobs = queue.GetOpen()
+            .OrderBy(job => job.DeviceId)
+            .ToArray();
+        Assert.Equal(2, jobs.Length);
+        Assert.All(jobs, job => Assert.Equal("maintenance", job.JobKind));
+        Assert.Equal("pin changed", jobs[0].Reason);
+        Assert.Equal("startup", jobs[1].Reason);
+    }
+
     public void Dispose()
     {
         BusinessDatabase.SetActivePath(_originalPath);

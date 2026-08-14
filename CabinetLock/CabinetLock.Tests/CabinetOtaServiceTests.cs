@@ -175,6 +175,24 @@ public class CabinetOtaServiceTests
         Assert.Equal(345U, status.ElapsedSeconds);
     }
 
+    [Theory]
+    [InlineData(true, "distributing", 2, true)]
+    [InlineData(true, "published", 1, true)]
+    [InlineData(true, "published", 0, false)]
+    [InlineData(false, "distributing", 2, false)]
+    public void DistributionProtection_UsesCurrentOnlinePendingNodes(
+        bool active, string phase, uint pendingNodes, bool expected)
+    {
+        var status = new CabinetOtaStatus
+        {
+            Active = active,
+            Phase = phase,
+            PendingNodes = pendingNodes
+        };
+
+        Assert.Equal(expected, CabinetOtaService.IsDistributionInProgress(status));
+    }
+
     [Fact]
     public void Deploy_CanReuseOnlyAnExactlyMatchingValidatedRootImage()
     {

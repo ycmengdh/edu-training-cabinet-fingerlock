@@ -25,8 +25,18 @@ namespace CabinetLock
             MaintenanceSettings settings = BusinessDatabase.SetMaintenancePin(pin);
             SdBusinessSyncService.SyncResult sdResult = await App.SdBusinessSyncService.PushBusinessToSdAsync(
                 cancellationToken: cancellationToken).ConfigureAwait(false);
+            try
+            {
+                App.CabinetSyncQueueService.EnqueueMaintenance(
+                    App.DeviceService.GetAllDevices()
+                        .Where(device => !DeviceService.IsTrueRoot(device))
+                        .Select(device => device.DeviceId),
+                    "维护密码变更");
+            }
+            catch { }
             IReadOnlyList<string> failed = await SyncOnlineDevicesAsync(cancellationToken)
                 .ConfigureAwait(false);
+            App.CabinetSyncQueueService.Trigger();
             App.OperationLogService.Write("柜子维护", "修改维护密码", result:
                 sdResult.Success && failed.Count == 0 ? "success" : "partial",
                 detail: $"版本 {settings.Version}；柜机同步失败 {failed.Count} 台");
@@ -43,8 +53,16 @@ namespace CabinetLock
             };
         }
 
-        public async Task<CommandResult> EnterAsync(
+        public Task<CommandResult> EnterAsync(
             string deviceId, int lockMask, CancellationToken cancellationToken = default)
+            => App.CommunicationCoordinator.RunExclusiveAsync(
+                CommunicationOperationKind.Maintenance,
+                $"进入柜机 {deviceId} 维护模式",
+                deviceId,
+                token => EnterCoreAsync(deviceId, lockMask),
+                cancellationToken);
+
+        private async Task<CommandResult> EnterCoreAsync(string deviceId, int lockMask)
         {
             if (!IsAdministrator()) return CommandResult.Failed("只有管理员可以进入柜子维护模式");
             if ((lockMask & 0x0F) == 0) return CommandResult.Failed("至少选择一把允许开启的锁");
@@ -61,7 +79,16 @@ namespace CabinetLock
             return result;
         }
 
-        public async Task<CommandResult> ExitAsync(string deviceId)
+        public Task<CommandResult> ExitAsync(
+            string deviceId, CancellationToken cancellationToken = default)
+            => App.CommunicationCoordinator.RunExclusiveAsync(
+                CommunicationOperationKind.Maintenance,
+                $"退出柜机 {deviceId} 维护模式",
+                deviceId,
+                _ => ExitCoreAsync(deviceId),
+                cancellationToken);
+
+        private async Task<CommandResult> ExitCoreAsync(string deviceId)
         {
             if (!IsAdministrator()) return CommandResult.Failed("只有管理员可以退出柜子维护模式");
             var message = Message.Create(Protocol.CmdExitMaintenance, deviceId, new
@@ -75,8 +102,17 @@ namespace CabinetLock
             return result;
         }
 
-        public async Task<bool> SyncDeviceAsync(
+        public Task<bool> SyncDeviceAsync(
             string deviceId, CancellationToken cancellationToken = default)
+            => App.CommunicationCoordinator.RunExclusiveAsync(
+                CommunicationOperationKind.Maintenance,
+                $"同步柜机 {deviceId} 维护配置",
+                deviceId,
+                token => SyncDeviceCoreAsync(deviceId, token),
+                cancellationToken);
+
+        private async Task<bool> SyncDeviceCoreAsync(
+            string deviceId, CancellationToken cancellationToken)
         {
             if (string.IsNullOrWhiteSpace(deviceId)) return false;
             SemaphoreSlim gate = _syncGates.GetOrAdd(deviceId, _ => new SemaphoreSlim(1, 1));
@@ -141,14 +177,16 @@ namespace CabinetLock
                 .Select(device => device.DeviceId)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
-            var failed = new ConcurrentBag<string>();
-            await Parallel.ForEachAsync(deviceIds,
-                new ParallelOptions { MaxDegreeOfParallelism = 3, CancellationToken = cancellationToken },
-                async (deviceId, token) =>
-                {
-                    if (!await SyncDeviceAsync(deviceId, token).ConfigureAwait(false))
-                        failed.Add(deviceId);
-                }).ConfigureAwait(false);
+            var failed = new List<string>();
+            foreach (string deviceId in deviceIds)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                bool success = await SyncDeviceAsync(deviceId, cancellationToken)
+                    .ConfigureAwait(false);
+                App.CabinetSyncQueueService.RecordMaintenanceOutcome(
+                    deviceId, success, success ? "" : "柜机未确认维护配置");
+                if (!success) failed.Add(deviceId);
+            }
             return failed.OrderBy(id => id).ToArray();
         }
 

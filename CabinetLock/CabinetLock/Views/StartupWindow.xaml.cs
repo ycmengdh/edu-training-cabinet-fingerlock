@@ -16,6 +16,7 @@ namespace CabinetLock
         private bool _busy;
         private bool _navigating;
         private bool _autoStarted;
+        private bool _otaStateUncertain;
         private const int WaitRootTimeoutMs = 20000;
         private const int MaxSyncAttempts = 3;
         private const int WaitDirectTimeoutMs = 8000;
@@ -291,6 +292,7 @@ namespace CabinetLock
         {
             if (_busy) return;
             _busy = true;
+            _otaStateUncertain = false;
             SetBusyUi(true);
             FailurePanel.Visibility = Visibility.Collapsed; // 同步期间隐藏失败按钮
             UseLocalButton.IsEnabled = false;
@@ -344,6 +346,23 @@ namespace CabinetLock
                         string.IsNullOrWhiteSpace(App.SdStorageService.LastError)
                             ? "未能在超时内连接根节点 SD，请检查设备与串口。"
                             : App.SdStorageService.LastError, 0);
+                    ShowRetryOrLocal();
+                    return;
+                }
+
+                SetProgress("正在检查根节点 OTA 状态…", 30);
+                try
+                {
+                    var otaProgress = new Progress<CabinetOtaProgress>(value =>
+                        SetProgress(value.Detail, Math.Clamp(value.Percent, 30, 44)));
+                    await App.CabinetOtaService.ResumeActiveDistributionAsync(otaProgress);
+                    if (Application.Current is App app)
+                        await app.SyncRootTimeIfDueAsync();
+                }
+                catch (Exception ex)
+                {
+                    _otaStateUncertain = true;
+                    SetProgress($"无法确认根节点 OTA 状态：{ex.Message}", 0);
                     ShowRetryOrLocal();
                     return;
                 }
@@ -581,10 +600,12 @@ namespace CabinetLock
             // 历史备份或当前主库有数据时，允许使用本地历史数据继续
             bool hasLocal = BusinessDatabaseBackupService.GetLatestBackup() != null
                 || BusinessDatabase.HasAnyBusinessData();
-            UseLocalButton.IsEnabled = true; // 始终可点；无数据时再二次确认
+            UseLocalButton.IsEnabled = !_otaStateUncertain;
             if (FailureHintText != null)
             {
-                FailureHintText.Text = hasLocal
+                FailureHintText.Text = _otaStateUncertain
+                    ? "当前无法确认根节点是否仍在 OTA。为避免同步与升级并发，请先恢复连接并重试。"
+                    : hasLocal
                     ? "建议先点「重新连接并同步」。若设备短期不可用，可用「仅用本机数据进入登录」：" +
                       "使用最近备份/本机库，可管理已有账号；柜机鉴权不依赖上位机，但 SD 权威数据可能不是最新。"
                     : "本机暂无业务备份。可重试连接；或进入后仅内置管理员可能可用，建议尽快恢复设备同步。";

@@ -16,8 +16,16 @@ namespace CabinetLock
         /// <summary>
         /// 发送命令并等待 ACK。以相同 msg_id 在 250/500/1000/2000ms 后重试，最多发送 5 次。
         /// </summary>
-        public async Task<CommandResult> SendAsync(
-            string deviceId, Message message, int timeoutMs = 5000)
+        public Task<CommandResult> SendAsync(
+            string deviceId, Message? message, int timeoutMs = 5000)
+            => App.CommunicationCoordinator.RunExclusiveAsync(
+                ResolveOperationKind(message?.Cmd),
+                message == null ? "发送柜机命令" : $"发送 {message.Cmd}",
+                deviceId,
+                _ => SendSerializedAsync(deviceId, message, timeoutMs));
+
+        private async Task<CommandResult> SendSerializedAsync(
+            string deviceId, Message? message, int timeoutMs)
         {
             if (string.IsNullOrWhiteSpace(deviceId) || message == null)
                 return CommandResult.Failed("参数无效");
@@ -150,10 +158,20 @@ namespace CabinetLock
         /// <summary>录入过程进度回调：phase/step/total/hint（UI 可订阅显示放指提示）。</summary>
         public event Action<string, int, int, string>? EnrollProgressChanged;
 
-        public async Task<FingerprintEnrollmentResult> EnrollFingerprintAsync(
+        public Task<FingerprintEnrollmentResult> EnrollFingerprintAsync(
             string deviceId, string userId = "", int fingerprintId = 0, bool replace = true,
             int timeoutMs = 180_000,
-            Action<string, int, int, string>? onProgress = null)
+            Action<string, int, int, string>? onProgress = null) =>
+            App.CommunicationCoordinator.RunExclusiveAsync(
+                CommunicationOperationKind.FingerprintEnrollment,
+                $"在柜机 {deviceId} 录入用户 {userId} 指纹",
+                deviceId,
+                _ => EnrollFingerprintCoreAsync(
+                    deviceId, userId, fingerprintId, replace, timeoutMs, onProgress));
+
+        private async Task<FingerprintEnrollmentResult> EnrollFingerprintCoreAsync(
+            string deviceId, string userId, int fingerprintId, bool replace,
+            int timeoutMs, Action<string, int, int, string>? onProgress)
         {
             // fingerprint_id 只是用户模板库中的逻辑 ID；柜机采集始终使用临时槽 0。
             // 验证后固件导出模板并清空槽 0，不分配或迁移到正式槽位。
@@ -248,8 +266,17 @@ namespace CabinetLock
             return SendAsync(deviceId, message, timeoutMs);
         }
 
-        public async Task<PermissionProbeResult?> QueryPermissionAsync(
+        public Task<PermissionProbeResult?> QueryPermissionAsync(
             string deviceId, string userId, int? fingerprintId = null, int timeoutMs = 8_000)
+            => App.CommunicationCoordinator.RunExclusiveAsync(
+                CommunicationOperationKind.CabinetSync,
+                $"查询柜机 {deviceId} 用户权限",
+                deviceId,
+                _ => QueryPermissionCoreAsync(
+                    deviceId, userId, fingerprintId, timeoutMs));
+
+        private async Task<PermissionProbeResult?> QueryPermissionCoreAsync(
+            string deviceId, string userId, int? fingerprintId, int timeoutMs)
         {
             var message = Message.Create(Protocol.CmdReadPermissions, deviceId,
                 new { user_id = userId, fingerprint_id = fingerprintId });
@@ -289,9 +316,18 @@ namespace CabinetLock
             }
         }
 
-        public async Task<FingerprintProbeResult?> QueryFingerprintAsync(
+        public Task<FingerprintProbeResult?> QueryFingerprintAsync(
             string deviceId, int fingerprintId, byte[] templateBytes,
-            int timeoutMs = 12_000)
+            int timeoutMs = 12_000) =>
+            App.CommunicationCoordinator.RunExclusiveAsync(
+                CommunicationOperationKind.CabinetSync,
+                $"查询柜机 {deviceId} 指纹 {fingerprintId}",
+                deviceId,
+                _ => QueryFingerprintCoreAsync(
+                    deviceId, fingerprintId, templateBytes, timeoutMs));
+
+        private async Task<FingerprintProbeResult?> QueryFingerprintCoreAsync(
+            string deviceId, int fingerprintId, byte[] templateBytes, int timeoutMs)
         {
             uint expectedCrc32 = ComputeTemplateCrc32(templateBytes);
             var message = Message.Create(Protocol.CmdCheckFingerprint, deviceId, new
@@ -335,8 +371,16 @@ namespace CabinetLock
             }
         }
 
-        public async Task<IReadOnlyList<FingerprintSlotRecord>?> GetFingerprintSlotsAsync(
+        public Task<IReadOnlyList<FingerprintSlotRecord>?> GetFingerprintSlotsAsync(
             string deviceId, int timeoutMs = 10_000)
+            => App.CommunicationCoordinator.RunExclusiveAsync(
+                CommunicationOperationKind.CabinetSync,
+                $"读取柜机 {deviceId} 指纹槽位",
+                deviceId,
+                _ => GetFingerprintSlotsCoreAsync(deviceId, timeoutMs));
+
+        private async Task<IReadOnlyList<FingerprintSlotRecord>?> GetFingerprintSlotsCoreAsync(
+            string deviceId, int timeoutMs)
         {
             const int pageSize = 20;
             var slots = new List<FingerprintSlotRecord>();
@@ -466,10 +510,20 @@ namespace CabinetLock
         /// 复用 ADD_FINGERPRINT_RESULT 结果通道（固件在主/副录入完成时都发此命令）。
         /// 录入完成后由调用方决定：覆盖全局主指纹 或 仅作为本机备用。
         /// </summary>
-        public async Task<FingerprintEnrollmentResult> EnrollBackupFingerprintAsync(
+        public Task<FingerprintEnrollmentResult> EnrollBackupFingerprintAsync(
             string deviceId, string userId,
             int timeoutMs = 180_000,
-            Action<string, int, int, string>? onProgress = null)
+            Action<string, int, int, string>? onProgress = null) =>
+            App.CommunicationCoordinator.RunExclusiveAsync(
+                CommunicationOperationKind.FingerprintEnrollment,
+                $"在柜机 {deviceId} 录入备用指纹",
+                deviceId,
+                _ => EnrollBackupFingerprintCoreAsync(
+                    deviceId, userId, timeoutMs, onProgress));
+
+        private async Task<FingerprintEnrollmentResult> EnrollBackupFingerprintCoreAsync(
+            string deviceId, string userId, int timeoutMs,
+            Action<string, int, int, string>? onProgress)
         {
             var message = Message.Create(Protocol.CmdAddBackupFingerprint, deviceId, new
             {
@@ -526,8 +580,16 @@ namespace CabinetLock
         /// V2.7：请求指定柜子的本机副指纹清单。
         /// 返回原始 JSON 字符串（含 count + backups 数组），由调用方解析。
         /// </summary>
-        public async Task<string?> GetBackupFingerprintListAsync(
+        public Task<string?> GetBackupFingerprintListAsync(
             string deviceId, int timeoutMs = 8_000)
+            => App.CommunicationCoordinator.RunExclusiveAsync(
+                CommunicationOperationKind.CabinetSync,
+                $"读取柜机 {deviceId} 备用指纹",
+                deviceId,
+                _ => GetBackupFingerprintListCoreAsync(deviceId, timeoutMs));
+
+        private async Task<string?> GetBackupFingerprintListCoreAsync(
+            string deviceId, int timeoutMs)
         {
             var message = Message.Create(Protocol.CmdBackupFpListRequest, deviceId);
             var completion = new TaskCompletionSource<string>(
@@ -582,8 +644,16 @@ namespace CabinetLock
             }
         }
 
-        public async Task<BroadcastCommandResult> SendBroadcastAsync(
+        public Task<BroadcastCommandResult> SendBroadcastAsync(
             Message message, IEnumerable<string> expectedDeviceIds, int timeoutMs = 30_000)
+            => App.CommunicationCoordinator.RunExclusiveAsync(
+                CommunicationOperationKind.CabinetSync,
+                $"广播命令 {message.Cmd}",
+                message.DeviceId,
+                _ => SendBroadcastCoreAsync(message, expectedDeviceIds, timeoutMs));
+
+        private async Task<BroadcastCommandResult> SendBroadcastCoreAsync(
+            Message message, IEnumerable<string> expectedDeviceIds, int timeoutMs)
         {
             string[] expected = expectedDeviceIds
                 .Where(id => !string.IsNullOrWhiteSpace(id))
@@ -613,6 +683,31 @@ namespace CabinetLock
 
             _pendingBroadcasts.TryRemove(message.MsgId, out _);
             return pending.Timeout();
+        }
+
+        private static CommunicationOperationKind ResolveOperationKind(string? command)
+        {
+            if (string.Equals(command, Protocol.CmdAddFingerprint,
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(command, Protocol.CmdCancelEnroll,
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(command, Protocol.CmdAddBackupFingerprint,
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(command, Protocol.CmdStartFingerprintTest,
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(command, Protocol.CmdStopFingerprintTest,
+                    StringComparison.OrdinalIgnoreCase))
+                return CommunicationOperationKind.FingerprintEnrollment;
+
+            if (string.Equals(command, Protocol.CmdSyncMaintenanceConfig,
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(command, Protocol.CmdEnterMaintenance,
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(command, Protocol.CmdExitMaintenance,
+                    StringComparison.OrdinalIgnoreCase))
+                return CommunicationOperationKind.Maintenance;
+
+            return CommunicationOperationKind.CabinetSync;
         }
 
         private sealed class BroadcastPending

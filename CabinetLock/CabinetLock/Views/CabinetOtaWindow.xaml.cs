@@ -123,6 +123,7 @@ namespace CabinetLock
         private int _onlineCabinetCount;
         private bool _running;
         private bool _refreshing;
+        private bool _distributionLocked;
         private string _lastRefreshError = "";
         private string _lastLoggedStage = "";
         private int _lastLoggedPercent = -5;
@@ -270,8 +271,9 @@ namespace CabinetLock
                     _firmware.FilePath, restrictHardware, progress,
                     _cancellation.Token);
                 ApplyStatus(result, true);
-                AppendLog($"发布成功：目标版本 {result.Version}，根节点已开始拓扑分发");
-                AppToast.Success("柜机目标固件已发布，正在升级");
+                AppendLog($"OTA完成：目标版本 {result.Version}，" +
+                    $"{result.CompletedNodes}/{result.CompatibleNodes} 台完成");
+                AppToast.Success("当前在线兼容柜机 OTA 已完成");
             }
             catch (OperationCanceledException)
             {
@@ -399,6 +401,9 @@ namespace CabinetLock
             StageText.Text = progress.Stage;
             ProgressDetailText.Text = progress.Detail;
             OtaProgressBar.Value = Math.Clamp(progress.Percent, 0, 100);
+            _distributionLocked = !progress.CanCancel;
+            CancelButton.IsEnabled = progress.CanCancel;
+            CancelButton.Content = progress.CanCancel ? "取消发布" : "操作不可中断";
             if (progress.ExpectedNodes > 0)
                 NodeCountText.Text = $"{progress.CompletedNodes} / {progress.ExpectedNodes} 台完成";
 
@@ -490,6 +495,7 @@ namespace CabinetLock
         private void SetRunning(bool running)
         {
             _running = running;
+            if (!running) _distributionLocked = false;
             ChooseFileButton.IsEnabled = !running;
             RestrictHardwareCheckBox.IsEnabled = !running && _firmware != null;
             StartButton.IsEnabled = false;
@@ -522,6 +528,15 @@ namespace CabinetLock
 
         private void CabinetOtaWindow_Closing(object? sender, CancelEventArgs e)
         {
+            if (_running && _distributionLocked)
+            {
+                MessageBox.Show(
+                    "柜机正在升级和重启，完成前不能关闭 OTA 窗口。",
+                    "OTA 进行中", MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+                e.Cancel = true;
+                return;
+            }
             if (_running && MessageBox.Show(
                     "固件仍在发布，确认取消本次操作并关闭窗口？",
                     "关闭发布窗口", MessageBoxButton.YesNo,

@@ -11,6 +11,9 @@ namespace CabinetLock
     {
         private const string SingleInstanceMutexName = @"Local\CabinetLock.SingleInstance";
 
+        /// <summary>整条 Root/串口链路的业务事务协调器。</summary>
+        public static CommunicationCoordinator CommunicationCoordinator { get; } = new();
+
         /// <summary>Mesh 桥接器（统一管理 USB 串口 / TCP 客户端 / TCP 服务端三种链路）</summary>
         public static MeshBridge MeshBridge { get; } = new MeshBridge();
 
@@ -54,6 +57,8 @@ namespace CabinetLock
         private int _cabinetBackgroundServicesStarted;
         private int _devicePersistencePending;
         private int _devicePersistenceWorkerRunning;
+        private int _otaRecoveryWorkerRunning;
+        private int _otaRecoveryPending;
         private static int _exitPromptOpen;
 
         public static bool ExitApproved { get; private set; }
@@ -162,12 +167,20 @@ namespace CabinetLock
         {
             if (Interlocked.Exchange(ref _cabinetBackgroundServicesStarted, 1) != 0) return;
             try { FingerprintTemplateService.EnsureGlobalStaffSyncQueued(); } catch { }
+            try
+            {
+                CabinetSyncQueueService.EnqueueMaintenance(
+                    DeviceService.GetAllDevices()
+                        .Where(device => !DeviceService.IsTrueRoot(device))
+                        .Select(device => device.DeviceId),
+                    "启动维护配置校验");
+            }
+            catch { }
             _ = CabinetSyncQueueService.RunAsync(_shutdownCts.Token);
             CabinetSyncQueueService.Trigger();
-            _ = MaintenanceService.SyncOnlineDevicesAsync(_shutdownCts.Token);
         }
 
-        private bool CabinetBackgroundServicesStarted =>
+        internal bool CabinetBackgroundServicesStarted =>
             Volatile.Read(ref _cabinetBackgroundServicesStarted) != 0;
 
         /// <summary>
@@ -254,7 +267,11 @@ namespace CabinetLock
                 DeviceClient? registered = MeshBridge.GetOnlineDevices().FirstOrDefault(device =>
                     string.Equals(device.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase));
                 if (registered?.IsRoot != true)
-                    _ = MaintenanceService.SyncDeviceAsync(deviceId);
+                {
+                    QueueOtaRecoveryCheck();
+                    CabinetSyncQueueService.EnqueueMaintenance(
+                        new[] { deviceId }, "柜机上线维护配置校验");
+                }
             }
         }
 
@@ -308,21 +325,10 @@ namespace CabinetLock
                 try { LocalCacheService.Initialize(); } catch { }
 
                 SdStorageService.RegisterRoot(rootDeviceId, storageReady);
-
-                // REGISTER 重传时不要每包都 TIME_SYNC，避免与 SD_SAVE 抢串口。
-                DateTime now = DateTime.UtcNow;
-                bool sameRoot = string.Equals(_lastTimeSyncRootId, rootDeviceId, StringComparison.OrdinalIgnoreCase);
-                if (!sameRoot || (now - _lastTimeSyncAt).TotalSeconds >= 10)
-                {
-                    _lastTimeSyncAt = now;
-                    _lastTimeSyncRootId = rootDeviceId;
-                    MeshBridge.Send(rootDeviceId, Protocol.CmdTimeSync, new
-                    {
-                        timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
-                    });
-                }
                 System.Diagnostics.Debug.WriteLine(
                     $"[APP] 根节点已注册: {rootDeviceId}，SD={storageReady?.ToString() ?? "unknown"}");
+                if (CabinetBackgroundServicesStarted)
+                    QueueOtaRecoveryCheck();
             }
             catch
             {
@@ -451,7 +457,126 @@ namespace CabinetLock
             {
                 MeshBridge.Send("", Protocol.CmdRegister);
                 if (CabinetBackgroundServicesStarted)
+                    QueueOtaRecoveryCheck();
+            }
+        }
+
+        internal Task SyncRootTimeIfDueAsync(
+            CancellationToken cancellationToken = default) =>
+            CommunicationCoordinator.RunExclusiveAsync(
+                CommunicationOperationKind.SdSync,
+                "同步根节点时间",
+                SdStorageService.RootDeviceId,
+                _ =>
+                {
+                    TrySendRootTimeSyncIfDue(SdStorageService.RootDeviceId);
+                    return Task.CompletedTask;
+                },
+                cancellationToken);
+
+        private void TrySendRootTimeSyncIfDue(string rootDeviceId)
+        {
+            if (string.IsNullOrWhiteSpace(rootDeviceId)) return;
+            DateTime now = DateTime.UtcNow;
+            bool sameRoot = string.Equals(
+                _lastTimeSyncRootId, rootDeviceId, StringComparison.OrdinalIgnoreCase);
+            if (sameRoot && (now - _lastTimeSyncAt).TotalSeconds < 10) return;
+
+            if (MeshBridge.Send(rootDeviceId, Protocol.CmdTimeSync, new
+                {
+                    timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
+                }))
+            {
+                _lastTimeSyncAt = now;
+                _lastTimeSyncRootId = rootDeviceId;
+            }
+        }
+
+        private void QueueOtaRecoveryCheck()
+        {
+            if (string.Equals(ConfigHelper.Current.LinkMode, "Uart",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                if (CabinetBackgroundServicesStarted)
                     CabinetSyncQueueService.Trigger();
+                return;
+            }
+            if (_shutdownCts.IsCancellationRequested) return;
+            Interlocked.Exchange(ref _otaRecoveryPending, 1);
+            if (Interlocked.Exchange(ref _otaRecoveryWorkerRunning, 1) != 0)
+                return;
+
+            _ = RecoverOtaStateAndResumeQueueAsync();
+        }
+
+        private async Task RecoverOtaStateAndResumeQueueAsync()
+        {
+            try
+            {
+                do
+                {
+                    Interlocked.Exchange(ref _otaRecoveryPending, 0);
+                    await CommunicationCoordinator.RunExclusiveAsync(
+                        CommunicationOperationKind.Ota,
+                        "检查根节点 OTA 状态",
+                        SdStorageService.RootDeviceId,
+                        async token =>
+                        {
+                            for (int attempt = 0;
+                                 attempt < 10 && !SdStorageService.IsRootConnected;
+                                 attempt++)
+                                await Task.Delay(500, token).ConfigureAwait(false);
+
+                            if (SdStorageService.IsRootConnected)
+                            {
+                                await Task.Delay(250, token).ConfigureAwait(false);
+                                while (SdStorageService.IsRootConnected &&
+                                       !token.IsCancellationRequested)
+                                {
+                                    try
+                                    {
+                                        await CabinetOtaService.ResumeActiveDistributionAsync(
+                                            cancellationToken: token).ConfigureAwait(false);
+                                        TrySendRootTimeSyncIfDue(
+                                            SdStorageService.RootDeviceId);
+                                        break;
+                                    }
+                                    catch (OperationCanceledException)
+                                    {
+                                        throw;
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        System.Diagnostics.Debug.WriteLine(
+                                            $"[APP] 等待 OTA 状态恢复: {ex.Message}");
+                                        await Task.Delay(3000, token).ConfigureAwait(false);
+                                    }
+                                }
+                            }
+                        },
+                        _shutdownCts.Token).ConfigureAwait(false);
+                }
+                while (Volatile.Read(ref _otaRecoveryPending) != 0 &&
+                       !_shutdownCts.IsCancellationRequested);
+            }
+            catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested)
+            {
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine(
+                    $"[APP] OTA 状态恢复检查失败: {ex.Message}");
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _otaRecoveryWorkerRunning, 0);
+                if (!_shutdownCts.IsCancellationRequested)
+                {
+                    if (Volatile.Read(ref _otaRecoveryPending) != 0)
+                        QueueOtaRecoveryCheck();
+                    if (CabinetBackgroundServicesStarted)
+                        CabinetSyncQueueService.Trigger();
+                }
             }
         }
 

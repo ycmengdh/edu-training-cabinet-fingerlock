@@ -114,7 +114,14 @@ namespace CabinetLock
         /// 获取指定指纹 ID 的模板字节。
         /// 优先 business.db；缺失且 SD 可用时尝试从 SD 下载并回写本机。
         /// </summary>
-        public async Task<byte[]?> GetTemplateBytesAsync(int fingerprintId)
+        public Task<byte[]?> GetTemplateBytesAsync(int fingerprintId) =>
+            App.CommunicationCoordinator.RunExclusiveAsync(
+                CommunicationOperationKind.SdSync,
+                $"读取指纹模板 {fingerprintId}",
+                App.SdStorageService.RootDeviceId,
+                _ => GetTemplateBytesCoreAsync(fingerprintId));
+
+        private async Task<byte[]?> GetTemplateBytesCoreAsync(int fingerprintId)
         {
             if (fingerprintId <= 0) return null;
 
@@ -325,7 +332,15 @@ namespace CabinetLock
         /// <summary>
         /// 下发单个模板到指定柜子。失败时 error 给出可读原因（无模板字节、链路、固件拒写等）。
         /// </summary>
-        public async Task<(bool ok, string error)> DistributeToDeviceDetailedAsync(
+        public Task<(bool ok, string error)> DistributeToDeviceDetailedAsync(
+            int fingerprintId, string deviceId) =>
+            App.CommunicationCoordinator.RunExclusiveAsync(
+                CommunicationOperationKind.CabinetSync,
+                $"向柜机 {deviceId} 下发指纹 {fingerprintId}",
+                deviceId,
+                _ => DistributeToDeviceDetailedCoreAsync(fingerprintId, deviceId));
+
+        private async Task<(bool ok, string error)> DistributeToDeviceDetailedCoreAsync(
             int fingerprintId, string deviceId)
         {
             if (fingerprintId <= 0 || string.IsNullOrWhiteSpace(deviceId))
@@ -411,7 +426,14 @@ namespace CabinetLock
 
         // ===== 上传到 SD =====
 
-        public async Task<bool> UploadToSdAsync(int fingerprintId)
+        public Task<bool> UploadToSdAsync(int fingerprintId) =>
+            App.CommunicationCoordinator.RunExclusiveAsync(
+                CommunicationOperationKind.SdSync,
+                $"备份指纹模板 {fingerprintId} 到 SD",
+                App.SdStorageService.RootDeviceId,
+                _ => UploadToSdCoreAsync(fingerprintId));
+
+        private async Task<bool> UploadToSdCoreAsync(int fingerprintId)
         {
             if (fingerprintId <= 0) return false;
             if (!App.SdStorageService.IsAvailable) return false;
@@ -597,8 +619,16 @@ namespace CabinetLock
         /// 由于 STATUS_RESPONSE 不走 ACK 通道，需订阅 OnStatusResponse 事件匹配 deviceId。
         /// 匹配时同时兼容业务 device_id 与 Mesh MAC，避免因身份字段不一致一直等到超时。
         /// </summary>
-        public async Task<DeviceRuntimeStatus?> QueryDeviceRuntimeStatusAsync(
-            string deviceId, int timeoutMs = 2500)
+        public Task<DeviceRuntimeStatus?> QueryDeviceRuntimeStatusAsync(
+            string deviceId, int timeoutMs = 2500) =>
+            App.CommunicationCoordinator.RunExclusiveAsync(
+                CommunicationOperationKind.CabinetSync,
+                $"读取柜机 {deviceId} 实时状态",
+                deviceId,
+                _ => QueryDeviceRuntimeStatusCoreAsync(deviceId, timeoutMs));
+
+        private async Task<DeviceRuntimeStatus?> QueryDeviceRuntimeStatusCoreAsync(
+            string deviceId, int timeoutMs)
         {
             string targetId = (deviceId ?? "").Trim();
             if (string.IsNullOrEmpty(targetId)) return null;

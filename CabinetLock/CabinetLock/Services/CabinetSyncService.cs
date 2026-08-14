@@ -14,7 +14,7 @@ namespace CabinetLock
 
         /// <summary>柜与柜之间的间隔（毫秒）。</summary>
         private const int InterNodeDelayMs = 100;
-        private const int MaxProbeConcurrency = 3;
+        private const int MaxProbeConcurrency = 1;
         private readonly ConcurrentDictionary<string, FingerprintVerification>
             _fingerprintVerifications = new(StringComparer.OrdinalIgnoreCase);
         private readonly ConcurrentDictionary<string, CabinetExpectedSyncState>
@@ -22,10 +22,22 @@ namespace CabinetLock
 
         public event Action<string, CabinetExpectedSyncState>? SyncStateChanged;
 
-        public async Task<IReadOnlyList<UserCabinetSyncResult>> VerifyAndSyncUserAsync(
-            User user, IEnumerable<string>? targetDeviceIds = null,
+        public Task<IReadOnlyList<UserCabinetSyncResult>> VerifyAndSyncUserAsync(
+            User? user, IEnumerable<string>? targetDeviceIds = null,
             IProgress<UserCabinetSyncProgress>? progress = null,
             CancellationToken cancellationToken = default)
+            => App.CommunicationCoordinator.RunExclusiveAsync(
+                CommunicationOperationKind.CabinetSync,
+                user == null ? "同步用户" : $"同步用户 {user.UserId}",
+                "",
+                token => VerifyAndSyncUserCoreAsync(
+                    user, targetDeviceIds, progress, token),
+                cancellationToken);
+
+        private async Task<IReadOnlyList<UserCabinetSyncResult>> VerifyAndSyncUserCoreAsync(
+            User? user, IEnumerable<string>? targetDeviceIds,
+            IProgress<UserCabinetSyncProgress>? progress,
+            CancellationToken cancellationToken)
         {
             if (user == null || !user.Enabled)
                 return Array.Empty<UserCabinetSyncResult>();
@@ -171,8 +183,17 @@ namespace CabinetLock
             };
         }
 
-        public async Task<UserCabinetSyncResult> CheckUserOnCabinetAsync(
-            User user, string deviceId, CancellationToken cancellationToken = default)
+        public Task<UserCabinetSyncResult> CheckUserOnCabinetAsync(
+            User? user, string deviceId, CancellationToken cancellationToken = default)
+            => App.CommunicationCoordinator.RunExclusiveAsync(
+                CommunicationOperationKind.CabinetSync,
+                $"校验柜机 {deviceId} 用户 {user?.UserId}",
+                deviceId,
+                token => CheckUserOnCabinetCoreAsync(user, deviceId, token),
+                cancellationToken);
+
+        private async Task<UserCabinetSyncResult> CheckUserOnCabinetCoreAsync(
+            User? user, string deviceId, CancellationToken cancellationToken)
         {
             if (user == null || !user.Enabled)
                 return UserCabinetSyncResult.Failed(deviceId, user?.UserId ?? "", "用户已停用");
@@ -218,7 +239,15 @@ namespace CabinetLock
             };
         }
 
-        public BroadcastCommandResult SyncAllPermissions()
+        public BroadcastCommandResult SyncAllPermissions() =>
+            App.CommunicationCoordinator.RunExclusiveAsync(
+                CommunicationOperationKind.CabinetSync,
+                "同步全部柜机权限",
+                "",
+                _ => Task.FromResult(SyncAllPermissionsCore()))
+                .GetAwaiter().GetResult();
+
+        private BroadcastCommandResult SyncAllPermissionsCore()
         {
             PermissionSnapshot? snapshot = ReadStableSnapshot(out string error);
             return snapshot == null
@@ -226,7 +255,15 @@ namespace CabinetLock
                 : SyncTransactionPaced(snapshot.Rows, snapshot.Version);
         }
 
-        public BroadcastCommandResult SyncCabinetPermissions(string deviceId)
+        public BroadcastCommandResult SyncCabinetPermissions(string deviceId) =>
+            App.CommunicationCoordinator.RunExclusiveAsync(
+                CommunicationOperationKind.CabinetSync,
+                $"同步柜机 {deviceId} 权限",
+                deviceId,
+                _ => Task.FromResult(SyncCabinetPermissionsCore(deviceId)))
+                .GetAwaiter().GetResult();
+
+        private BroadcastCommandResult SyncCabinetPermissionsCore(string deviceId)
         {
             if (string.IsNullOrWhiteSpace(deviceId))
                 return BroadcastCommandResult.Failed("柜子 ID 不能为空");
@@ -272,9 +309,19 @@ namespace CabinetLock
         /// 使单台柜机的用户指纹模板与权限记录同时收敛到上位机数据。
         /// 已存在且 CRC 一致的模板不会重复写入指纹模块。
         /// </summary>
-        public async Task<CabinetDataSyncResult> SyncCabinetDataAsync(
+        public Task<CabinetDataSyncResult> SyncCabinetDataAsync(
             string deviceId, IProgress<string>? progress = null,
             CancellationToken cancellationToken = default)
+            => App.CommunicationCoordinator.RunExclusiveAsync(
+                CommunicationOperationKind.CabinetSync,
+                $"同步柜机 {deviceId} 数据",
+                deviceId,
+                token => SyncCabinetDataCoreAsync(deviceId, progress, token),
+                cancellationToken);
+
+        private async Task<CabinetDataSyncResult> SyncCabinetDataCoreAsync(
+            string deviceId, IProgress<string>? progress,
+            CancellationToken cancellationToken)
         {
             if (string.IsNullOrWhiteSpace(deviceId))
                 return CabinetDataSyncResult.Failed(deviceId, "柜子 ID 不能为空");
@@ -845,34 +892,62 @@ namespace CabinetLock
         public bool StartEnrollment(string deviceId, User user)
         {
             if (string.IsNullOrWhiteSpace(deviceId) || user?.FingerprintId == null) return false;
-            var message = Message.Create(Protocol.CmdAddFingerprint, deviceId, new
-            {
-                fingerprint_id = user.FingerprintId.Value,
-                user_id = user.UserId
-            });
-            return App.MeshBridge.SendToDevice(deviceId, message);
+            return App.CommunicationCoordinator.RunExclusiveAsync(
+                CommunicationOperationKind.FingerprintEnrollment,
+                $"启动柜机 {deviceId} 指纹录入",
+                deviceId,
+                _ => Task.FromResult(App.MeshBridge.SendToDevice(deviceId,
+                    Message.Create(Protocol.CmdAddFingerprint, deviceId, new
+                    {
+                        fingerprint_id = user.FingerprintId.Value,
+                        user_id = user.UserId
+                    }))))
+                .GetAwaiter().GetResult();
         }
 
         public bool DeleteFingerprint(string deviceId, int fingerprintId)
         {
             if (string.IsNullOrWhiteSpace(deviceId) || fingerprintId <= 0) return false;
-            return App.MeshBridge.Send(deviceId, Protocol.CmdDeleteFingerprint,
-                new { fingerprint_id = fingerprintId });
+            return App.CommunicationCoordinator.RunExclusiveAsync(
+                CommunicationOperationKind.CabinetSync,
+                $"删除柜机 {deviceId} 指纹 {fingerprintId}",
+                deviceId,
+                _ => Task.FromResult(App.MeshBridge.Send(
+                    deviceId, Protocol.CmdDeleteFingerprint,
+                    new { fingerprint_id = fingerprintId })))
+                .GetAwaiter().GetResult();
         }
 
         public bool DeleteFingerprintFromAll(int fingerprintId)
         {
             if (fingerprintId <= 0) return false;
-            return App.MeshBridge.Broadcast(Message.Create(
-                Protocol.CmdDeleteFingerprint, "", new { fingerprint_id = fingerprintId }));
+            return App.CommunicationCoordinator.RunExclusiveAsync(
+                CommunicationOperationKind.CabinetSync,
+                $"广播删除指纹 {fingerprintId}",
+                "",
+                _ => Task.FromResult(App.MeshBridge.Broadcast(Message.Create(
+                    Protocol.CmdDeleteFingerprint, "",
+                    new { fingerprint_id = fingerprintId }))))
+                .GetAwaiter().GetResult();
         }
 
         /// <summary>
         /// 逐柜删除指纹并等待 ACK，供学生详情和批量删除使用。
         /// 广播删除仍保留给兼容场景；涉及业务数据清理时必须使用此方法确认下位机结果。
         /// </summary>
-        public async Task<BroadcastCommandResult> DeleteFingerprintFromOnlineCabinetsAsync(
-            int fingerprintId, int timeoutMs = 10_000)
+        public Task<BroadcastCommandResult> DeleteFingerprintFromOnlineCabinetsAsync(
+            int fingerprintId, int timeoutMs = 10_000,
+            CancellationToken cancellationToken = default)
+            => App.CommunicationCoordinator.RunExclusiveAsync(
+                CommunicationOperationKind.CabinetSync,
+                $"从在线柜机删除指纹 {fingerprintId}",
+                "",
+                token => DeleteFingerprintFromOnlineCabinetsCoreAsync(
+                    fingerprintId, timeoutMs, token),
+                cancellationToken);
+
+        private async Task<BroadcastCommandResult> DeleteFingerprintFromOnlineCabinetsCoreAsync(
+            int fingerprintId, int timeoutMs, CancellationToken cancellationToken)
         {
             if (fingerprintId <= 0)
                 return BroadcastCommandResult.Failed("指纹 ID 无效");
@@ -889,6 +964,7 @@ namespace CabinetLock
             var failed = new List<string>();
             foreach (string deviceId in deviceIds)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 var result = await App.CommandService.SendAsync(
                     deviceId,
                     Message.Create(Protocol.CmdDeleteFingerprint, deviceId,
@@ -908,6 +984,16 @@ namespace CabinetLock
         }
 
         public BroadcastCommandResult SyncCabinetPermissionsExcludingUsers(
+            string deviceId, IReadOnlyCollection<string> excludedUserIds) =>
+            App.CommunicationCoordinator.RunExclusiveAsync(
+                CommunicationOperationKind.CabinetSync,
+                $"清理柜机 {deviceId} 权限",
+                deviceId,
+                _ => Task.FromResult(SyncCabinetPermissionsExcludingUsersCore(
+                    deviceId, excludedUserIds)))
+                .GetAwaiter().GetResult();
+
+        private BroadcastCommandResult SyncCabinetPermissionsExcludingUsersCore(
             string deviceId, IReadOnlyCollection<string> excludedUserIds)
         {
             PermissionSnapshot? snapshot = ReadStableSnapshot(out string error);
@@ -931,9 +1017,22 @@ namespace CabinetLock
                     new[] { deviceId });
         }
 
-        public async Task<CommandResult> DeleteFingerprintFromCabinetIdempotentAsync(
-            string deviceId, int fingerprintId, int timeoutMs = 10_000)
+        public Task<CommandResult> DeleteFingerprintFromCabinetIdempotentAsync(
+            string deviceId, int fingerprintId, int timeoutMs = 10_000,
+            CancellationToken cancellationToken = default)
+            => App.CommunicationCoordinator.RunExclusiveAsync(
+                CommunicationOperationKind.CabinetSync,
+                $"清理柜机 {deviceId} 指纹 {fingerprintId}",
+                deviceId,
+                token => DeleteFingerprintFromCabinetIdempotentCoreAsync(
+                    deviceId, fingerprintId, timeoutMs, token),
+                cancellationToken);
+
+        private async Task<CommandResult> DeleteFingerprintFromCabinetIdempotentCoreAsync(
+            string deviceId, int fingerprintId, int timeoutMs,
+            CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             CommandResult deleted = await App.CommandService.SendAsync(
                 deviceId,
                 Message.Create(Protocol.CmdDeleteFingerprint, deviceId,

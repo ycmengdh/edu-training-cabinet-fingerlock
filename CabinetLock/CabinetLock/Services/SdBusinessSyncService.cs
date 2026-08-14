@@ -29,10 +29,21 @@ namespace CabinetLock
         /// 空表（[]）视为成功同步；仅网络/解析失败计入 FailedTables。
         /// 对失败表做有限重试，并支持部分成功继续登录。
         /// </summary>
-        public async Task<SyncResult> PullBusinessFromSdAsync(
+        public Task<SyncResult> PullBusinessFromSdAsync(
             IProgress<string>? progress = null,
             int timeoutMs = 10000,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default) =>
+            App.CommunicationCoordinator.RunExclusiveAsync(
+                CommunicationOperationKind.SdSync,
+                "从 SD 同步业务数据",
+                App.SdStorageService.RootDeviceId,
+                token => PullBusinessFromSdCoreAsync(progress, timeoutMs, token),
+                cancellationToken);
+
+        private async Task<SyncResult> PullBusinessFromSdCoreAsync(
+            IProgress<string>? progress,
+            int timeoutMs,
+            CancellationToken cancellationToken)
         {
             var result = new SyncResult();
             if (!App.SdStorageService.IsAvailable)
@@ -262,10 +273,21 @@ namespace CabinetLock
         }
 
         /// <summary>将本机 business.db 回写到 SD（显式同步或链路恢复时调用）。</summary>
-        public async Task<SyncResult> PushBusinessToSdAsync(
+        public Task<SyncResult> PushBusinessToSdAsync(
             IProgress<string>? progress = null,
             int timeoutMs = 10000,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default) =>
+            App.CommunicationCoordinator.RunExclusiveAsync(
+                CommunicationOperationKind.SdSync,
+                "上传业务数据到 SD",
+                App.SdStorageService.RootDeviceId,
+                token => PushBusinessToSdSerializedAsync(progress, timeoutMs, token),
+                cancellationToken);
+
+        private async Task<SyncResult> PushBusinessToSdSerializedAsync(
+            IProgress<string>? progress,
+            int timeoutMs,
+            CancellationToken cancellationToken)
         {
             await _pushGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try

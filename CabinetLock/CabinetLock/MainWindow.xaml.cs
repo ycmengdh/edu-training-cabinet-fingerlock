@@ -53,6 +53,7 @@ namespace CabinetLock
             App.MeshBridge.DeviceConnected += OnDeviceConnectionChanged;
             App.MeshBridge.DeviceDisconnected += OnDeviceConnectionChanged;
             App.MeshBridge.ConnectionChanged += OnMeshConnectionChanged;
+            App.CommunicationCoordinator.StateChanged += OnCommunicationStateChanged;
 
             // 默认打开首个可见页面
             _currentNavButton = GetDefaultNavButton();
@@ -64,6 +65,7 @@ namespace CabinetLock
 
             // 刷新底部状态栏
             UpdateStatusBar();
+            ApplyCommunicationState(App.CommunicationCoordinator.Current);
             _ = RefreshPendingSyncStatusAsync(force: true);
             UpdateThemeToggle();
             ThemeManager.ThemeChanged += OnThemeChanged;
@@ -399,6 +401,30 @@ namespace CabinetLock
             QueueStatusBarRefresh();
         }
 
+        private void OnCommunicationStateChanged(CommunicationOperationSnapshot state)
+        {
+            if (Dispatcher.CheckAccess()) ApplyCommunicationState(state);
+            else Dispatcher.BeginInvoke(new Action(() => ApplyCommunicationState(state)));
+        }
+
+        private void ApplyCommunicationState(CommunicationOperationSnapshot state)
+        {
+            string detail = state.IsActive && !string.IsNullOrWhiteSpace(state.Description)
+                ? $"{state.DisplayText} · {state.Description}"
+                : state.DisplayText;
+            CommunicationStatusText.Text = detail;
+            CommunicationStatusText.ToolTip = state.IsActive
+                ? $"{state.Description}\n目标：{state.TargetDeviceId}\n开始：{state.StartedAt:HH:mm:ss}"
+                : "当前没有主动通讯事务";
+            CommunicationStatusDot.Fill = FindResource(state.Mode switch
+            {
+                CommunicationMode.Ota => "WarningBrush",
+                CommunicationMode.Enrollment => "PrimaryBrush",
+                CommunicationMode.Synchronizing => "PrimaryBrush",
+                _ => "SuccessBrush"
+            }) as System.Windows.Media.Brush;
+        }
+
         /// <summary>Mesh 链路连接状态变化回调（来自后台线程）</summary>
         private void OnMeshConnectionChanged(bool connected)
         {
@@ -569,6 +595,7 @@ namespace CabinetLock
             App.MeshBridge.DeviceConnected -= OnDeviceConnectionChanged;
             App.MeshBridge.DeviceDisconnected -= OnDeviceConnectionChanged;
             App.MeshBridge.ConnectionChanged -= OnMeshConnectionChanged;
+            App.CommunicationCoordinator.StateChanged -= OnCommunicationStateChanged;
             ThemeManager.ThemeChanged -= OnThemeChanged;
 
             if (_statusTimer != null)

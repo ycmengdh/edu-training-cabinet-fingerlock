@@ -68,6 +68,7 @@ namespace CabinetLock
                     "cabinet" => "整柜",
                     "user" => "用户",
                     "delete_user" => "删除",
+                    "maintenance" => "维护",
                     _ => job.JobKind
                 };
                 UserCode = ResolveUserCode(job.UserId);

@@ -30,6 +30,14 @@ namespace CabinetLock
             Upsert("cabinet", "", deviceId.Trim(), reason);
         }
 
+        public void EnqueueMaintenance(IEnumerable<string> deviceIds, string reason)
+        {
+            if (deviceIds == null) return;
+            foreach (string deviceId in deviceIds.Where(id => !string.IsNullOrWhiteSpace(id))
+                         .Distinct(StringComparer.OrdinalIgnoreCase))
+                Upsert("maintenance", "", deviceId.Trim(), reason);
+        }
+
         public IReadOnlyList<CabinetSyncJob> GetAll()
         {
             BusinessDatabase.Initialize();
@@ -113,6 +121,10 @@ FROM cabinet_sync_queue WHERE state<>'completed'";
             .FirstOrDefault(job => job.JobKind == "cabinet" &&
                 string.Equals(job.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase));
 
+        public CabinetSyncJob? GetMaintenanceJob(string deviceId) => GetAll()
+            .FirstOrDefault(job => job.JobKind == "maintenance" &&
+                string.Equals(job.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase));
+
         public void RemoveDeviceJobs(string deviceId)
         {
             if (string.IsNullOrWhiteSpace(deviceId)) return;
@@ -165,47 +177,27 @@ FROM cabinet_sync_queue WHERE state<>'completed'";
                 foreach (CabinetSyncJob job in due)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    string lease = MarkRunning(job);
-                    if (string.IsNullOrEmpty(lease)) continue;
+                    string lease = "";
                     try
                     {
-                        bool success;
-                        string error;
-                        if (job.JobKind == "cabinet")
-                        {
-                            CabinetDataSyncResult result = await App.CabinetSyncService
-                                .SyncCabinetDataAsync(job.DeviceId, cancellationToken: cancellationToken)
-                                .ConfigureAwait(false);
-                            success = result.Success;
-                            error = success ? "" : result.FormatForDisplay();
-                        }
-                        else if (job.JobKind == "delete_user")
-                        {
-                            CommandResult result = await App.CommandService
-                                .DeleteUserPermissionAsync(job.DeviceId, job.UserId,
-                                    CabinetSyncService.GetExpectedPermissionVersion())
-                                .ConfigureAwait(false);
-                            success = result.Success;
-                            error = result.Success ? "" : result.ErrorMessage;
-                        }
-                        else
-                        {
-                            User? user = App.UserService.GetUser(job.UserId);
-                            if (user == null)
-                            {
-                                success = true;
-                                error = "";
-                            }
-                            else
-                            {
-                                IReadOnlyList<UserCabinetSyncResult> result = await App.CabinetSyncService
-                                    .VerifyAndSyncUserAsync(user, new[] { job.DeviceId },
-                                        cancellationToken: cancellationToken).ConfigureAwait(false);
-                                UserCabinetSyncResult? item = result.FirstOrDefault();
-                                success = item?.Success == true;
-                                error = item?.ErrorMessage ?? "柜机未返回同步结果";
-                            }
-                        }
+                        (bool claimed, bool success, string error) =
+                            await App.CommunicationCoordinator
+                            .RunExclusiveAsync(
+                                CommunicationOperationKind.CabinetSync,
+                                DescribeJob(job),
+                                job.DeviceId,
+                                async token =>
+                                {
+                                    lease = MarkRunning(job);
+                                    if (string.IsNullOrEmpty(lease))
+                                        return (false, false, "");
+                                    (bool jobSuccess, string jobError) =
+                                        await ExecuteJobAsync(job, token).ConfigureAwait(false);
+                                    return (true, jobSuccess, jobError);
+                                },
+                                cancellationToken)
+                            .ConfigureAwait(false);
+                        if (!claimed) continue;
                         if (success)
                         {
                             if (MarkCompleted(job.JobKey, lease)) completed++;
@@ -214,7 +206,8 @@ FROM cabinet_sync_queue WHERE state<>'completed'";
                     }
                     catch (Exception ex)
                     {
-                        MarkFailed(job, ex.Message, lease);
+                        if (!string.IsNullOrEmpty(lease))
+                            MarkFailed(job, ex.Message, lease);
                     }
                     await Task.Delay(100, cancellationToken).ConfigureAwait(false);
                 }
@@ -225,6 +218,55 @@ FROM cabinet_sync_queue WHERE state<>'completed'";
                 _processor.Release();
             }
         }
+
+        private static async Task<(bool Success, string Error)> ExecuteJobAsync(
+            CabinetSyncJob job, CancellationToken cancellationToken)
+        {
+            if (job.JobKind == "cabinet")
+            {
+                CabinetDataSyncResult result = await App.CabinetSyncService
+                    .SyncCabinetDataAsync(job.DeviceId,
+                        cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
+                return (result.Success,
+                    result.Success ? "" : result.FormatForDisplay());
+            }
+
+            if (job.JobKind == "delete_user")
+            {
+                CommandResult result = await App.CommandService
+                    .DeleteUserPermissionAsync(job.DeviceId, job.UserId,
+                        CabinetSyncService.GetExpectedPermissionVersion())
+                    .ConfigureAwait(false);
+                return (result.Success, result.Success ? "" : result.ErrorMessage);
+            }
+
+            if (job.JobKind == "maintenance")
+            {
+                bool success = await App.MaintenanceService
+                    .SyncDeviceAsync(job.DeviceId, cancellationToken)
+                    .ConfigureAwait(false);
+                return (success, success ? "" : "维护配置同步失败");
+            }
+
+            User? user = App.UserService.GetUser(job.UserId);
+            if (user == null) return (true, "");
+
+            IReadOnlyList<UserCabinetSyncResult> userResult = await App.CabinetSyncService
+                .VerifyAndSyncUserAsync(user, new[] { job.DeviceId },
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+            UserCabinetSyncResult? item = userResult.FirstOrDefault();
+            return (item?.Success == true,
+                item?.ErrorMessage ?? "柜机未返回同步结果");
+        }
+
+        private static string DescribeJob(CabinetSyncJob job) => job.JobKind switch
+        {
+            "cabinet" => $"同步柜机 {job.DeviceId}",
+            "delete_user" => $"清理柜机 {job.DeviceId} 用户权限",
+            "maintenance" => $"同步柜机 {job.DeviceId} 维护配置",
+            _ => $"同步柜机 {job.DeviceId} 用户 {job.UserId}"
+        };
 
         public void RecordUserOutcome(
             string userId, string deviceId, bool success, string? error = null)
@@ -241,6 +283,15 @@ FROM cabinet_sync_queue WHERE state<>'completed'";
             if (job == null) return;
             if (success) MarkCompleted(job.JobKey);
             else MarkFailed(job, error ?? "柜机同步失败");
+        }
+
+        public void RecordMaintenanceOutcome(
+            string deviceId, bool success, string? error = null)
+        {
+            CabinetSyncJob? job = GetMaintenanceJob(deviceId);
+            if (job == null) return;
+            if (success) MarkCompleted(job.JobKey);
+            else MarkFailed(job, error ?? "维护配置同步失败");
         }
 
         private static void Upsert(string kind, string userId, string deviceId, string reason)

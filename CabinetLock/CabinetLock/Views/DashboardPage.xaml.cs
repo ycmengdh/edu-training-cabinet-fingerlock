@@ -188,8 +188,8 @@ namespace CabinetLock
                     PageStatusText.Text = "正在读取当前柜机状态";
                     DeviceClient? direct = GetDirectCabinet();
                     if (direct != null)
-                        App.MeshBridge.Send(direct.DeviceId, Protocol.CmdReadStatus);
-                    await Task.Delay(180);
+                        await App.FingerprintTemplateService
+                            .QueryDeviceRuntimeStatusAsync(direct.DeviceId);
                     ApplyDirectSnapshot();
                     return;
                 }

@@ -16,7 +16,7 @@ namespace CabinetLock
             string pin = NewPinBox.Password;
             if (!MaintenanceSettings.IsValidPin(pin))
             {
-                StatusText.Text = "请输入由按键 1-3 组成的 6 位密码";
+                StatusText.Text = "请输入由按键 1-4 组成的 6 位密码";
                 return;
             }
             if (!string.Equals(pin, ConfirmPinBox.Password, StringComparison.Ordinal))

@@ -558,9 +558,17 @@ namespace CabinetLock
 
                     string key = MetadataQueryKey(device);
                     _metadataQueried.Add(key);
-                    App.MeshBridge.SendToDevice(device.DeviceId,
-                        Message.Create(Protocol.CmdReadConfig, device.DeviceId));
-                    await Task.Delay(200, cancellationToken);
+                    await App.CommunicationCoordinator.RunExclusiveAsync(
+                        CommunicationOperationKind.CabinetSync,
+                        $"读取柜机 {device.DeviceId} 配置",
+                        device.DeviceId,
+                        async token =>
+                        {
+                            App.MeshBridge.SendToDevice(device.DeviceId,
+                                Message.Create(Protocol.CmdReadConfig, device.DeviceId));
+                            await Task.Delay(200, token);
+                        },
+                        cancellationToken);
                 }
             }
             catch (OperationCanceledException)

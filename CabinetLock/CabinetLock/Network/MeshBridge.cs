@@ -45,6 +45,8 @@ namespace CabinetLock
         private long _receivedCount;
         private string _lastSendFailReason = "";
         private DateTime _lastSendFailAt = DateTime.MinValue;
+        private string _lastPolicyDenyReason = "";
+        private DateTime _lastPolicyDenyAt = DateTime.MinValue;
 
         private const int MaxTraceEntries = 5000;
         private static readonly TimeSpan CabinetOfflineTimeout = TimeSpan.FromSeconds(7);
@@ -734,6 +736,19 @@ namespace CabinetLock
                 RecordTrace(CommunicationDirection.System, "发送失败", "链路尚未启动");
                 return false;
             }
+            if (!App.CommunicationCoordinator.CanSend(msg.Cmd, out string denyReason))
+            {
+                DateTime deniedAt = DateTime.Now;
+                if (!string.Equals(_lastPolicyDenyReason, denyReason,
+                        StringComparison.Ordinal) ||
+                    (deniedAt - _lastPolicyDenyAt).TotalSeconds >= 5)
+                {
+                    _lastPolicyDenyReason = denyReason;
+                    _lastPolicyDenyAt = deniedAt;
+                    RecordTrace(CommunicationDirection.System, "通讯调度", denyReason);
+                }
+                return false;
+            }
             try
             {
                 AppMessage app = AppMessageMapper.ToApp(msg);
@@ -824,21 +839,24 @@ namespace CabinetLock
                 return;
             }
 
+            bool startupProbePaused = System.Windows.Application.Current is App app &&
+                !app.CabinetBackgroundServicesStarted &&
+                !string.Equals(ConfigHelper.Current.LinkMode, "Uart",
+                    StringComparison.OrdinalIgnoreCase);
+            bool backgroundAllowed = !startupProbePaused &&
+                App.CommunicationCoordinator.IsBackgroundTrafficAllowed;
+
             DateTime now = DateTime.Now;
-            if (LastReceivedTime.HasValue && now - LastReceivedTime.Value >= ProtocolSilenceTimeout)
+            if (backgroundAllowed && LastReceivedTime.HasValue &&
+                now - LastReceivedTime.Value >= ProtocolSilenceTimeout)
                 SetProtocolConnected(false);
 
             if (Interlocked.Exchange(ref _healthProbeBusy, 1) != 0) return;
             try
             {
+                if (!backgroundAllowed) return;
                 var probe = Message.Create(Protocol.CmdReadStatus, "");
-                AppMessage app = AppMessageMapper.ToApp(probe);
-                byte[] payload = BinaryMessageCodec.Encode(app);
-                if (transport.SendPayload(payload))
-                {
-                    Interlocked.Increment(ref _sentCount);
-                    LastSentTime = now;
-                }
+                SendMessageBinary(probe);
             }
             catch { }
             finally

@@ -1,4 +1,5 @@
 import pathlib
+import re
 import unittest
 
 
@@ -41,7 +42,9 @@ class MaintenancePinEncodingContractTests(unittest.TestCase):
         self.assertIn("maintenance_pin_valid(wire_pin)", self.controller)
 
     def test_protocol_change_has_a_new_cabinet_firmware_version(self):
-        self.assertIn('set(PROJECT_VER "26081007-cab")', self.cmake)
+        match = re.search(r'set\(PROJECT_VER "(\d+)-cab"\)', self.cmake)
+        self.assertIsNotNone(match)
+        self.assertGreaterEqual(int(match.group(1)), 26081007)
 
 
 if __name__ == "__main__":

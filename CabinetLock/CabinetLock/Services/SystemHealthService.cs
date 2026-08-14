@@ -12,7 +12,14 @@ namespace CabinetLock
             return LoadSnapshot(version);
         }
 
-        public async Task<SystemHealthSnapshot> LoadSnapshotAsync()
+        public Task<SystemHealthSnapshot> LoadSnapshotAsync() =>
+            App.CommunicationCoordinator.RunExclusiveAsync(
+                CommunicationOperationKind.SdSync,
+                "读取系统运行状态",
+                App.SdStorageService.RootDeviceId,
+                _ => LoadSnapshotCoreAsync());
+
+        private async Task<SystemHealthSnapshot> LoadSnapshotCoreAsync()
         {
             HealthScope scope = CaptureScope();
             Task<SdVersionInfo?> versionTask = App.SdStorageService.QueryVersionAsync();
