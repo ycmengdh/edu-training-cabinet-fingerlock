@@ -326,6 +326,25 @@ WHERE UPPER(TRIM(device_id)) LIKE 'ROOT\_%' ESCAPE '\'";
             else MarkFailed(job, error ?? "柜机同步失败");
         }
 
+        /// <summary>
+        /// 手动柜机数据同步成功后，该柜的用户新增、删除和柜机修复任务均已收敛，
+        /// 避免后台队列再次重复下发同一批权限。
+        /// </summary>
+        public int CompletePermissionJobsForDevice(string deviceId)
+        {
+            if (string.IsNullOrWhiteSpace(deviceId) || IsRootTarget(deviceId)) return 0;
+            BusinessDatabase.Initialize();
+            using SqliteConnection connection = BusinessDatabase.Open();
+            using SqliteCommand command = connection.CreateCommand();
+            command.CommandText = @"UPDATE cabinet_sync_queue SET state='completed',
+next_attempt_time=NULL,last_error='',update_time=$now,complete_time=$now
+WHERE device_id=$device COLLATE NOCASE AND state<>'completed'
+AND job_kind IN ('user','delete_user','cabinet')";
+            command.Parameters.AddWithValue("$device", deviceId.Trim());
+            command.Parameters.AddWithValue("$now", DateTime.Now.ToString("o"));
+            return command.ExecuteNonQuery();
+        }
+
         public void RecordMaintenanceOutcome(
             string deviceId, bool success, string? error = null)
         {

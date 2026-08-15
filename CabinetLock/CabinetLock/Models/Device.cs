@@ -72,6 +72,10 @@ namespace CabinetLock
         [JsonProperty("status")]
         public DeviceRuntimeStatus Status { get; set; } = new();
 
+        /// <summary>实时快照对应的设备状态接收时间；仅用于防止元数据消息覆盖状态。</summary>
+        [JsonIgnore]
+        public DateTime? LastRuntimeStatusAt { get; set; }
+
         [JsonIgnore]
         public DateTime? LastSeenTime => LastSeenUnix > 0
             ? DateTimeOffset.FromUnixTimeSeconds(LastSeenUnix).LocalDateTime

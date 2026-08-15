@@ -68,7 +68,7 @@ namespace CabinetLock
         {
             if (_busy || rows.Count == 0) return;
 
-            SetBusy(true, "正在逐台校验并同步柜机指纹与权限");
+            SetBusy(true, "正在逐台分析差异并增量同步柜机指纹与权限");
             int completed = 0;
             int success = 0;
             try
@@ -103,6 +103,8 @@ namespace CabinetLock
                             if (result.Success)
                             {
                                 row.MarkSuccess(result);
+                                App.CabinetSyncQueueService
+                                    .CompletePermissionJobsForDevice(row.DeviceId);
                                 success++;
                             }
                             else
@@ -204,8 +206,9 @@ namespace CabinetLock
                 return;
             }
             if (MessageBox.Show(
-                    $"确认逐台校验并同步全部 {rows.Count} 台在线柜机？\n\n" +
-                    "同步期间通讯通道将专用于本次操作，预计需要数分钟。",
+                    $"确认增量同步全部 {rows.Count} 台在线柜机？\n\n" +
+                    "已有且一致的数据会跳过；仅新增或变更项会下发。" +
+                    "同步期间通讯通道将专用于本次操作。",
                     "同步全部在线柜机", MessageBoxButton.YesNo,
                     MessageBoxImage.Question, MessageBoxResult.No) != MessageBoxResult.Yes)
                 return;
@@ -344,7 +347,7 @@ namespace CabinetLock
             IsIndeterminate = true;
             Status = "同步中";
             OnPropertyChanged(nameof(NeedsSync));
-            Detail = "正在逐枚校验用户指纹";
+            Detail = "正在读取槽位并分析增量差异";
         }
 
         public void UpdateStage(string stage) => Detail = stage;
@@ -360,7 +363,10 @@ namespace CabinetLock
             Progress = 100;
             Status = "已同步";
             OnPropertyChanged(nameof(NeedsSync));
-            Detail = $"指纹 {result.ConfirmedFingerprintCount} 枚，权限 {result.PermissionRecordCount} 条已确认";
+            Detail = result.UsedFullPermissionSync
+                ? $"指纹 {result.ConfirmedFingerprintCount} 枚，权限 {result.PermissionRecordCount} 条完整确认"
+                : $"指纹 {result.ConfirmedFingerprintCount} 枚（新增 {result.RestoredFingerprintCount}），" +
+                  $"权限 {result.PermissionRecordCount} 条（本次更新 {result.PermissionUpdatedCount}）";
         }
 
         public void MarkFailed(CabinetDataSyncResult result)

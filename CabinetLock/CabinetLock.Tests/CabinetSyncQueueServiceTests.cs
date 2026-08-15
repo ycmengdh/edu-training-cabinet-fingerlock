@@ -174,6 +174,26 @@ VALUES('USER:ROOT_A001:ADMIN','user','admin','ROOT_A001','history','pending',0,$
         Assert.Equal("maintenance", selected.JobKind);
     }
 
+    [Fact]
+    public void CompletedManualCabinetSync_ClosesOnlyPermissionJobsForDevice()
+    {
+        var queue = new CabinetSyncQueueService();
+        queue.EnqueueUser("U001", new[] { "CABINET_001" }, "new binding");
+        queue.EnqueueCabinet("CABINET_001", "repair");
+        queue.EnqueueMaintenance(new[] { "CABINET_001" }, "settings");
+        queue.EnqueueUser("U002", new[] { "CABINET_002" }, "other cabinet");
+
+        Assert.Equal(2, queue.CompletePermissionJobsForDevice("CABINET_001"));
+
+        CabinetSyncJob[] open = queue.GetOpen().ToArray();
+        Assert.Contains(open, job => job.DeviceId == "CABINET_001" &&
+            job.JobKind == "maintenance");
+        Assert.Contains(open, job => job.DeviceId == "CABINET_002" &&
+            job.JobKind == "user");
+        Assert.DoesNotContain(open, job => job.DeviceId == "CABINET_001" &&
+            job.JobKind is "user" or "cabinet");
+    }
+
     public void Dispose()
     {
         BusinessDatabase.SetActivePath(_originalPath);

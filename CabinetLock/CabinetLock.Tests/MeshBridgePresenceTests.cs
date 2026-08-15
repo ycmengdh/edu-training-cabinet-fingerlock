@@ -60,6 +60,49 @@ public class MeshBridgePresenceTests
     }
 
     [Fact]
+    public void CabinetIdAndReportedMac_AreOnePhysicalDevice_AndKeepStatus()
+    {
+        var bridge = new MeshBridge();
+        Receive(bridge,
+            "{\"cmd\":\"STATUS_REPORT\",\"device_id\":\"CAB_14C19F394688\"," +
+            "\"source_device_id\":\"CAB_14C19F394688\",\"data\":{" +
+            "\"fingerprint_count\":3,\"perm_count\":2,\"perm_version\":42}}");
+
+        DeviceClient statusDevice = Assert.Single(bridge.Devices);
+        Assert.Equal("14:C1:9F:39:46:88", statusDevice.MeshMac);
+        Assert.Equal(3, statusDevice.Status.FingerprintCount);
+
+        Receive(bridge,
+            "{\"cmd\":\"REGISTER\",\"device_id\":\"CAB_14C19F394688\"," +
+            "\"source_device_id\":\"CAB_14C19F394688\",\"data\":{" +
+            "\"device_id\":\"CAB_14C19F394688\",\"mesh_mac\":\"14C19F394688\"," +
+            "\"is_root\":false}}");
+
+        DeviceClient registeredDevice = Assert.Single(bridge.Devices);
+        Assert.Same(statusDevice, registeredDevice);
+        Assert.Equal(3, registeredDevice.Status.FingerprintCount);
+        Assert.Equal(2, registeredDevice.Status.PermissionCount);
+        Assert.Equal(42U, registeredDevice.Status.PermissionVersion);
+    }
+
+    [Fact]
+    public void RegisterWithMac_ClaimsEarlierLogicalIdPlaceholder()
+    {
+        var bridge = new MeshBridge();
+        Receive(bridge,
+            "{\"cmd\":\"HEARTBEAT\",\"device_id\":\"LEGACY_CABINET_01\",\"data\":{}}");
+        DeviceClient placeholder = Assert.Single(bridge.Devices);
+
+        Receive(bridge,
+            "{\"cmd\":\"REGISTER\",\"device_id\":\"LEGACY_CABINET_01\",\"data\":{" +
+            "\"mesh_mac\":\"AA:00:00:00:00:01\",\"is_root\":false}}");
+
+        DeviceClient registered = Assert.Single(bridge.Devices);
+        Assert.Same(placeholder, registered);
+        Assert.Equal("AA:00:00:00:00:01", registered.MeshMac);
+    }
+
+    [Fact]
     public void ConfigResponse_FillsMissingVersions_WithoutClearingReportedValues()
     {
         var bridge = new MeshBridge();

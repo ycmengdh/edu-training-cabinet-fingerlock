@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using Newtonsoft.Json.Linq;
 
 namespace CabinetLock
 {
@@ -328,10 +329,10 @@ namespace CabinetLock
             if (string.IsNullOrWhiteSpace(deviceId))
                 return CabinetDataSyncResult.Failed(deviceId, "柜子 ID 不能为空");
 
-            bool online = App.MeshBridge.GetOnlineDevices().Any(device =>
+            DeviceClient? onlineDevice = App.MeshBridge.GetOnlineDevices().FirstOrDefault(device =>
                 device.IsOnline && !device.IsRoot &&
                 string.Equals(device.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase));
-            if (!online)
+            if (onlineDevice == null)
                 return CabinetDataSyncResult.Failed(deviceId, "柜子当前不在线");
 
             PermissionSnapshot? snapshot = ReadStableSnapshot(out string snapshotError);
@@ -343,31 +344,47 @@ namespace CabinetLock
             var failures = new List<string>();
             int currentCount = 0;
             int restoredCount = 0;
+            int permissionUpdatedCount = 0;
+            bool usedFullPermissionSync = false;
 
             progress?.Report("正在读取柜机实际指纹槽位");
             IReadOnlyList<FingerprintSlotRecord>? slots = await App.CommandService
                 .GetFingerprintSlotsAsync(deviceId).ConfigureAwait(false);
+            CabinetIncrementalSyncPlan? plan = null;
             if (slots == null)
             {
                 failures.Add("无法读取柜机实际指纹槽位，未提交权限以保护本机副指纹");
             }
             else
             {
-                HashSet<int> expectedFingerprintIds = rows
-                    .Select(row => Convert.ToInt32(row["fingerprint_id"]))
-                    .ToHashSet();
-                FingerprintSlotRecord[] staleSlots = slots.Where(slot =>
-                        slot.Slot > 0 && !slot.IsBackup &&
-                        !expectedFingerprintIds.Contains(slot.Slot))
+                CabinetSyncJob[] openJobs = App.CabinetSyncQueueService.GetOpen()
+                    .Where(job => string.Equals(job.DeviceId, deviceId,
+                        StringComparison.OrdinalIgnoreCase))
                     .ToArray();
-                for (int index = 0; index < staleSlots.Length; index++)
+                string[] usersRequiringVerification = openJobs
+                    .Where(job => string.Equals(job.JobKind, "user",
+                        StringComparison.OrdinalIgnoreCase))
+                    .Select(job => job.UserId)
+                    .ToArray();
+                plan = CabinetIncrementalSyncPlanner.Build(
+                    rows.Select(ToPermissionDescriptor), slots,
+                    usersRequiringVerification, onlineDevice.Status.PermissionCount);
+                currentCount = plan.TrustedFingerprintCount;
+                progress?.Report(
+                    $"差异分析完成：已有 {plan.TrustedFingerprintCount}，" +
+                    $"待补 {plan.MissingFingerprintIds.Length}，" +
+                    $"权限变更 {plan.PermissionUpsertFingerprintIds.Length}");
+
+                for (int index = 0; index < plan.StaleFingerprintIds.Length; index++)
                 {
-                    FingerprintSlotRecord stale = staleSlots[index];
-                    progress?.Report($"正在清理残留指纹 {index + 1}/{staleSlots.Length}：槽位 {stale.Slot}");
+                    int staleFingerprintId = plan.StaleFingerprintIds[index];
+                    progress?.Report(
+                        $"正在清理残留指纹 {index + 1}/{plan.StaleFingerprintIds.Length}：" +
+                        $"槽位 {staleFingerprintId}");
                     CommandResult deleted = await DeleteFingerprintFromCabinetIdempotentAsync(
-                        deviceId, stale.Slot).ConfigureAwait(false);
+                        deviceId, staleFingerprintId).ConfigureAwait(false);
                     if (!deleted.Success)
-                        failures.Add($"残留槽位 {stale.Slot}：{deleted.ErrorMessage}");
+                        failures.Add($"残留槽位 {staleFingerprintId}：{deleted.ErrorMessage}");
                 }
                 permissionRows.AddRange(slots
                     .Where(slot => slot.IsBackup && slot.Slot > 0 && slot.FingerprintId > 0 &&
@@ -375,6 +392,8 @@ namespace CabinetLock
                     .Select(BuildBackupPermissionRow));
             }
 
+            HashSet<int> missingFingerprintIds = plan?.MissingFingerprintIds.ToHashSet() ?? new();
+            HashSet<int> fingerprintIdsToVerify = plan?.FingerprintIdsToVerify.ToHashSet() ?? new();
             for (int index = 0; index < rows.Count; index++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -388,7 +407,13 @@ namespace CabinetLock
                     continue;
                 }
 
-                progress?.Report($"正在校验用户指纹 {index + 1}/{rows.Count}：{name}");
+                bool missing = missingFingerprintIds.Contains(fingerprintId);
+                bool mustVerify = fingerprintIdsToVerify.Contains(fingerprintId);
+                if (!missing && !mustVerify) continue;
+
+                progress?.Report(missing
+                    ? $"正在读取新增指纹 {index + 1}/{rows.Count}：{name}"
+                    : $"正在校验变更指纹 {index + 1}/{rows.Count}：{name}");
                 byte[]? template = await App.FingerprintTemplateService
                     .GetTemplateBytesAsync(fingerprintId).ConfigureAwait(false);
                 if (template == null || template.Length == 0)
@@ -397,12 +422,15 @@ namespace CabinetLock
                     continue;
                 }
 
-                FingerprintProbeResult? probe = await App.CommandService.QueryFingerprintAsync(
-                    deviceId, fingerprintId, template, 8_000).ConfigureAwait(false);
-                if (probe?.Matches == true)
+                if (!missing)
                 {
-                    currentCount++;
-                    continue;
+                    FingerprintProbeResult? probe = await App.CommandService.QueryFingerprintAsync(
+                        deviceId, fingerprintId, template, 8_000).ConfigureAwait(false);
+                    if (probe?.Matches == true)
+                    {
+                        currentCount++;
+                        continue;
+                    }
                 }
 
                 progress?.Report($"正在补写用户指纹 {index + 1}/{rows.Count}：{name}");
@@ -427,19 +455,56 @@ namespace CabinetLock
                 permissionResult = BroadcastCommandResult.Failed(
                     "未读取到柜机实际槽位，已跳过权限提交", new[] { deviceId });
             }
+            else if (failures.Count > 0 || plan == null)
+            {
+                permissionResult = BroadcastCommandResult.Failed(
+                    "指纹差异尚未处理完成，已保留原权限版本", new[] { deviceId });
+            }
             else
             {
-                progress?.Report($"正在提交 {permissionRows.Count} 条柜机权限");
-                CommandResult permissionTransaction = await Task.Run(
-                    () => SyncOneCabinet(deviceId, permissionRows, snapshot.Version), cancellationToken)
-                    .ConfigureAwait(false);
-                permissionResult = permissionTransaction.Success
+                Dictionary<int, Dictionary<string, object>> rowsByFingerprint = rows
+                    .GroupBy(row => Convert.ToInt32(row["fingerprint_id"]))
+                    .ToDictionary(group => group.Key, group => group.Last());
+                List<Dictionary<string, object>> changedPermissionRows = plan
+                    .PermissionUpsertFingerprintIds
+                    .Where(rowsByFingerprint.ContainsKey)
+                    .Select(fingerprintId => rowsByFingerprint[fingerprintId])
+                    .ToList();
+                CommandResult permissionCommand;
+                if (plan.UseFullPermissionTransaction)
+                {
+                    usedFullPermissionSync = true;
+                    progress?.Report(
+                        $"差异较大，正在完整提交 {permissionRows.Count} 条柜机权限");
+                    permissionCommand = await Task.Run(
+                        () => SyncOneCabinet(deviceId, permissionRows, snapshot.Version),
+                        cancellationToken).ConfigureAwait(false);
+                    if (permissionCommand.Success)
+                        permissionUpdatedCount = permissionRows.Count;
+                }
+                else
+                {
+                    progress?.Report(changedPermissionRows.Count == 0
+                        ? "权限内容未变化，正在确认版本"
+                        : $"正在增量提交 {changedPermissionRows.Count} 条变更权限");
+                    permissionCommand = await ApplyIncrementalPermissionsAsync(
+                        deviceId, changedPermissionRows, permissionRows,
+                        onlineDevice.Status.PermissionVersion, snapshot.Version,
+                        cancellationToken).ConfigureAwait(false);
+                    if (permissionCommand.Success)
+                        permissionUpdatedCount = changedPermissionRows.Count;
+                }
+
+                if (permissionCommand.Success)
+                    App.MeshBridge.MarkPermissionSyncConfirmed(
+                        deviceId, snapshot.Version, permissionRows.Count);
+                permissionResult = permissionCommand.Success
                     ? BroadcastCommandResult.Succeeded(new[] { deviceId })
                     : new BroadcastCommandResult
                     {
-                        ErrorMessage = string.IsNullOrWhiteSpace(permissionTransaction.ErrorMessage)
+                        ErrorMessage = string.IsNullOrWhiteSpace(permissionCommand.ErrorMessage)
                             ? $"柜子 {deviceId} 未确认权限同步"
-                            : permissionTransaction.ErrorMessage,
+                            : permissionCommand.ErrorMessage,
                         FailedDeviceIds = new[] { deviceId }
                     };
             }
@@ -451,6 +516,8 @@ namespace CabinetLock
                 PermissionRecordCount = permissionRows.Count,
                 CurrentFingerprintCount = currentCount,
                 RestoredFingerprintCount = restoredCount,
+                PermissionUpdatedCount = permissionUpdatedCount,
+                UsedFullPermissionSync = usedFullPermissionSync,
                 FingerprintFailures = failures.ToArray(),
                 PermissionResult = permissionResult
             };
@@ -676,6 +743,27 @@ namespace CabinetLock
             }
         };
 
+        private static CabinetPermissionDescriptor ToPermissionDescriptor(
+            Dictionary<string, object> row)
+        {
+            int lockMask = 0;
+            if (row.TryGetValue("lock_permissions", out object? value) && value != null)
+            {
+                JObject locks = value as JObject ?? JObject.FromObject(value);
+                for (int lockId = 0; lockId < 4; lockId++)
+                {
+                    if (locks.Value<bool?>($"lock_{lockId}") == true)
+                        lockMask |= 1 << lockId;
+                }
+            }
+            return new CabinetPermissionDescriptor(
+                Convert.ToInt32(row["fingerprint_id"]),
+                row["user_id"]?.ToString() ?? "",
+                row["name"]?.ToString() ?? "",
+                Convert.ToInt32(row["role"]),
+                lockMask);
+        }
+
         /// <summary>
         /// 生成单柜权限行：每条记录以 user_id + fingerprint_id 唯一。
         /// 学生仅分配到该柜才下发；未特殊选择时默认下发第一枚有效指纹。
@@ -853,6 +941,55 @@ namespace CabinetLock
                     attempt == PermissionTransactionAttempts)
                     return result;
                 Thread.Sleep(PermissionRetryDelayMs * attempt);
+            }
+            return result;
+        }
+
+        private static async Task<CommandResult> ApplyIncrementalPermissionsAsync(
+            string deviceId,
+            IReadOnlyList<Dictionary<string, object>> changedRows,
+            IReadOnlyList<Dictionary<string, object>> allRows,
+            uint reportedVersion, uint expectedVersion,
+            CancellationToken cancellationToken)
+        {
+            List<Dictionary<string, object>> rowsToSend = changedRows.ToList();
+            if (rowsToSend.Count == 0)
+            {
+                if (reportedVersion == expectedVersion)
+                    return CommandResult.Succeeded("permission_unchanged");
+
+                Dictionary<string, object>? anchor = allRows.FirstOrDefault();
+                if (anchor == null)
+                {
+                    return await Task.Run(
+                        () => SyncOneCabinet(
+                            deviceId, new List<Dictionary<string, object>>(), expectedVersion),
+                        cancellationToken).ConfigureAwait(false);
+                }
+                rowsToSend.Add(anchor);
+            }
+
+            CommandResult result = CommandResult.Failed("尚未提交增量权限");
+            for (int index = 0; index < rowsToSend.Count; index++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var payload = new Dictionary<string, object>(rowsToSend[index]);
+                foreach (string key in payload.Keys
+                             .Where(key => key.StartsWith("_", StringComparison.Ordinal))
+                             .ToArray())
+                    payload.Remove(key);
+                payload["version"] = index == rowsToSend.Count - 1
+                    ? expectedVersion : 0u;
+
+                result = await App.CommandService.SendAsync(
+                    deviceId,
+                    Message.Create(Protocol.CmdSyncPermission, deviceId, payload),
+                    10_000).ConfigureAwait(false);
+                if (!result.Success)
+                    return StageFailure(
+                        $"增量写入第 {index + 1}/{rowsToSend.Count} 条权限", result);
+                if (index < rowsToSend.Count - 1)
+                    await Task.Delay(InterRowDelayMs, cancellationToken).ConfigureAwait(false);
             }
             return result;
         }
@@ -1180,6 +1317,8 @@ namespace CabinetLock
         public int PermissionRecordCount { get; init; }
         public int CurrentFingerprintCount { get; init; }
         public int RestoredFingerprintCount { get; init; }
+        public int PermissionUpdatedCount { get; init; }
+        public bool UsedFullPermissionSync { get; init; }
         public string[] FingerprintFailures { get; init; } = Array.Empty<string>();
         public BroadcastCommandResult PermissionResult { get; init; } =
             BroadcastCommandResult.Failed("尚未执行权限同步");
@@ -1194,7 +1333,9 @@ namespace CabinetLock
             var lines = new List<string>
             {
                 PermissionResult.Success
-                    ? $"权限已确认：{PermissionRecordCountOrExpected} 条"
+                    ? UsedFullPermissionSync
+                        ? $"权限已确认：{PermissionRecordCountOrExpected} 条（完整提交）"
+                        : $"权限已确认：{PermissionRecordCountOrExpected} 条（本次增量 {PermissionUpdatedCount} 条）"
                     : $"权限未完成：{PermissionResult.ErrorMessage}",
                 $"用户指纹已确认：{ConfirmedFingerprintCount}/{ExpectedFingerprintCount}（原有 {CurrentFingerprintCount}，补写 {RestoredFingerprintCount}）"
             };

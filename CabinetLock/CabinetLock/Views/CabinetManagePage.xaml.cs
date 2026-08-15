@@ -235,7 +235,8 @@ namespace CabinetLock
                 target.FirmwareVersion = source.FirmwareVersion;
             if (!string.IsNullOrWhiteSpace(source.HardwareVersion))
                 target.HardwareVersion = source.HardwareVersion;
-            target.Status = source.Status;
+            if (source.LastRuntimeStatusAt.HasValue)
+                target.Status = source.Status;
             App.MaintenanceService.ApplyState(target);
 
             bool displayChanged = target.NotifyRuntimeDataChangedIfNeeded();
@@ -269,7 +270,8 @@ namespace CabinetLock
                 IsRoot = source.IsRoot,
                 FirmwareVersion = source.FirmwareVersion,
                 HardwareVersion = source.HardwareVersion,
-                Status = source.Status ?? new DeviceRuntimeStatus()
+                Status = source.Status ?? new DeviceRuntimeStatus(),
+                LastRuntimeStatusAt = source.LastStatusAt
             };
         }
 

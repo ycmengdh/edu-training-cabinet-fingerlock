@@ -542,12 +542,19 @@ namespace CabinetLock
                 // 1) 主键精确命中（MAC 或旧逻辑 ID）
                 if (!_devices.TryGetValue(identityKey, out existing))
                 {
-                    // 有 MAC 时绝不按逻辑 ID 合并，否则重复 device_id 会把两台
-                    // 物理柜机折叠成一台，造成在线状态和命令目标串设备。
                     if (!string.IsNullOrEmpty(meshMac))
                     {
                         existing = _devices.Values.FirstOrDefault(d =>
                             string.Equals(NormalizeMac(d.MeshMac), meshMac, StringComparison.OrdinalIgnoreCase));
+
+                        // 状态包可能先于带 mesh_mac 的 REGISTER 到达。此时允许
+                        // REGISTER 接管同逻辑 ID、但尚无 MAC 的占位对象；已有 MAC
+                        // 的同名设备仍保持独立，避免两台物理柜机被错误折叠。
+                        existing ??= _devices.Values.FirstOrDefault(d =>
+                            string.IsNullOrWhiteSpace(d.MeshMac) &&
+                            !string.IsNullOrEmpty(logicalDeviceId) &&
+                            string.Equals(d.DeviceId, logicalDeviceId,
+                                StringComparison.OrdinalIgnoreCase));
                     }
                     // 无 MAC 的旧固件才允许按逻辑 ID 兼容归并。
                     if (existing == null && string.IsNullOrEmpty(meshMac) &&
@@ -577,13 +584,18 @@ namespace CabinetLock
                     device = existing;
                     becameOnline = !device.IsOnline;
 
-                    // 若之前用逻辑 ID 做键，现在有了 MAC，则迁移字典键到 MAC
+                    // 一旦知道 MAC，字典始终保留 MAC 主键。旧固件后续只携带
+                    // logical device_id 时也不再把主键迁回逻辑 ID。
                     string currentKey = _devices.FirstOrDefault(kv => ReferenceEquals(kv.Value, device)).Key
                                         ?? identityKey;
-                    if (!string.Equals(currentKey, identityKey, StringComparison.OrdinalIgnoreCase))
+                    string canonicalKey = !string.IsNullOrEmpty(meshMac)
+                        ? meshMac
+                        : NormalizeMac(device.MeshMac);
+                    if (string.IsNullOrEmpty(canonicalKey)) canonicalKey = identityKey;
+                    if (!string.Equals(currentKey, canonicalKey, StringComparison.OrdinalIgnoreCase))
                     {
                         _devices.Remove(currentKey);
-                        _devices[identityKey] = device;
+                        _devices[canonicalKey] = device;
                     }
                 }
 
@@ -668,23 +680,21 @@ namespace CabinetLock
                 device.HardwareVersion = hardwareVersion.Trim();
         }
 
-        /// <summary>规范化 MAC：AA:BB:... 大写；非 MAC 返回空。</summary>
+        /// <summary>
+        /// 规范化 MAC：AA:BB:... 大写；同时识别固件固定生成的 CAB_AABBCCDDEEFF。
+        /// 非 MAC 返回空。
+        /// </summary>
         private static string NormalizeMac(string? raw)
         {
             if (string.IsNullOrWhiteSpace(raw)) return "";
             string s = raw.Trim().ToUpperInvariant()
                 .Replace("-", ":")
                 .Replace(" ", "");
-            // 已是 AA:BB:CC:DD:EE:FF
-            if (s.Length == 17 && s.Count(c => c == ':') == 5) return s;
-            // 12 位十六进制无冒号
-            string hex = new string(s.Where(Uri.IsHexDigit).ToArray());
-            if (hex.Length == 12)
-            {
-                return string.Join(":", Enumerable.Range(0, 6)
-                    .Select(i => hex.Substring(i * 2, 2)));
-            }
-            return "";
+            if (s.StartsWith("CAB_", StringComparison.Ordinal)) s = s.Substring(4);
+            string hex = s.Replace(":", "");
+            if (hex.Length != 12 || hex.Any(c => !Uri.IsHexDigit(c))) return "";
+            return string.Join(":", Enumerable.Range(0, 6)
+                .Select(i => hex.Substring(i * 2, 2)));
         }
 
         /// <summary>
