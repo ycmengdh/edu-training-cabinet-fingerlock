@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Text;
 using Newtonsoft.Json.Linq;
 
 namespace CabinetLock
@@ -22,6 +23,8 @@ namespace CabinetLock
             _fingerprintVerifications = new(StringComparer.OrdinalIgnoreCase);
         private readonly ConcurrentDictionary<string, CabinetExpectedSyncState>
             _expectedStateCache = new(StringComparer.OrdinalIgnoreCase);
+        private readonly object _expectedStateCacheLock = new();
+        private PermissionDataVersions? _expectedStateCacheSourceVersions;
 
         public event Action<string, CabinetExpectedSyncState>? SyncStateChanged;
 
@@ -66,7 +69,8 @@ namespace CabinetLock
 
             bool[] defaultPermissions = App.PermissionService.GetFinalPermissions(user.UserId);
             PermissionPolicy.Enforce(user.Role, defaultPermissions);
-            uint expectedVersion = GetExpectedPermissionVersion();
+            IReadOnlyDictionary<string, CabinetExpectedSyncState> expectedStates =
+                GetExpectedCabinetSyncStates(devices.Select(device => device.DeviceId));
             var results = new System.Collections.Concurrent.ConcurrentBag<UserCabinetSyncResult>();
             using var gate = new SemaphoreSlim(MaxProbeConcurrency);
             int completed = 0;
@@ -99,7 +103,9 @@ namespace CabinetLock
                                     $"指纹 #{fingerprintId} 的本地和 SD 模板均不可用")
                                 : await VerifyAndSyncOneAsync(
                                     device.DeviceId, user, fingerprintId, template,
-                                    expectedPermissions, expectedVersion, cancellationToken)
+                                    expectedPermissions,
+                                    expectedStates[device.DeviceId].Version,
+                                    cancellationToken)
                                     .ConfigureAwait(false));
                         }
                         UserCabinetSyncResult? failed = itemResults.FirstOrDefault(item => !item.Success);
@@ -252,10 +258,43 @@ namespace CabinetLock
 
         private BroadcastCommandResult SyncAllPermissionsCore()
         {
-            PermissionSnapshot? snapshot = ReadStableSnapshot(out string error);
-            return snapshot == null
-                ? BroadcastCommandResult.Failed(error)
-                : SyncTransactionPaced(snapshot.Rows, snapshot.Version);
+            string[] deviceIds = App.MeshBridge.GetOnlineDevices()
+                .Where(device => device.IsOnline && !device.IsRoot &&
+                    !string.IsNullOrWhiteSpace(device.DeviceId))
+                .Select(device => device.DeviceId)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(deviceId => deviceId, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (deviceIds.Length == 0)
+                return BroadcastCommandResult.Failed("没有在线柜子可确认同步");
+
+            var confirmed = new List<string>();
+            var failed = new List<string>();
+            string lastError = "";
+            foreach (string deviceId in deviceIds)
+            {
+                CabinetDataSyncResult result = SyncCabinetDataCoreAsync(
+                    deviceId, null, CancellationToken.None).GetAwaiter().GetResult();
+                if (result.Success)
+                    confirmed.Add(deviceId);
+                else
+                {
+                    failed.Add(deviceId);
+                    lastError = result.FormatForDisplay();
+                }
+                Thread.Sleep(InterNodeDelayMs);
+            }
+
+            return failed.Count == 0
+                ? BroadcastCommandResult.Succeeded(confirmed.ToArray())
+                : new BroadcastCommandResult
+                {
+                    Success = false,
+                    ErrorMessage = string.IsNullOrWhiteSpace(lastError)
+                        ? "部分柜子权限同步失败" : lastError,
+                    ConfirmedDeviceIds = confirmed.ToArray(),
+                    FailedDeviceIds = failed.ToArray()
+                };
         }
 
         public BroadcastCommandResult SyncCabinetPermissions(string deviceId) =>
@@ -277,21 +316,17 @@ namespace CabinetLock
             if (!online)
                 return BroadcastCommandResult.Failed("柜子当前不在线", new[] { deviceId });
 
-            PermissionSnapshot? snapshot = ReadStableSnapshot(out string error);
-            if (snapshot == null)
-                return BroadcastCommandResult.Failed(error, new[] { deviceId });
-
             try
             {
-                var rows = BuildRowsForDevice(snapshot.Rows, deviceId);
-                CommandResult transaction = SyncOneCabinet(deviceId, rows, snapshot.Version);
-                if (transaction.Success)
+                CabinetDataSyncResult result = SyncCabinetDataCoreAsync(
+                    deviceId, null, CancellationToken.None).GetAwaiter().GetResult();
+                if (result.Success)
                 {
                     return BroadcastCommandResult.Succeeded(new[] { deviceId });
                 }
-                string reason = string.IsNullOrWhiteSpace(transaction.ErrorMessage)
+                string reason = string.IsNullOrWhiteSpace(result.PermissionResult.ErrorMessage)
                     ? $"柜子 {deviceId} 未确认权限同步"
-                    : transaction.ErrorMessage;
+                    : result.FormatForDisplay();
                 return new BroadcastCommandResult
                 {
                     ErrorMessage = reason,
@@ -339,7 +374,8 @@ namespace CabinetLock
             if (snapshot == null)
                 return CabinetDataSyncResult.Failed(deviceId, snapshotError);
 
-            var rows = BuildRowsForDevice(snapshot.Rows, deviceId);
+            CabinetSyncTarget target = BuildTargets(snapshot, new[] { deviceId })[deviceId];
+            List<Dictionary<string, object>> rows = target.Rows;
             var permissionRows = new List<Dictionary<string, object>>(rows);
             var failures = new List<string>();
             int currentCount = 0;
@@ -448,6 +484,24 @@ namespace CabinetLock
                 failures.Add($"{name}（{userId}，ID {fingerprintId}）：{reason}");
             }
 
+            // 从 SD 补取模板会回写本地数据库并改变模板 CRC。提交版本前重新取一次
+            // 目标，确保柜端拿到的是实际已下发内容对应的版本。
+            if (ReadLocalVersions() != snapshot.SourceVersions)
+            {
+                PermissionSnapshot? refreshed = ReadStableSnapshot(out string refreshError);
+                if (refreshed == null)
+                    failures.Add(refreshError);
+                else
+                {
+                    CabinetSyncTarget refreshedTarget =
+                        BuildTargets(refreshed, new[] { deviceId })[deviceId];
+                    if (!PermissionRowsMatch(target.Rows, refreshedTarget.Rows))
+                        failures.Add("同步期间本柜绑定或权限发生变化，请重新同步");
+                    else
+                        target = refreshedTarget;
+                }
+            }
+
             cancellationToken.ThrowIfCancellationRequested();
             BroadcastCommandResult permissionResult;
             if (slots == null)
@@ -475,9 +529,9 @@ namespace CabinetLock
                 {
                     usedFullPermissionSync = true;
                     progress?.Report(
-                        $"差异较大，正在完整提交 {permissionRows.Count} 条柜机权限");
+                        $"检测到无法定位的孤立权限，正在修复 {permissionRows.Count} 条柜机权限");
                     permissionCommand = await Task.Run(
-                        () => SyncOneCabinet(deviceId, permissionRows, snapshot.Version),
+                        () => SyncOneCabinet(deviceId, permissionRows, target.Version),
                         cancellationToken).ConfigureAwait(false);
                     if (permissionCommand.Success)
                         permissionUpdatedCount = permissionRows.Count;
@@ -489,7 +543,7 @@ namespace CabinetLock
                         : $"正在增量提交 {changedPermissionRows.Count} 条变更权限");
                     permissionCommand = await ApplyIncrementalPermissionsAsync(
                         deviceId, changedPermissionRows, permissionRows,
-                        onlineDevice.Status.PermissionVersion, snapshot.Version,
+                        onlineDevice.Status.PermissionVersion, target.Version,
                         cancellationToken).ConfigureAwait(false);
                     if (permissionCommand.Success)
                         permissionUpdatedCount = changedPermissionRows.Count;
@@ -497,7 +551,7 @@ namespace CabinetLock
 
                 if (permissionCommand.Success)
                     App.MeshBridge.MarkPermissionSyncConfirmed(
-                        deviceId, snapshot.Version, permissionRows.Count);
+                        deviceId, target.Version, permissionRows.Count);
                 permissionResult = permissionCommand.Success
                     ? BroadcastCommandResult.Succeeded(new[] { deviceId })
                     : new BroadcastCommandResult
@@ -525,7 +579,7 @@ namespace CabinetLock
             if (failures.Count == 0)
             {
                 _fingerprintVerifications[verificationKey] =
-                    new FingerprintVerification(snapshot.Version, rows.Count);
+                    new FingerprintVerification(target.Version, rows.Count);
                 App.MeshBridge.MarkFingerprintSyncConfirmed(
                     deviceId, rows.Count + permissionRows.Count(row =>
                         row.TryGetValue("is_backup", out object? value) && value is true));
@@ -535,7 +589,7 @@ namespace CabinetLock
             try
             {
                 SyncStateChanged?.Invoke(deviceId,
-                    new CabinetExpectedSyncState(snapshot.Version, rows.Count));
+                    new CabinetExpectedSyncState(target.Version, rows.Count));
             }
             catch
             {
@@ -550,32 +604,62 @@ namespace CabinetLock
                 .Where(deviceId => !string.IsNullOrWhiteSpace(deviceId))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
-            uint currentVersion = GetExpectedPermissionVersion();
-            if (requested.All(deviceId =>
-                    _expectedStateCache.TryGetValue(deviceId, out CabinetExpectedSyncState cached) &&
-                    cached.Version == currentVersion))
+            PermissionDataVersions currentVersions = ReadLocalVersions();
+            lock (_expectedStateCacheLock)
             {
-                return requested.ToDictionary(
-                    deviceId => deviceId,
-                    deviceId => _expectedStateCache[deviceId],
-                    StringComparer.OrdinalIgnoreCase);
+                if (_expectedStateCacheSourceVersions == currentVersions &&
+                    requested.All(deviceId => _expectedStateCache.ContainsKey(deviceId)))
+                {
+                    return requested.ToDictionary(
+                        deviceId => deviceId,
+                        deviceId => _expectedStateCache[deviceId],
+                        StringComparer.OrdinalIgnoreCase);
+                }
             }
 
             PermissionSnapshot? snapshot = ReadStableSnapshot(out string error);
             if (snapshot == null) throw new InvalidOperationException(error);
 
-            IReadOnlyDictionary<string, List<Dictionary<string, object>>> rowsByDevice =
-                BuildRowsForDevices(snapshot.Rows, requested);
+            IReadOnlyDictionary<string, CabinetSyncTarget> targets =
+                BuildTargets(snapshot, requested);
             var result = new Dictionary<string, CabinetExpectedSyncState>(
                 StringComparer.OrdinalIgnoreCase);
             foreach (string deviceId in requested)
             {
+                CabinetSyncTarget target = targets[deviceId];
                 var expected = new CabinetExpectedSyncState(
-                    snapshot.Version, rowsByDevice[deviceId].Count);
-                _expectedStateCache[deviceId] = expected;
+                    target.Version, target.Rows.Count);
                 result[deviceId] = expected;
             }
+            lock (_expectedStateCacheLock)
+            {
+                if (_expectedStateCacheSourceVersions != snapshot.SourceVersions)
+                {
+                    _expectedStateCache.Clear();
+                    _expectedStateCacheSourceVersions = snapshot.SourceVersions;
+                }
+                foreach ((string deviceId, CabinetExpectedSyncState expected) in result)
+                    _expectedStateCache[deviceId] = expected;
+            }
             return result;
+        }
+
+        public CabinetExpectedSyncState GetExpectedCabinetSyncState(
+            string deviceId, IReadOnlyCollection<string>? excludedUserIds = null)
+        {
+            if (string.IsNullOrWhiteSpace(deviceId))
+                throw new ArgumentException("柜子 ID 不能为空", nameof(deviceId));
+            if (excludedUserIds == null || excludedUserIds.Count == 0)
+                return GetExpectedCabinetSyncStates(new[] { deviceId })[deviceId];
+
+            PermissionSnapshot? snapshot = ReadStableSnapshot(out string error);
+            if (snapshot == null) throw new InvalidOperationException(error);
+            HashSet<string> excluded = excludedUserIds
+                .Where(userId => !string.IsNullOrWhiteSpace(userId))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            CabinetSyncTarget target = BuildTargets(
+                snapshot, new[] { deviceId }, excluded)[deviceId];
+            return new CabinetExpectedSyncState(target.Version, target.Rows.Count);
         }
 
         public void ApplyExpectedSyncState(Device device, CabinetExpectedSyncState expected)
@@ -601,13 +685,25 @@ namespace CabinetLock
                 var classes = root.Read<ClassInfo>("classes");
                 var roles = root.Read<RolePermission>("role_permissions");
                 var overrides = root.Read<UserPermission>("permissions");
+                List<FingerprintTemplate> templates =
+                    BusinessDatabase.ReadAllFpTemplateMetas();
+                Dictionary<int, uint> templateCrcs = templates
+                    .Where(template => template.FingerprintId > 0)
+                    .Select(template => template.FingerprintId)
+                    .Distinct()
+                    .ToDictionary(
+                        fingerprintId => fingerprintId,
+                        fingerprintId => CommandService.ComputeTemplateCrc32(
+                            BusinessDatabase.ReadFpTemplateBytes(fingerprintId) ??
+                            Array.Empty<byte>()));
                 PermissionDataVersions after = ReadLocalVersions();
                 if (before != after)
                     continue;
 
                 error = "";
                 return new PermissionSnapshot(
-                    BuildRows(users, classes, roles, overrides), ComposePermissionVersion(after));
+                    BuildRows(users, classes, roles, overrides, templates),
+                    users, templates, templateCrcs, after);
             }
 
             error = "权限数据在读取过程中被并发修改，请重试";
@@ -616,6 +712,56 @@ namespace CabinetLock
 
         public static uint GetExpectedPermissionVersion() =>
             ComposePermissionVersion(ReadLocalVersions());
+
+        public static uint ComputeCabinetPermissionVersion(
+            IEnumerable<CabinetPermissionDescriptor>? permissions,
+            IReadOnlyDictionary<int, uint>? templateCrcs = null)
+        {
+            CabinetPermissionDescriptor[] rows = (permissions ??
+                    Array.Empty<CabinetPermissionDescriptor>())
+                .OrderBy(row => row.FingerprintId)
+                .ThenBy(row => row.UserId, StringComparer.Ordinal)
+                .ThenBy(row => row.Name, StringComparer.Ordinal)
+                .ToArray();
+            unchecked
+            {
+                uint hash = 2166136261;
+                AddHashUInt32(ref hash, 0x43414231); // "CAB1" schema marker
+                AddHashUInt32(ref hash, (uint)rows.Length);
+                foreach (CabinetPermissionDescriptor row in rows)
+                {
+                    AddHashUInt32(ref hash, (uint)row.FingerprintId);
+                    AddFirmwareString(ref hash, row.UserId, 24);
+                    AddFirmwareString(ref hash, row.Name, 32);
+                    AddHashUInt32(ref hash, (uint)row.Role);
+                    AddHashUInt32(ref hash, (uint)(row.LockMask & 0x0F));
+                    AddHashUInt32(ref hash,
+                        templateCrcs != null && templateCrcs.TryGetValue(
+                            row.FingerprintId, out uint crc) ? crc : 0);
+                }
+                return hash == 0 ? 1u : hash;
+            }
+        }
+
+        private static void AddFirmwareString(ref uint hash, string? value, int maxBytes)
+        {
+            byte[] bytes = Encoding.UTF8.GetBytes(value ?? "");
+            int length = Math.Min(bytes.Length, maxBytes);
+            AddHashUInt32(ref hash, (uint)length);
+            for (int index = 0; index < length; index++)
+                AddHashByte(ref hash, bytes[index]);
+        }
+
+        private static void AddHashUInt32(ref uint hash, uint value)
+        {
+            AddHashByte(ref hash, (byte)value);
+            AddHashByte(ref hash, (byte)(value >> 8));
+            AddHashByte(ref hash, (byte)(value >> 16));
+            AddHashByte(ref hash, (byte)(value >> 24));
+        }
+
+        private static void AddHashByte(ref uint hash, byte value) =>
+            hash = (hash ^ value) * 16777619;
 
         private static PermissionDataVersions ReadLocalVersions() => new(
             BusinessDatabase.GetTableVersion("users"),
@@ -655,14 +801,14 @@ namespace CabinetLock
 
         private static List<Dictionary<string, object>> BuildRows(
             List<User> users, List<ClassInfo> classes,
-            List<RolePermission> roles, List<UserPermission> overrides)
+            List<RolePermission> roles, List<UserPermission> overrides,
+            List<FingerprintTemplate> templates)
         {
             var rows = new List<Dictionary<string, object>>();
             HashSet<string> disabledClassIds = classes
                 .Where(item => !item.Enabled && !string.IsNullOrWhiteSpace(item.ClassId))
                 .Select(item => item.ClassId)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            List<FingerprintTemplate> templates = BusinessDatabase.ReadAllFpTemplateMetas();
             Dictionary<string, RolePermission> roleMap = roles
                 .Where(item => !string.IsNullOrWhiteSpace(item.Role))
                 .GroupBy(item => item.Role, StringComparer.OrdinalIgnoreCase)
@@ -764,37 +910,41 @@ namespace CabinetLock
                 lockMask);
         }
 
+        private static bool PermissionRowsMatch(
+            IReadOnlyList<Dictionary<string, object>> first,
+            IReadOnlyList<Dictionary<string, object>> second) =>
+            first.Select(ToPermissionDescriptor)
+                .SequenceEqual(second.Select(ToPermissionDescriptor));
+
         /// <summary>
         /// 生成单柜权限行：每条记录以 user_id + fingerprint_id 唯一。
         /// 学生仅分配到该柜才下发；未特殊选择时默认下发第一枚有效指纹。
         /// </summary>
-        private static List<Dictionary<string, object>> BuildRowsForDevice(
-            IEnumerable<Dictionary<string, object>> rows, string deviceId)
-        {
-            List<User> userList = App.UserService.GetAllUsers();
-            List<FingerprintTemplate> templates = BusinessDatabase.ReadAllFpTemplateMetas();
-            Dictionary<string, IReadOnlyList<CabinetAssignment>> assignments =
-                App.CabinetBindingService.GetAssignments(userList, new[] { deviceId });
-            return BuildRowsForDevice(rows, deviceId, userList, templates, assignments);
-        }
-
-        private static IReadOnlyDictionary<string, List<Dictionary<string, object>>>
-            BuildRowsForDevices(
-                IEnumerable<Dictionary<string, object>> rows,
-                IReadOnlyCollection<string> deviceIds)
+        private static IReadOnlyDictionary<string, CabinetSyncTarget> BuildTargets(
+            PermissionSnapshot snapshot, IReadOnlyCollection<string> deviceIds,
+            IReadOnlySet<string>? excludedUserIds = null)
         {
             string[] requested = deviceIds
                 .Where(deviceId => !string.IsNullOrWhiteSpace(deviceId))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
-            List<User> users = App.UserService.GetAllUsers();
-            List<FingerprintTemplate> templates = BusinessDatabase.ReadAllFpTemplateMetas();
             Dictionary<string, IReadOnlyList<CabinetAssignment>> assignments =
-                App.CabinetBindingService.GetAssignments(users, requested);
+                App.CabinetBindingService.GetAssignments(snapshot.Users, requested);
+            IEnumerable<Dictionary<string, object>> sourceRows = excludedUserIds == null
+                ? snapshot.Rows
+                : snapshot.Rows.Where(row => !excludedUserIds.Contains(
+                    row["user_id"]?.ToString() ?? ""));
             return requested.ToDictionary(
                 deviceId => deviceId,
-                deviceId => BuildRowsForDevice(
-                    rows, deviceId, users, templates, assignments),
+                deviceId =>
+                {
+                    List<Dictionary<string, object>> rows = BuildRowsForDevice(
+                        sourceRows, deviceId, snapshot.Users,
+                        snapshot.Templates, assignments);
+                    uint version = ComputeCabinetPermissionVersion(
+                        rows.Select(ToPermissionDescriptor), snapshot.TemplateCrcs);
+                    return new CabinetSyncTarget(rows, version);
+                },
                 StringComparer.OrdinalIgnoreCase);
         }
 
@@ -868,66 +1018,6 @@ namespace CabinetLock
                 .OrderBy(row => row["user_id"]?.ToString() ?? "", StringComparer.OrdinalIgnoreCase)
                 .ThenBy(row => Convert.ToInt32(row["fingerprint_id"]))
                 .ToList();
-        }
-
-        /// <summary>
-        /// 按在线柜子 unicast 事务：BEGIN → N×SYNC（pacing）→ COMMIT（等 SYNC_ACK）。
-        /// 失败柜单独汇总，不因单柜失败中止全部。
-        /// </summary>
-        private static BroadcastCommandResult SyncTransactionPaced(
-            List<Dictionary<string, object>> rows, uint version)
-        {
-            string[] expectedDevices = App.MeshBridge.GetOnlineDevices()
-                .Where(device => device.IsOnline && !device.IsRoot)
-                .Select(device => device.DeviceId)
-                .Where(deviceId => !string.IsNullOrWhiteSpace(deviceId))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToArray();
-            if (expectedDevices.Length == 0)
-                return BroadcastCommandResult.Failed("没有在线柜子可确认同步");
-
-            var confirmed = new List<string>();
-            var failed = new List<string>();
-            string lastError = "";
-
-            IReadOnlyDictionary<string, List<Dictionary<string, object>>> rowsByDevice =
-                BuildRowsForDevices(rows, expectedDevices);
-            foreach (string deviceId in expectedDevices)
-            {
-                try
-                {
-                    List<Dictionary<string, object>> deviceRows = rowsByDevice[deviceId];
-                    CommandResult transaction = SyncOneCabinet(deviceId, deviceRows, version);
-                    if (transaction.Success) confirmed.Add(deviceId);
-                    else
-                    {
-                        failed.Add(deviceId);
-                        lastError = string.IsNullOrWhiteSpace(transaction.ErrorMessage)
-                            ? $"柜子 {deviceId} 权限同步失败"
-                            : transaction.ErrorMessage;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    failed.Add(deviceId);
-                    lastError = ex.Message;
-                }
-                Thread.Sleep(InterNodeDelayMs);
-            }
-
-            if (failed.Count == 0)
-                return BroadcastCommandResult.Succeeded(confirmed.ToArray());
-
-            return new BroadcastCommandResult
-            {
-                Success = false,
-                ErrorMessage = string.IsNullOrEmpty(lastError)
-                    ? "部分柜子权限同步失败"
-                    : lastError,
-                ConfirmedDeviceIds = confirmed.ToArray(),
-                FailedDeviceIds = failed.ToArray(),
-                MissingDeviceIds = Array.Empty<string>(),
-            };
         }
 
         private static CommandResult SyncOneCabinet(
@@ -1162,25 +1252,31 @@ namespace CabinetLock
         private BroadcastCommandResult SyncCabinetPermissionsExcludingUsersCore(
             string deviceId, IReadOnlyCollection<string> excludedUserIds)
         {
-            PermissionSnapshot? snapshot = ReadStableSnapshot(out string error);
-            if (snapshot == null)
-                return BroadcastCommandResult.Failed(error, new[] { deviceId });
-
             HashSet<string> excluded = excludedUserIds
                 .Where(id => !string.IsNullOrWhiteSpace(id))
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            List<Dictionary<string, object>> filtered = snapshot.Rows
-                .Where(row => !excluded.Contains(row["user_id"]?.ToString() ?? ""))
-                .ToList();
-            List<Dictionary<string, object>> rows = BuildRowsForDevice(filtered, deviceId);
-            CommandResult result = SyncOneCabinet(deviceId, rows, snapshot.Version);
-            return result.Success
-                ? BroadcastCommandResult.Succeeded(new[] { deviceId })
-                : BroadcastCommandResult.Failed(
-                    string.IsNullOrWhiteSpace(result.ErrorMessage)
-                        ? $"柜子 {deviceId} 未确认权限清理"
-                        : result.ErrorMessage,
-                    new[] { deviceId });
+            if (excluded.Count == 0)
+                return BroadcastCommandResult.Succeeded(new[] { deviceId });
+
+            CabinetExpectedSyncState expected = GetExpectedCabinetSyncState(
+                deviceId, excluded);
+            int index = 0;
+            foreach (string userId in excluded.OrderBy(id => id, StringComparer.OrdinalIgnoreCase))
+            {
+                index++;
+                uint version = index == excluded.Count ? expected.Version : 0;
+                CommandResult result = App.CommandService.DeleteUserPermissionAsync(
+                    deviceId, userId, version).GetAwaiter().GetResult();
+                if (!result.Success)
+                {
+                    return BroadcastCommandResult.Failed(
+                        string.IsNullOrWhiteSpace(result.ErrorMessage)
+                            ? $"柜子 {deviceId} 未确认权限清理"
+                            : result.ErrorMessage,
+                        new[] { deviceId });
+                }
+            }
+            return BroadcastCommandResult.Succeeded(new[] { deviceId });
         }
 
         public Task<CommandResult> DeleteFingerprintFromCabinetIdempotentAsync(
@@ -1264,15 +1360,28 @@ namespace CabinetLock
 
         private sealed class PermissionSnapshot
         {
-            public PermissionSnapshot(List<Dictionary<string, object>> rows, uint version)
+            public PermissionSnapshot(
+                List<Dictionary<string, object>> rows, List<User> users,
+                List<FingerprintTemplate> templates,
+                IReadOnlyDictionary<int, uint> templateCrcs,
+                PermissionDataVersions sourceVersions)
             {
                 Rows = rows;
-                Version = version;
+                Users = users;
+                Templates = templates;
+                TemplateCrcs = templateCrcs;
+                SourceVersions = sourceVersions;
             }
 
             public List<Dictionary<string, object>> Rows { get; }
-            public uint Version { get; }
+            public List<User> Users { get; }
+            public List<FingerprintTemplate> Templates { get; }
+            public IReadOnlyDictionary<int, uint> TemplateCrcs { get; }
+            public PermissionDataVersions SourceVersions { get; }
         }
+
+        private sealed record CabinetSyncTarget(
+            List<Dictionary<string, object>> Rows, uint Version);
 
         private readonly record struct PermissionDataVersions(
             uint Users, uint Classes, uint Permissions, uint RolePermissions, uint Fingerprints);

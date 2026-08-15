@@ -109,8 +109,11 @@ namespace CabinetLock
 
                 try
                 {
-                    _selectedDevice.RootPermissionVersion = await Task.Run(
-                        CabinetSyncService.GetExpectedPermissionVersion);
+                    CabinetExpectedSyncState expected = await Task.Run(() =>
+                        App.CabinetSyncService.GetExpectedCabinetSyncState(
+                            _selectedDevice.DeviceId));
+                    App.CabinetSyncService.ApplyExpectedSyncState(
+                        _selectedDevice, expected);
                 }
                 catch
                 {
@@ -165,8 +168,11 @@ namespace CabinetLock
                 if (result.ReportedStatus != null && _selectedDevice != null)
                 {
                     _selectedDevice.Status = result.ReportedStatus;
-                    _selectedDevice.RootPermissionVersion = await Task.Run(
-                        CabinetSyncService.GetExpectedPermissionVersion);
+                    CabinetExpectedSyncState expected = await Task.Run(() =>
+                        App.CabinetSyncService.GetExpectedCabinetSyncState(
+                            _selectedDevice.DeviceId));
+                    App.CabinetSyncService.ApplyExpectedSyncState(
+                        _selectedDevice, expected);
                     UpdateCabinetSummary(_selectedDevice);
                 }
                 if (_reportedFingerprintCount.HasValue)

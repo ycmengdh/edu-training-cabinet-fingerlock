@@ -89,7 +89,7 @@ namespace CabinetLock
             ? DeviceName
             : $"{DeviceNumber} · {DeviceName}";
 
-        /// <summary>根节点全局权限版本，用于列表比对（运行时填充，不落盘）。</summary>
+        /// <summary>按本柜实际绑定内容计算的权限版本（运行时填充，不落盘）。</summary>
         [JsonIgnore]
         public uint RootPermissionVersion { get; set; }
 
@@ -192,8 +192,8 @@ namespace CabinetLock
         public string PermissionVersionExplanation =>
             $"柜端上报：{(Status.PermissionVersion == 0 ? "未上报" : Status.PermissionVersion.ToString())}\n" +
             $"当前期望：{(RootPermissionVersion == 0 ? "未生成" : RootPermissionVersion.ToString())}\n" +
-            "这是由用户、班级、权限和指纹相关数据版本组合计算的 32 位同步标识，" +
-            "用于判断柜端权限数据是否一致；不是固件版本，也不是文件内容校验码。";
+            "这是由本柜应有的用户、角色、锁权限和指纹模板内容计算的 32 位同步标识，" +
+            "只在本柜实际数据变化时改变；不是固件版本。";
 
         /// <summary>列表筛选/着色：offline / lagging / ok / unknown</summary>
         [JsonIgnore]

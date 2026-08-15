@@ -25,7 +25,6 @@ namespace CabinetLock
     public static class CabinetIncrementalSyncPlanner
     {
         private const int FirmwareNameMaxUtf8Bytes = 32;
-        private const int FullTransactionMinimumChanges = 4;
 
         public static CabinetIncrementalSyncPlan Build(
             IEnumerable<CabinetPermissionDescriptor>? expectedPermissions,
@@ -91,11 +90,9 @@ namespace CabinetLock
             int orphanCount = reportedPermissionCount < 0
                 ? 0
                 : Math.Max(0, reportedPermissionCount - visiblePermissionCount);
-            int changedPermissionCount = upserts.Count + stale.Length;
-            int finalPermissionCount = expected.Length + backupCount;
-            bool useFullTransaction = orphanCount > 0 ||
-                changedPermissionCount >= FullTransactionMinimumChanges &&
-                changedPermissionCount * 2 >= Math.Max(1, finalPermissionCount);
+            // 已知指纹槽都能逐条新增、更新或删除。只有权限计数中存在无法映射到
+            // 指纹槽的孤立记录时，才需要完整事务来恢复可识别的一致状态。
+            bool useFullTransaction = orphanCount > 0;
 
             return new CabinetIncrementalSyncPlan
             {

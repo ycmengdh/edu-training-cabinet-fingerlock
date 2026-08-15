@@ -45,7 +45,7 @@ public sealed class CabinetIncrementalSyncPlannerTests
     }
 
     [Fact]
-    public void EmptyCabinetWithManyExpectedRows_UsesFullPermissionTransaction()
+    public void EmptyCabinetWithManyExpectedRows_RemainsIncremental()
     {
         CabinetPermissionDescriptor[] expected = Enumerable.Range(1, 10)
             .Select(id => Permission(id, $"U{id:000}"))
@@ -56,7 +56,25 @@ public sealed class CabinetIncrementalSyncPlannerTests
 
         Assert.Equal(10, plan.MissingFingerprintIds.Length);
         Assert.Equal(10, plan.PermissionUpsertFingerprintIds.Length);
-        Assert.True(plan.UseFullPermissionTransaction);
+        Assert.False(plan.UseFullPermissionTransaction);
+    }
+
+    [Fact]
+    public void ManyKnownAdditionsAndDeletions_RemainIncremental()
+    {
+        CabinetPermissionDescriptor[] expected = Enumerable.Range(11, 10)
+            .Select(id => Permission(id, $"U{id:000}"))
+            .ToArray();
+        FingerprintSlotRecord[] actual = Enumerable.Range(1, 10)
+            .Select(id => Slot(id, $"U{id:000}"))
+            .ToArray();
+
+        CabinetIncrementalSyncPlan plan = CabinetIncrementalSyncPlanner.Build(
+            expected, actual, reportedPermissionCount: 10);
+
+        Assert.Equal(10, plan.MissingFingerprintIds.Length);
+        Assert.Equal(Enumerable.Range(1, 10), plan.StaleFingerprintIds);
+        Assert.False(plan.UseFullPermissionTransaction);
     }
 
     [Fact]

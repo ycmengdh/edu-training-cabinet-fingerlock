@@ -250,9 +250,11 @@ WHERE UPPER(TRIM(device_id)) LIKE 'ROOT\_%' ESCAPE '\'";
 
             if (job.JobKind == "delete_user")
             {
+                uint expectedVersion = App.CabinetSyncService
+                    .GetExpectedCabinetSyncState(job.DeviceId).Version;
                 CommandResult result = await App.CommandService
                     .DeleteUserPermissionAsync(job.DeviceId, job.UserId,
-                        CabinetSyncService.GetExpectedPermissionVersion())
+                        expectedVersion)
                     .ConfigureAwait(false);
                 return (result.Success, result.Success ? "" : result.ErrorMessage);
             }

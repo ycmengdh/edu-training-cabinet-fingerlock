@@ -238,8 +238,8 @@ namespace CabinetLock
                 : $"离线 {snapshot.Devices.Count - snapshot.OnlineCount}";
             SyncValueText.Text = $"{snapshot.SynchronizedCount} / {snapshot.Devices.Count}";
             SyncDetailText.Text = snapshot.Version.SdTotalBytes == 0
-                ? $"权限版本 {snapshot.Version.GlobalVersion}"
-                : $"SD {snapshot.SdUsagePercent:F0}% · v{snapshot.Version.GlobalVersion}";
+                ? "按每台柜子的实际绑定内容校验"
+                : $"按柜校验 · SD {snapshot.SdUsagePercent:F0}%";
             AlertDataGrid.ItemsSource = snapshot.Alerts;
             AlertCountText.Text = snapshot.Alerts.Count == 0
                 ? "无告警"

@@ -39,6 +39,22 @@ namespace CabinetLock
         private SystemHealthSnapshot CreateSnapshot(
             SdVersionInfo version, LocalHealthData local)
         {
+            try
+            {
+                IReadOnlyDictionary<string, CabinetExpectedSyncState> expectedStates =
+                    App.CabinetSyncService.GetExpectedCabinetSyncStates(
+                        local.Devices.Select(device => device.DeviceId));
+                foreach (Device device in local.Devices)
+                {
+                    if (expectedStates.TryGetValue(
+                            device.DeviceId, out CabinetExpectedSyncState expected))
+                        App.CabinetSyncService.ApplyExpectedSyncState(device, expected);
+                }
+            }
+            catch
+            {
+                // 健康页仍展示在线与存储状态；权限期望值稍后刷新。
+            }
             var snapshot = new SystemHealthSnapshot
             {
                 Version = version,
@@ -165,14 +181,16 @@ namespace CabinetLock
                         ActionHint = "双击打开柜子 · 检查链路"
                     });
                 }
-                if (device.Status.PermissionVersion != version.GlobalVersion)
+                if (device.RootPermissionVersion != 0 &&
+                    device.Status.PermissionVersion != device.RootPermissionVersion)
                 {
                     alerts.Add(new SystemAlert
                     {
                         Severity = SystemAlertSeverity.Warning,
                         Source = source,
                         DeviceId = deviceId,
-                        Message = $"权限版本 {device.Status.PermissionVersion}，根节点版本 {version.GlobalVersion}",
+                        Message = $"权限版本 {device.Status.PermissionVersion}，" +
+                            $"本柜期望版本 {device.RootPermissionVersion}",
                         ActionHint = "双击打开柜子并同步权限"
                     });
                 }

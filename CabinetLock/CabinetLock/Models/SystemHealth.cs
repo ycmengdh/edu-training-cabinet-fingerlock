@@ -49,11 +49,9 @@ namespace CabinetLock
         {
             get
             {
-                uint expected = CabinetSyncService.ComposePermissionVersion(
-                    Version.UsersVersion, Version.ClassesVersion,
-                    Version.PermissionsVersion, Version.FpVersion);
                 return Devices.Count(device =>
-                    device.IsOnline && device.Status.PermissionVersion == expected);
+                    device.IsOnline && device.RootPermissionVersion != 0 &&
+                    device.Status.PermissionVersion == device.RootPermissionVersion);
             }
         }
         public double SdUsagePercent => Version.SdTotalBytes == 0

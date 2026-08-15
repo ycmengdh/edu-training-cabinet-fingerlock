@@ -222,17 +222,17 @@ namespace CabinetLock
                     .Where(id => id > 0)
                     .Distinct()
                     .ToArray();
-                uint currentVersion = hasCabinetBindings
-                    ? CabinetSyncService.GetExpectedPermissionVersion()
-                    : 0;
                 string? remoteFailure = null;
                 foreach (string deviceId in assignedDeviceIds)
                 {
                     progress?.Report(new ClassLifecycleProgress(
                         basePercent, $"{studentLabel}：正在删除 {deviceId} 的权限"));
+                    uint expectedVersion = App.CabinetSyncService
+                        .GetExpectedCabinetSyncState(
+                            deviceId, new[] { student.UserId }).Version;
                     CommandResult permissionDeleted = await App.CommandService
                         .DeleteUserPermissionAsync(
-                            deviceId, student.UserId, currentVersion, DeleteCommandTimeoutMs)
+                            deviceId, student.UserId, expectedVersion, DeleteCommandTimeoutMs)
                         .ConfigureAwait(false);
                     if (!permissionDeleted.Success)
                     {

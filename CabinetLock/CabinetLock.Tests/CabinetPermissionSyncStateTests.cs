@@ -86,12 +86,19 @@ public class CabinetPermissionSyncStateTests
     }
 
     [Fact]
-    public void PermissionVersion_IncludesRolePermissionVersion()
+    public void PermissionVersion_IncludesPermissionAndTemplateContent()
     {
-        uint before = CabinetSyncService.ComposePermissionVersion(1, 2, 3, 4, 5);
-        uint after = CabinetSyncService.ComposePermissionVersion(1, 2, 3, 6, 5);
+        var row = new CabinetPermissionDescriptor(11, "U001", "User", 2, 0x02);
+        uint before = CabinetSyncService.ComputeCabinetPermissionVersion(
+            new[] { row }, new Dictionary<int, uint> { [11] = 100 });
+        uint permissionChanged = CabinetSyncService.ComputeCabinetPermissionVersion(
+            new[] { row with { LockMask = 0x06 } },
+            new Dictionary<int, uint> { [11] = 100 });
+        uint templateChanged = CabinetSyncService.ComputeCabinetPermissionVersion(
+            new[] { row }, new Dictionary<int, uint> { [11] = 101 });
 
-        Assert.NotEqual(before, after);
+        Assert.NotEqual(before, permissionChanged);
+        Assert.NotEqual(before, templateChanged);
     }
 
     private static Dictionary<string, DeviceClient> DeviceDictionary(MeshBridge bridge)
