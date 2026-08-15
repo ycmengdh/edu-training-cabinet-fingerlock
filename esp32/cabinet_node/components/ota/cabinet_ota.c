@@ -189,6 +189,7 @@ static esp_err_t receive_file(
                  (unsigned)param->offset, esp_err_to_name(result));
         set_status_locked("failed", s_status.progress,
                           s_requested_version, esp_err_to_name(result), false);
+        abort_update_locked();
     }
     xSemaphoreGive(s_mutex);
     return result;
@@ -239,6 +240,7 @@ static void ota_event(void *argument, esp_event_base_t base,
                 set_status_locked("failed", s_status.progress,
                                   s_requested_version,
                                   esp_err_to_name(result), false);
+                abort_update_locked();
             }
             xSemaphoreGive(s_mutex);
         }
@@ -364,13 +366,22 @@ esp_err_t cabinet_ota_request(const char *version, size_t image_size) {
         return ESP_ERR_TIMEOUT;
     }
     uint32_t now = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
-    bool duplicate = strcmp(s_requested_version, version) == 0 &&
-                     s_requested_size == image_size &&
+    bool same_request = strcmp(s_requested_version, version) == 0 &&
+                        s_requested_size == image_size;
+    bool duplicate = same_request &&
                      s_status.active &&
                      now - s_request_started_ms < 60000U;
-    if (s_update_active || duplicate) {
+    if (s_update_active && same_request) {
         xSemaphoreGive(s_mutex);
-        return duplicate ? ESP_OK : ESP_ERR_INVALID_STATE;
+        return ESP_OK;
+    }
+    if (s_update_active) {
+        ESP_LOGW(TAG, "Superseding cabinet OTA %s with %s",
+                 s_requested_version, version);
+        abort_update_locked();
+    } else if (duplicate) {
+        xSemaphoreGive(s_mutex);
+        return ESP_OK;
     }
     snprintf(s_requested_version, sizeof(s_requested_version), "%s", version);
     s_requested_size = image_size;
@@ -398,6 +409,22 @@ esp_err_t cabinet_ota_request(const char *version, size_t image_size) {
         }
     }
     return result;
+}
+
+esp_err_t cabinet_ota_pause(void) {
+    if (s_mutex == NULL ||
+        xSemaphoreTake(s_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    char version[sizeof(s_status.version)];
+    snprintf(version, sizeof(version), "%s",
+             s_requested_version[0] != '\0'
+                 ? s_requested_version : s_status.version);
+    abort_update_locked();
+    set_status_locked("paused", 0, version, "", false);
+    xSemaphoreGive(s_mutex);
+    ESP_LOGW(TAG, "Cabinet OTA paused by root");
+    return ESP_OK;
 }
 
 bool cabinet_ota_get_status(cabinet_ota_status_t *status) {

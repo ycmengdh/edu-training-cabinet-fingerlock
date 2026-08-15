@@ -100,6 +100,7 @@ namespace CabinetLock
         public const ushort CabinetOtaProgress = 0x0077;
         public const ushort CabinetOtaNodes = 0x0078;
         public const ushort CabinetOtaNodesResponse = 0x0079;
+        public const ushort CabinetOtaPause = 0x007A;
 
         // 字符串命令名（与 Protocol.Cmd* 及固件日志一致；未在 Protocol 中的补充于此）
         public const string NameHeartbeatAck = "HEARTBEAT_ACK";
@@ -198,6 +199,7 @@ namespace CabinetLock
             { CabinetOtaProgress, Protocol.CmdCabinetOtaProgress },
             { CabinetOtaNodes, Protocol.CmdCabinetOtaNodes },
             { CabinetOtaNodesResponse, Protocol.CmdCabinetOtaNodesResponse },
+            { CabinetOtaPause, Protocol.CmdCabinetOtaPause },
         };
 
         private static readonly Dictionary<string, ushort> NameToId =

@@ -41,6 +41,7 @@ public class CabinetOtaServiceTests
     [InlineData(CmdIds.CabinetOtaProgress, Protocol.CmdCabinetOtaProgress)]
     [InlineData(CmdIds.CabinetOtaNodes, Protocol.CmdCabinetOtaNodes)]
     [InlineData(CmdIds.CabinetOtaNodesResponse, Protocol.CmdCabinetOtaNodesResponse)]
+    [InlineData(CmdIds.CabinetOtaPause, Protocol.CmdCabinetOtaPause)]
     public void OtaCommandMappings_RoundTrip(ushort id, string name)
     {
         Assert.Equal(name, CmdIds.ToCmdName(id));
@@ -173,6 +174,42 @@ public class CabinetOtaServiceTests
 
         Assert.Equal(12U, status.StartedAtSeconds);
         Assert.Equal(345U, status.ElapsedSeconds);
+    }
+
+    [Fact]
+    public void OtaWindow_RequiresExplicitResumeAndPausesOnClose()
+    {
+        string xaml = File.ReadAllText(FindRepositoryFile(
+            Path.Combine("CabinetLock", "CabinetLock", "Views",
+                "CabinetOtaWindow.xaml")));
+        string code = File.ReadAllText(FindRepositoryFile(
+            Path.Combine("CabinetLock", "CabinetLock", "Views",
+                "CabinetOtaWindow.xaml.cs")));
+
+        Assert.Contains("继续未完成升级", xaml, StringComparison.Ordinal);
+        Assert.Contains("ResumePausedDistributionAsync", code,
+            StringComparison.Ordinal);
+        Assert.Contains("PauseDistributionAsync", code,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void StartupAndBackgroundNeverResumeOtaAutomatically()
+    {
+        string startup = File.ReadAllText(FindRepositoryFile(
+            Path.Combine("CabinetLock", "CabinetLock", "Views",
+                "StartupWindow.xaml.cs")));
+        string app = File.ReadAllText(FindRepositoryFile(
+            Path.Combine("CabinetLock", "CabinetLock", "App.xaml.cs")));
+
+        Assert.DoesNotContain("ResumeActiveDistributionAsync", startup,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("ResumeActiveDistributionAsync", app,
+            StringComparison.Ordinal);
+        Assert.Contains("EnsureDistributionPausedAsync", startup,
+            StringComparison.Ordinal);
+        Assert.Contains("EnsureDistributionPausedAsync", app,
+            StringComparison.Ordinal);
     }
 
     [Theory]

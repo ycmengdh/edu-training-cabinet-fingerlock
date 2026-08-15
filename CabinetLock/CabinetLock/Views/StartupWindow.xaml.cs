@@ -350,19 +350,17 @@ namespace CabinetLock
                     return;
                 }
 
-                SetProgress("正在检查根节点 OTA 状态…", 30);
+                SetProgress("正在确认根节点 OTA 已暂停…", 30);
                 try
                 {
-                    var otaProgress = new Progress<CabinetOtaProgress>(value =>
-                        SetProgress(value.Detail, Math.Clamp(value.Percent, 30, 44)));
-                    await App.CabinetOtaService.ResumeActiveDistributionAsync(otaProgress);
+                    await App.CabinetOtaService.EnsureDistributionPausedAsync();
                     if (Application.Current is App app)
                         await app.SyncRootTimeIfDueAsync();
                 }
                 catch (Exception ex)
                 {
                     _otaStateUncertain = true;
-                    SetProgress($"无法确认根节点 OTA 状态：{ex.Message}", 0);
+                    SetProgress($"无法确认根节点 OTA 已暂停：{ex.Message}", 0);
                     ShowRetryOrLocal();
                     return;
                 }
@@ -604,7 +602,7 @@ namespace CabinetLock
             if (FailureHintText != null)
             {
                 FailureHintText.Text = _otaStateUncertain
-                    ? "当前无法确认根节点是否仍在 OTA。为避免同步与升级并发，请先恢复连接并重试。"
+                    ? "当前无法确认根节点 OTA 是否已暂停。为避免同步与升级并发，请先恢复连接并重试。"
                     : hasLocal
                     ? "建议先点「重新连接并同步」。若设备短期不可用，可用「仅用本机数据进入登录」：" +
                       "使用最近备份/本机库，可管理已有账号；柜机鉴权不依赖上位机，但 SD 权威数据可能不是最新。"

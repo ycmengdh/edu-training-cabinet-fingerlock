@@ -785,6 +785,16 @@ static void handle_ota_start(const cab_app_view_t *request) {
     send_ota_response(request, "start", "ok", 0, false);
 }
 
+static void handle_ota_pause(const cab_app_view_t *request) {
+    char error[128] = {0};
+    esp_err_t result = root_ota_pause(error, sizeof(error));
+    if (result != ESP_OK) {
+        send_error(request, CAB_ERR_OTA_START_FAILED, error);
+        return;
+    }
+    send_ota_response(request, "pause", "ok", 0, false);
+}
+
 static void handle_upload_template(const cab_app_view_t *request,
                                    cJSON *json) {
     if (!sd_required(request)) return;
@@ -989,6 +999,9 @@ void root_controller_handle(const cab_app_view_t *request) {
             break;
         case CAB_CMD_CABINET_OTA_START:
             handle_ota_start(request);
+            break;
+        case CAB_CMD_CABINET_OTA_PAUSE:
+            handle_ota_pause(request);
             break;
         case CAB_CMD_CABINET_OTA_STATUS:
             send_ota_response(request, "status", "ok", 0, false);

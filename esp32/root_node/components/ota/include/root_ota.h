@@ -70,6 +70,7 @@ esp_err_t root_ota_upload_commit(const char *upload_id,
                                  size_t actual_version_size,
                                  char *error, size_t error_size);
 esp_err_t root_ota_start(char *error, size_t error_size);
+esp_err_t root_ota_pause(char *error, size_t error_size);
 void root_ota_note_registration(const char *device_id,
                                 const uint8_t *payload, size_t payload_len);
 void root_ota_note_progress(const char *device_id,

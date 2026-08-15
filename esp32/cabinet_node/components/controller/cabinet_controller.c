@@ -1399,6 +1399,9 @@ void cab_controller_handle(const cab_app_view_t *request, bool mesh_ingress) {
             }
             break;
         }
+        case CAB_CMD_CABINET_OTA_PAUSE:
+            if (mesh_ingress) cabinet_ota_pause();
+            break;
         case CAB_CMD_WRITE_CONFIG:
             handle_write_config(request, json, mesh_ingress);
             break;

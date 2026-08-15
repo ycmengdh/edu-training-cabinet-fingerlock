@@ -263,8 +263,10 @@
             <StackPanel Grid.Column="1" Orientation="Horizontal">
                 <Button x:Name="QueryStatusButton" Content="立即刷新" Style="{StaticResource SecondaryButton}"
                         Click="QueryStatusButton_Click"/>
-                <Button x:Name="CancelButton" Content="取消发布" Style="{StaticResource SecondaryButton}"
-                        Margin="8,0,0,0" Visibility="Collapsed" Click="CancelButton_Click"/>
+                <Button x:Name="PauseButton" Content="暂停升级" Style="{StaticResource SecondaryButton}"
+                        Margin="8,0,0,0" Visibility="Collapsed" Click="PauseButton_Click"/>
+                <Button x:Name="ResumeButton" Content="继续未完成升级" Style="{StaticResource SecondaryButton}"
+                        Margin="8,0,0,0" IsEnabled="False" Click="ResumeButton_Click"/>
                 <Button x:Name="StartButton" Content="发布为目标版本" Margin="8,0,0,0"
                         IsEnabled="False" Click="StartButton_Click"/>
                 <Button x:Name="CloseButton" Content="关闭" Style="{StaticResource SecondaryButton}"

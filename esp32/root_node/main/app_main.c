@@ -25,6 +25,7 @@
 #define MESH_INCOMING_TASK_STACK_SIZE (8 * 1024)
 #define STATUS_DISPLAY_TASK_STACK_SIZE (7 * 1024)
 #define ROOT_STATUS_INTERVAL_MS 60000U
+#define HEARTBEAT_BROADCAST_MIN_INTERVAL_MS 2000U
 
 typedef struct {
     char device_id[CAB_APP_ID_MAX + 1];
@@ -46,6 +47,7 @@ static SemaphoreHandle_t s_route_mutex;
 static SemaphoreHandle_t s_controller_mutex;
 static QueueHandle_t s_mesh_queue;
 static uint32_t s_first_status_report_ms;
+static uint32_t s_last_heartbeat_broadcast_ms;
 
 static uint32_t now_ms(void) {
     return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
@@ -210,17 +212,23 @@ static void process_mesh_message(const uint8_t from[6], const uint8_t *data,
             internal_only = true;
         }
         if (view.command == CAB_CMD_HEARTBEAT && source[0] != '\0') {
-            uint8_t payload[8];
-            int payload_length = cab_pack_ack(
-                payload, sizeof(payload), view.message_id, 0, "ok");
-            uint8_t output[128];
-            int output_length = cab_app_encode(
-                output, sizeof(output), CAB_CMD_HEARTBEAT_ACK,
-                view.message_id, 0, CAB_APP_FLAG_IS_ACK,
-                source, s_root_id, payload,
-                payload_length > 0 ? (uint16_t)payload_length : 0, 0);
-            if (output_length > 0) {
-                cab_mesh_send_node(from, output, (size_t)output_length);
+            uint32_t now = now_ms();
+            if (s_last_heartbeat_broadcast_ms == 0 ||
+                now - s_last_heartbeat_broadcast_ms >=
+                    HEARTBEAT_BROADCAST_MIN_INTERVAL_MS) {
+                uint8_t payload[8];
+                int payload_length = cab_pack_ack(
+                    payload, sizeof(payload), view.message_id, 0, "ok");
+                uint8_t output[128];
+                int output_length = cab_app_encode(
+                    output, sizeof(output), CAB_CMD_HEARTBEAT_ACK,
+                    view.message_id, 0, CAB_APP_FLAG_IS_ACK,
+                    "", s_root_id, payload,
+                    payload_length > 0 ? (uint16_t)payload_length : 0, 0);
+                if (output_length > 0 &&
+                    cab_mesh_send_all(output, (size_t)output_length) == ESP_OK) {
+                    s_last_heartbeat_broadcast_ms = now;
+                }
             }
         }
     }

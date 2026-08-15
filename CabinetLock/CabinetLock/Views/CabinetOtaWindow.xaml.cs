@@ -123,7 +123,11 @@ namespace CabinetLock
         private int _onlineCabinetCount;
         private bool _running;
         private bool _refreshing;
-        private bool _distributionLocked;
+        private bool _pauseInProgress;
+        private bool _closeRequestInProgress;
+        private bool _closeAllowed;
+        private Task<bool>? _pauseTask;
+        private CabinetOtaStatus? _lastStatus;
         private string _lastRefreshError = "";
         private string _lastLoggedStage = "";
         private int _lastLoggedPercent = -5;
@@ -133,6 +137,7 @@ namespace CabinetLock
         private DateTime _elapsedCapturedAtUtc = DateTime.UtcNow;
         private bool _elapsedRunning;
         private bool _elapsedVisible;
+        private DateTime _nextRunningNodeRefreshAtUtc = DateTime.MinValue;
 
         public CabinetOtaWindow()
         {
@@ -164,8 +169,20 @@ namespace CabinetLock
                 while (!cancellationToken.IsCancellationRequested)
                 {
                     await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
-                    if (AutoRefreshCheckBox.IsChecked == true && !_running)
+                    if (AutoRefreshCheckBox.IsChecked != true) continue;
+                    if (_running)
+                    {
+                        if (DateTime.UtcNow >= _nextRunningNodeRefreshAtUtc)
+                        {
+                            _nextRunningNodeRefreshAtUtc =
+                                DateTime.UtcNow + TimeSpan.FromSeconds(6);
+                            await RefreshNodesWhileRunningAsync(cancellationToken);
+                        }
+                    }
+                    else
+                    {
                         await RefreshSnapshotAsync(false, cancellationToken);
+                    }
                 }
             }
             catch (OperationCanceledException)
@@ -192,9 +209,22 @@ namespace CabinetLock
             ConnectionText.Text = rootReady
                 ? $"根节点已连接，当前在线柜机 {_onlineCabinetCount} 台"
                 : "根节点或 SD 卡未就绪";
-            StartButton.IsEnabled = !_running && rootReady && _firmware != null;
-            QueryStatusButton.IsEnabled = !_running && !_refreshing && rootReady;
-            RestrictHardwareCheckBox.IsEnabled = !_running &&
+            bool resumable = !_running && !_pauseInProgress && rootReady &&
+                _lastStatus is { Active: false, PendingNodes: > 0 } &&
+                !string.IsNullOrWhiteSpace(_lastStatus.Version) &&
+                !string.Equals(_lastStatus.Phase, "uploading",
+                    StringComparison.OrdinalIgnoreCase);
+            ChooseFileButton.IsEnabled = !_running && !_pauseInProgress;
+            StartButton.IsEnabled = !_running && !_pauseInProgress &&
+                rootReady && _firmware != null;
+            ResumeButton.IsEnabled = resumable;
+            QueryStatusButton.IsEnabled = !_running && !_refreshing &&
+                !_pauseInProgress && rootReady;
+            PauseButton.Visibility = _running || _lastStatus?.Active == true ||
+                _pauseInProgress ? Visibility.Visible : Visibility.Collapsed;
+            PauseButton.IsEnabled = !_pauseInProgress && rootReady &&
+                (_running || _lastStatus?.Active == true);
+            RestrictHardwareCheckBox.IsEnabled = !_running && !_pauseInProgress &&
                 !string.IsNullOrWhiteSpace(_firmware?.HardwareVersion);
         }
 
@@ -277,13 +307,14 @@ namespace CabinetLock
             }
             catch (OperationCanceledException)
             {
-                StageText.Text = "发布已取消";
-                AppendLog("操作已取消；已经提交的 Mesh 分发不会被强制中断");
+                StageText.Text = "正在暂停升级";
+                AppendLog("正在停止分发并通知柜机暂停");
             }
             catch (Exception ex)
             {
                 StageText.Text = "发布未完成";
                 AppendLog($"失败：{ex.Message}");
+                await PauseCurrentOperationAsync(showError: true);
                 MessageBox.Show(ex.Message, "柜机固件发布失败",
                     MessageBoxButton.OK, MessageBoxImage.Error);
             }
@@ -294,8 +325,69 @@ namespace CabinetLock
                 SetRunning(false);
                 RefreshEnvironment();
                 App.CabinetSyncQueueService.Trigger();
-                if (_pollingCancellation != null)
+                if (_pollingCancellation != null &&
+                    !_pollingCancellation.IsCancellationRequested)
                     await RefreshSnapshotAsync(false, _pollingCancellation.Token);
+            }
+        }
+
+        private async void ResumeButton_Click(object sender, RoutedEventArgs e)
+        {
+            CabinetOtaStatus? current = _lastStatus;
+            if (current == null || current.Active || current.PendingNodes == 0 ||
+                string.IsNullOrWhiteSpace(current.Version)) return;
+            if (MessageBox.Show(
+                    $"继续将 {current.Version} 升级到剩余 {current.PendingNodes} 台柜机？",
+                    "继续柜机升级", MessageBoxButton.YesNo,
+                    MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+
+            SetRunning(true);
+            _elapsedBaseSeconds = current.ElapsedSeconds;
+            _elapsedCapturedAtUtc = DateTime.UtcNow;
+            _elapsedRunning = true;
+            _elapsedVisible = true;
+            UpdateElapsedText();
+            _lastLoggedStage = "";
+            _lastLoggedPercent = -5;
+            _lastProgressLogAt = DateTime.MinValue;
+            _cancellation = new CancellationTokenSource();
+            try
+            {
+                var progress = new Progress<CabinetOtaProgress>(UpdateProgress);
+                AppendLog($"继续未完成升级：{current.Version}");
+                CabinetOtaStatus result = await App.CabinetOtaService
+                    .ResumePausedDistributionAsync(progress, _cancellation.Token);
+                ApplyStatus(result, true);
+                AppendLog($"OTA完成：目标版本 {result.Version}，" +
+                    $"{result.CompletedNodes}/{result.CompatibleNodes} 台完成");
+                AppToast.Success("当前在线兼容柜机 OTA 已完成");
+            }
+            catch (OperationCanceledException)
+            {
+                StageText.Text = "正在暂停升级";
+                AppendLog("正在停止分发并通知柜机暂停");
+            }
+            catch (Exception ex)
+            {
+                StageText.Text = "升级未完成";
+                AppendLog($"失败：{ex.Message}");
+                await PauseCurrentOperationAsync(showError: true);
+                MessageBox.Show(ex.Message, "继续柜机升级失败",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+            finally
+            {
+                _cancellation?.Dispose();
+                _cancellation = null;
+                SetRunning(false);
+                RefreshEnvironment();
+                App.CabinetSyncQueueService.Trigger();
+                if (_pollingCancellation != null &&
+                    !_pollingCancellation.IsCancellationRequested)
+                {
+                    await RefreshSnapshotAsync(false,
+                        _pollingCancellation.Token);
+                }
             }
         }
 
@@ -352,6 +444,39 @@ namespace CabinetLock
             }
         }
 
+        private async Task RefreshNodesWhileRunningAsync(
+            CancellationToken cancellationToken)
+        {
+            if (_refreshing || !_running) return;
+            _refreshing = true;
+            try
+            {
+                IReadOnlyList<CabinetOtaNodeStatus> nodes =
+                    await App.CabinetOtaService.QueryNodesAsync(cancellationToken);
+                ApplyNodes(nodes);
+                LastRefreshText.Text =
+                    $"上次刷新 {DateTime.Now:HH:mm:ss} · 已登记 {nodes.Count} 台";
+                _lastRefreshError = "";
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception ex)
+            {
+                LastRefreshText.Text = $"明细刷新失败 · {ex.Message}";
+                if (!string.Equals(_lastRefreshError, ex.Message,
+                        StringComparison.Ordinal))
+                {
+                    AppendLog($"逐柜状态刷新失败：{ex.Message}");
+                    _lastRefreshError = ex.Message;
+                }
+            }
+            finally
+            {
+                _refreshing = false;
+            }
+        }
+
         private void ApplyNodes(IReadOnlyList<CabinetOtaNodeStatus> nodes)
         {
             string selectedId = (NodeDataGrid.SelectedItem as CabinetOtaNodeRow)?.DeviceId ?? "";
@@ -402,9 +527,8 @@ namespace CabinetLock
             StageText.Text = progress.Stage;
             ProgressDetailText.Text = progress.Detail;
             OtaProgressBar.Value = Math.Clamp(progress.Percent, 0, 100);
-            _distributionLocked = !progress.CanCancel;
-            CancelButton.IsEnabled = progress.CanCancel;
-            CancelButton.Content = progress.CanCancel ? "取消发布" : "操作不可中断";
+            PauseButton.IsEnabled = progress.CanCancel && !_pauseInProgress;
+            PauseButton.Content = progress.CanCancel ? "暂停升级" : "正在完成当前步骤";
             if (progress.ExpectedNodes > 0)
                 NodeCountText.Text = $"{progress.CompletedNodes} / {progress.ExpectedNodes} 台完成";
 
@@ -423,6 +547,7 @@ namespace CabinetLock
 
         private void ApplyStatus(CabinetOtaStatus status, bool updateProgress)
         {
+            _lastStatus = status;
             StageText.Text = PhaseText(status.Phase);
             uint compatible = status.CompatibleNodes > 0
                 ? status.CompatibleNodes : status.ExpectedNodes;
@@ -435,10 +560,8 @@ namespace CabinetLock
                 ? "全部硬件" : status.HardwareVersion;
             string errorDetail = string.IsNullOrWhiteSpace(status.Error)
                 ? "" : $" · {status.Error}";
-            bool activePolicy = status.Active ||
-                string.Equals(status.Phase, "published", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(status.Phase, "distributing", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(status.Phase, "complete", StringComparison.OrdinalIgnoreCase);
+            bool hasRelease = !string.IsNullOrWhiteSpace(status.Version);
+            bool activePolicy = status.Active;
             if (status.StartedAtSeconds > 0 || status.ElapsedSeconds > 0)
             {
                 _elapsedBaseSeconds = status.ElapsedSeconds;
@@ -446,17 +569,19 @@ namespace CabinetLock
                 _elapsedRunning = activePolicy && pending > 0;
                 _elapsedVisible = true;
             }
-            else if (!activePolicy)
+            else if (!hasRelease)
             {
                 _elapsedRunning = false;
                 _elapsedVisible = false;
             }
             UpdateElapsedText();
-            ProgressDetailText.Text = activePolicy
-                ? $"目标 {status.Version} · {hardware} · 在线兼容 {compatible} · 待升级 {pending} · 不兼容 {status.IncompatibleNodes} · 未知硬件 {status.UnknownHardwareNodes}{errorDetail}"
+            string releaseState = activePolicy ? "升级中" :
+                pending > 0 ? "已暂停" : "已完成";
+            ProgressDetailText.Text = hasRelease
+                ? $"目标 {status.Version} · {releaseState} · {hardware} · 在线兼容 {compatible} · 待升级 {pending} · 不兼容 {status.IncompatibleNodes} · 未知硬件 {status.UnknownHardwareNodes}{errorDetail}"
                 : $"根节点尚未保存柜机目标版本{errorDetail}";
             if (updateProgress)
-                OtaProgressBar.Value = activePolicy
+                OtaProgressBar.Value = hasRelease
                     ? Math.Clamp(status.MeshProgress, 0, 100) : 0;
         }
 
@@ -496,18 +621,20 @@ namespace CabinetLock
         private void SetRunning(bool running)
         {
             _running = running;
-            if (!running) _distributionLocked = false;
-            ChooseFileButton.IsEnabled = !running;
-            RestrictHardwareCheckBox.IsEnabled = !running && _firmware != null;
+            ChooseFileButton.IsEnabled = !running && !_pauseInProgress;
+            RestrictHardwareCheckBox.IsEnabled = !running && !_pauseInProgress &&
+                !string.IsNullOrWhiteSpace(_firmware?.HardwareVersion);
             StartButton.IsEnabled = false;
+            ResumeButton.IsEnabled = false;
             QueryStatusButton.IsEnabled = !running && !_refreshing;
-            CancelButton.Visibility = running ? Visibility.Visible : Visibility.Collapsed;
+            PauseButton.Visibility = running ? Visibility.Visible : Visibility.Collapsed;
         }
 
         private static string PhaseText(string phase) => phase switch
         {
             "uploading" => "上传到根节点",
             "ready" => "镜像已就绪",
+            "paused" => "升级已暂停",
             "distributing" => "正在拓扑下载",
             "published" => "目标版本已发布",
             "complete" => "升级完成",
@@ -516,8 +643,51 @@ namespace CabinetLock
             _ => string.IsNullOrWhiteSpace(phase) ? "未知状态" : phase
         };
 
-        private void CancelButton_Click(object sender, RoutedEventArgs e) =>
+        private async void PauseButton_Click(object sender, RoutedEventArgs e) =>
+            await PauseCurrentOperationAsync(showError: true);
+
+        private Task<bool> PauseCurrentOperationAsync(bool showError)
+        {
+            if (_pauseTask == null || _pauseTask.IsCompleted)
+                _pauseTask = PauseCurrentOperationCoreAsync(showError);
+            return _pauseTask;
+        }
+
+        private async Task<bool> PauseCurrentOperationCoreAsync(bool showError)
+        {
+            _pauseInProgress = true;
             _cancellation?.Cancel();
+            StageText.Text = "正在暂停升级";
+            PauseButton.Content = "正在暂停";
+            RefreshEnvironment();
+            try
+            {
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(25));
+                CabinetOtaStatus status = await App.CabinetOtaService
+                    .PauseDistributionAsync(timeout.Token);
+                ApplyStatus(status, true);
+                AppendLog("柜机升级已暂停");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                AppendLog($"暂停失败：{ex.Message}");
+                if (showError)
+                {
+                    MessageBox.Show(
+                        $"未能确认柜机升级已暂停：{ex.Message}\n\n请保持 OTA 页面打开并检查根节点连接。",
+                        "暂停升级失败", MessageBoxButton.OK,
+                        MessageBoxImage.Warning);
+                }
+                return false;
+            }
+            finally
+            {
+                _pauseInProgress = false;
+                PauseButton.Content = "暂停升级";
+                RefreshEnvironment();
+            }
+        }
 
         private void HardwareRestriction_Changed(object sender, RoutedEventArgs e)
         {
@@ -527,27 +697,53 @@ namespace CabinetLock
 
         private void CloseButton_Click(object sender, RoutedEventArgs e) => Close();
 
-        private void CabinetOtaWindow_Closing(object? sender, CancelEventArgs e)
+        private async void CabinetOtaWindow_Closing(object? sender, CancelEventArgs e)
         {
-            if (_running && _distributionLocked)
+            if (_closeAllowed)
             {
-                MessageBox.Show(
-                    "柜机正在升级和重启，完成前不能关闭 OTA 窗口。",
-                    "OTA 进行中", MessageBoxButton.OK,
-                    MessageBoxImage.Information);
-                e.Cancel = true;
+                CleanupWindow();
                 return;
             }
-            if (_running && MessageBox.Show(
-                    "固件仍在发布，确认取消本次操作并关闭窗口？",
-                    "关闭发布窗口", MessageBoxButton.YesNo,
-                    MessageBoxImage.Warning) != MessageBoxResult.Yes)
+
+            bool mustPause = _running || _pauseInProgress ||
+                _lastStatus?.Active == true;
+            if (!mustPause)
             {
-                e.Cancel = true;
+                _closeAllowed = true;
+                CleanupWindow();
                 return;
             }
+
+            e.Cancel = true;
+            if (_closeRequestInProgress) return;
+            _closeRequestInProgress = true;
+            _pollingCancellation?.Cancel();
+
+            bool paused = await PauseCurrentOperationAsync(showError: true);
+            if (paused)
+            {
+                _closeAllowed = true;
+                Close();
+                return;
+            }
+
+            _closeRequestInProgress = false;
+            RestartPolling();
+        }
+
+        private void RestartPolling()
+        {
+            _pollingCancellation?.Dispose();
+            _pollingCancellation = new CancellationTokenSource();
+            _ = PollSnapshotsAsync(_pollingCancellation.Token);
+        }
+
+        private void CleanupWindow()
+        {
             _cancellation?.Cancel();
             _pollingCancellation?.Cancel();
+            _pollingCancellation?.Dispose();
+            _pollingCancellation = null;
             _elapsedTimer.Stop();
         }
     }

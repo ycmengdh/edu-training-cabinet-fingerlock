@@ -54,6 +54,45 @@ class PersistentOtaPolicyContractTests(unittest.TestCase):
         self.assertNotIn("cab_mesh_route_count", section)
         self.assertIn("root_ota_start(error", section)
 
+    def test_release_never_resumes_automatically_after_commit_or_reboot(self):
+        source = (REPO / "esp32/root_node/components/ota/root_ota.c").read_text(
+            encoding="utf-8"
+        )
+
+        load = source[source.index("static bool load_policy_locked") :]
+        load = load[: load.index("static esp_err_t reject_file")]
+        self.assertIn("s_status.active = false;", load)
+        self.assertIn('s_status.phase), "paused"', load)
+
+        commit = source[source.index("esp_err_t root_ota_upload_commit") :]
+        commit = commit[: commit.index("static esp_err_t start_distribution")]
+        self.assertIn("s_status.active = false;", commit)
+        self.assertIn('s_status.phase), "ready"', commit)
+
+    def test_pause_stops_scheduler_and_resets_per_node_sessions(self):
+        source = (REPO / "esp32/root_node/components/ota/root_ota.c").read_text(
+            encoding="utf-8"
+        )
+        pause = source[source.index("esp_err_t root_ota_pause") :]
+        pause = pause[: pause.index("void root_ota_maintain")]
+
+        self.assertIn("s_status.active = false;", pause)
+        self.assertIn("s_next_distribution_at = 0;", pause)
+        self.assertIn('sizeof(registration->ota_phase), "paused"', pause)
+        self.assertIn("CAB_CMD_CABINET_OTA_PAUSE", pause)
+
+    def test_completed_distribution_does_not_remain_automatic(self):
+        source = (REPO / "esp32/root_node/components/ota/root_ota.c").read_text(
+            encoding="utf-8"
+        )
+        start = source[source.index("static esp_err_t start_distribution") :]
+        start = start[: start.index("esp_err_t root_ota_start")]
+
+        completed = start[start.index("if (s_status.pending_nodes == 0)") :]
+        self.assertIn("s_status.active = false;", completed)
+        self.assertIn('s_status.phase), "complete"', completed)
+        self.assertIn("persist_policy_locked", completed)
+
 
 if __name__ == "__main__":
     unittest.main()

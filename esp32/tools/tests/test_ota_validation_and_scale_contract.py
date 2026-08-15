@@ -43,6 +43,16 @@ class OtaValidationAndScaleContractTests(unittest.TestCase):
         self.assertIn("notification timeout", self.root_ota)
         self.assertIn("if (retrying && registration->retry_count", self.root_ota)
 
+    def test_unchanged_progress_reports_do_not_hide_a_stalled_download(self):
+        self.assertIn("bool changed =", self.root_ota)
+        self.assertIn(
+            "if (changed) registration->ota_updated_seconds = now_seconds();",
+            self.root_ota,
+        )
+        self.assertIn('sizeof(registration->ota_phase), "repairing"', self.root_ota)
+        self.assertIn("CAB_CMD_REBOOT", self.root_ota)
+        self.assertIn("download stalled; rebooting", self.root_ota)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -590,7 +590,7 @@ namespace CabinetLock
                     }
 
                     if (requireOtaCheck &&
-                        !await ConfirmOtaStateAndWaitForClearAsync()
+                        !await ConfirmOtaStateIsPausedAsync()
                             .ConfigureAwait(false))
                     {
                         lock (_automaticPipelineLock)
@@ -644,7 +644,7 @@ namespace CabinetLock
             }
         }
 
-        private async Task<bool> ConfirmOtaStateAndWaitForClearAsync()
+        private async Task<bool> ConfirmOtaStateIsPausedAsync()
         {
             if (string.Equals(ConfigHelper.Current.LinkMode, "Uart",
                     StringComparison.OrdinalIgnoreCase))
@@ -654,7 +654,7 @@ namespace CabinetLock
             bool confirmed = false;
             await CommunicationCoordinator.RunExclusiveAsync(
                 CommunicationOperationKind.Ota,
-                "自动流程 1/3 · 检查并恢复 OTA",
+                "自动流程 1/3 · 检查并暂停 OTA",
                 SdStorageService.RootDeviceId,
                 async token =>
                 {
@@ -665,8 +665,8 @@ namespace CabinetLock
                     {
                         try
                         {
-                            await CabinetOtaService.ResumeActiveDistributionAsync(
-                                cancellationToken: token).ConfigureAwait(false);
+                            await CabinetOtaService.EnsureDistributionPausedAsync(token)
+                                .ConfigureAwait(false);
                             confirmed = true;
                             break;
                         }
@@ -678,7 +678,7 @@ namespace CabinetLock
                         {
                             failures++;
                             System.Diagnostics.Debug.WriteLine(
-                                $"[APP] 等待 OTA 状态恢复: {ex.Message}");
+                                $"[APP] 确认 OTA 暂停失败: {ex.Message}");
                             if (failures < 3)
                                 await Task.Delay(3000, token).ConfigureAwait(false);
                         }

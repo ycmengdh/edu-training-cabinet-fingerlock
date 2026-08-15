@@ -203,6 +203,7 @@ namespace CabinetLock
         public const string CmdCabinetOtaProgress = "CABINET_OTA_PROGRESS";
         public const string CmdCabinetOtaNodes = "CABINET_OTA_NODES";
         public const string CmdCabinetOtaNodesResponse = "CABINET_OTA_NODES_RESPONSE";
+        public const string CmdCabinetOtaPause = "CABINET_OTA_PAUSE";
 
         // ===== 错误码常量（ACK 中 result 字段使用） =====
 
@@ -323,6 +324,7 @@ namespace CabinetLock
                 case CommandType.CabinetOtaProgress: return CmdCabinetOtaProgress;
                 case CommandType.CabinetOtaNodes: return CmdCabinetOtaNodes;
                 case CommandType.CabinetOtaNodesResponse: return CmdCabinetOtaNodesResponse;
+                case CommandType.CabinetOtaPause: return CmdCabinetOtaPause;
                 default: return null;
             }
         }
@@ -415,6 +417,7 @@ namespace CabinetLock
                 case CmdCabinetOtaProgress: return CommandType.CabinetOtaProgress;
                 case CmdCabinetOtaNodes: return CommandType.CabinetOtaNodes;
                 case CmdCabinetOtaNodesResponse: return CommandType.CabinetOtaNodesResponse;
+                case CmdCabinetOtaPause: return CommandType.CabinetOtaPause;
                 default: return null;
             }
         }

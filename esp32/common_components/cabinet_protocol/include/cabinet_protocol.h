@@ -110,6 +110,7 @@ typedef enum {
     CAB_CMD_CABINET_OTA_PROGRESS = 0x0077,
     CAB_CMD_CABINET_OTA_NODES = 0x0078,
     CAB_CMD_CABINET_OTA_NODES_RESPONSE = 0x0079,
+    CAB_CMD_CABINET_OTA_PAUSE = 0x007A,
 } cab_command_t;
 
 typedef enum {

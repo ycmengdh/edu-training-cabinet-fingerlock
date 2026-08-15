@@ -247,6 +247,7 @@ namespace CabinetLock
         CabinetOtaResponse,
         CabinetOtaProgress,
         CabinetOtaNodes,
-        CabinetOtaNodesResponse
+        CabinetOtaNodesResponse,
+        CabinetOtaPause
     }
 }

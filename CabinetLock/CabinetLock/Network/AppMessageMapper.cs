@@ -59,6 +59,7 @@ namespace CabinetLock
             CmdIds.CabinetOtaStart,
             CmdIds.CabinetOtaStatus,
             CmdIds.CabinetOtaNodes,
+            CmdIds.CabinetOtaPause,
         };
 
         public static AppMessage ToApp(Message msg)

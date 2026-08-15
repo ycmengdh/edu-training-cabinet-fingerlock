@@ -36,7 +36,7 @@
 #define OTA_JOIN_DEBOUNCE_SECONDS 5U
 #define OTA_RETRY_SECONDS 30U
 #define OTA_SCHEDULER_SECONDS 5U
-#define OTA_TRANSFER_STALE_SECONDS 45U
+#define OTA_TRANSFER_STALE_SECONDS 90U
 #define OTA_NOTIFY_STALE_SECONDS 12U
 #define OTA_VALIDATION_STALE_SECONDS 100U
 #define OTA_NOTIFY_RETRY_SECONDS 5U
@@ -176,6 +176,20 @@ static bool phase_is_active(const char *phase) {
            strcmp(phase, "ready") == 0;
 }
 
+static void reset_registration_release_locked(
+    registration_t *registration, const char *version, uint32_t now) {
+    if (registration == NULL) return;
+    snprintf(registration->ota_version,
+             sizeof(registration->ota_version), "%s",
+             version == NULL ? "" : version);
+    snprintf(registration->ota_phase,
+             sizeof(registration->ota_phase), "pending");
+    registration->ota_progress = 0;
+    registration->retry_count = 0;
+    registration->ota_error[0] = '\0';
+    registration->ota_updated_seconds = now;
+}
+
 static bool registration_is_active_for_target_locked(
     const registration_t *registration, uint32_t now) {
     return registration_is_online(registration, now) &&
@@ -298,7 +312,7 @@ static void refresh_counts_locked(void) {
         if (s_status.version[0] != '\0' && registration->ota_validated &&
             strcmp(registration->version, s_status.version) == 0) {
             ++s_status.completed_nodes;
-        } else if (s_status.active) {
+        } else if (s_status.version[0] != '\0') {
             ++s_status.pending_nodes;
         }
     }
@@ -318,7 +332,9 @@ static void refresh_counts_locked(void) {
     }
     s_status.mesh_progress = s_status.compatible_nodes == 0 ? 0 :
         (uint8_t)(progress_total / s_status.compatible_nodes);
-    if (s_status.started_at_seconds == 0) {
+    if (!s_status.active) {
+        s_distribution_completed_at_seconds = 0;
+    } else if (s_status.started_at_seconds == 0) {
         s_status.elapsed_seconds = 0;
         s_distribution_completed_at_seconds = 0;
     } else if (s_status.compatible_nodes > 0 &&
@@ -409,7 +425,7 @@ static bool load_policy_locked(void) {
         cJSON_GetObjectItemCaseSensitive(json, "image_size");
     const cJSON *published_at =
         cJSON_GetObjectItemCaseSensitive(json, "published_at");
-    bool metadata_ok = cJSON_IsTrue(active) && cJSON_IsString(version) &&
+    bool metadata_ok = cJSON_IsBool(active) && cJSON_IsString(version) &&
         version->valuestring != NULL &&
         (hardware == NULL || cJSON_IsString(hardware)) &&
         cJSON_IsString(sha256) && sha256->valuestring != NULL &&
@@ -451,10 +467,11 @@ static bool load_policy_locked(void) {
     s_status.received_bytes = actual_size;
     s_status.published_at = cJSON_IsNumber(published_at)
         ? (uint64_t)published_at->valuedouble : 0;
-    s_status.active = true;
+    // A reboot never resumes cabinet writes outside the OTA console.
+    s_status.active = false;
     s_status.finish_reason = -1;
-    snprintf(s_status.phase, sizeof(s_status.phase), "published");
-    s_next_distribution_at = now_seconds() + OTA_JOIN_DEBOUNCE_SECONDS;
+    snprintf(s_status.phase, sizeof(s_status.phase), "paused");
+    s_next_distribution_at = 0;
     cJSON_Delete(json);
     return true;
 }
@@ -606,6 +623,14 @@ esp_err_t root_ota_upload_begin(const char *upload_id, const char *version,
     s_status.published_at = published_at;
     s_status.active = false;
     s_status.finish_reason = -1;
+    s_provider_version[0] = '\0';
+    uint32_t reset_at = now_seconds();
+    for (size_t index = 0; index < OTA_REGISTRATION_CAPACITY; ++index) {
+        registration_t *registration = &s_registrations[index];
+        if (registration->device_id[0] != '\0') {
+            reset_registration_release_locked(registration, version, reset_at);
+        }
+    }
     xSemaphoreGive(s_mutex);
     copy_error(error, error_size, "");
     return ESP_OK;
@@ -808,14 +833,14 @@ esp_err_t root_ota_upload_commit(const char *upload_id,
             result = ESP_FAIL;
             copy_error(error, error_size, "commit ota image failed");
         } else {
-            s_status.active = true;
+            s_status.active = false;
             s_status.received_bytes = s_status.image_size;
-            snprintf(s_status.phase, sizeof(s_status.phase), "published");
+            snprintf(s_status.phase, sizeof(s_status.phase), "ready");
             if (!persist_policy_locked(error, error_size)) {
                 result = ESP_FAIL;
             } else {
                 s_status.error[0] = '\0';
-                s_next_distribution_at = now_seconds();
+                s_next_distribution_at = 0;
             }
         }
     }
@@ -842,7 +867,8 @@ static esp_err_t start_distribution(char *error, size_t error_size) {
     }
     refresh_counts_locked();
     if (s_status.pending_nodes == 0) {
-        snprintf(s_status.phase, sizeof(s_status.phase), "published");
+        s_status.active = false;
+        snprintf(s_status.phase, sizeof(s_status.phase), "complete");
         s_status.mesh_progress = s_status.compatible_nodes > 0 ? 100 : 0;
         s_status.error[0] = '\0';
         s_next_distribution_at = 0;
@@ -850,7 +876,9 @@ static esp_err_t start_distribution(char *error, size_t error_size) {
             fclose(s_provider_file);
             s_provider_file = NULL;
         }
+        bool persisted = persist_policy_locked(error, error_size);
         xSemaphoreGive(s_mutex);
+        if (!persisted) return ESP_FAIL;
         copy_error(error, error_size, "");
         return ESP_OK;
     }
@@ -866,12 +894,17 @@ static esp_err_t start_distribution(char *error, size_t error_size) {
     size_t target_capacity = s_status.pending_nodes;
     notification_target_t *targets = calloc(target_capacity,
                                              sizeof(*targets));
-    if (targets == NULL) {
+    notification_target_t *recoveries = calloc(target_capacity,
+                                                sizeof(*recoveries));
+    if (targets == NULL || recoveries == NULL) {
+        free(targets);
+        free(recoveries);
         xSemaphoreGive(s_mutex);
         copy_error(error, error_size, "allocate ota notification list failed");
         return ESP_ERR_NO_MEM;
     }
     size_t target_count = 0;
+    size_t recovery_count = 0;
     uint32_t now = now_seconds();
     size_t global_active = 0;
     for (size_t index = 0; index < OTA_REGISTRATION_CAPACITY; ++index) {
@@ -882,12 +915,35 @@ static esp_err_t start_distribution(char *error, size_t error_size) {
                 transfer_stale_seconds(registration)) {
             bool notification_timeout =
                 strcmp(registration->ota_phase, "notified") == 0;
-            snprintf(registration->ota_phase,
-                     sizeof(registration->ota_phase), "failed");
-            snprintf(registration->ota_error,
-                     sizeof(registration->ota_error), "%s",
-                     notification_timeout ? "notification timeout" :
-                     "progress timeout");
+            bool stalled_transfer =
+                strcmp(registration->ota_phase, "starting") == 0 ||
+                strcmp(registration->ota_phase, "downloading") == 0 ||
+                strcmp(registration->ota_phase, "verifying") == 0 ||
+                strcmp(registration->ota_phase, "rebooting") == 0;
+            if (stalled_transfer && recovery_count < target_capacity &&
+                parse_cabinet_mac(registration->device_id,
+                                  recoveries[recovery_count].mac)) {
+                copy_text(recoveries[recovery_count].device_id,
+                          sizeof(recoveries[recovery_count].device_id),
+                          registration->device_id);
+                recoveries[recovery_count].registration_index = index;
+                ++recovery_count;
+                snprintf(registration->ota_phase,
+                         sizeof(registration->ota_phase), "repairing");
+                snprintf(registration->ota_error,
+                         sizeof(registration->ota_error),
+                         "download stalled; rebooting");
+                if (registration->retry_count < UINT8_MAX) {
+                    ++registration->retry_count;
+                }
+            } else {
+                snprintf(registration->ota_phase,
+                         sizeof(registration->ota_phase), "failed");
+                snprintf(registration->ota_error,
+                         sizeof(registration->ota_error), "%s",
+                         notification_timeout ? "notification timeout" :
+                         "progress timeout");
+            }
             registration->ota_updated_seconds = now;
         }
         if (registration_is_active_for_target_locked(registration, now)) {
@@ -898,22 +954,16 @@ static esp_err_t start_distribution(char *error, size_t error_size) {
                            target_count < target_capacity &&
                            global_active < OTA_GLOBAL_CONCURRENCY; ++index) {
         registration_t *registration = &s_registrations[index];
+        if (registration->device_id[0] != '\0' &&
+            strcmp(registration->ota_version, s_status.version) != 0) {
+            reset_registration_release_locked(registration,
+                                              s_status.version, now);
+        }
         if (!registration_is_online(registration, now) ||
             !registration_is_compatible(registration) ||
             strcmp(registration->version, s_status.version) == 0 ||
             phase_is_active(registration->ota_phase)) {
             continue;
-        }
-        if (strcmp(registration->ota_version, s_status.version) != 0) {
-            snprintf(registration->ota_version,
-                     sizeof(registration->ota_version), "%s",
-                     s_status.version);
-            snprintf(registration->ota_phase,
-                     sizeof(registration->ota_phase), "pending");
-            registration->ota_progress = 0;
-            registration->retry_count = 0;
-            registration->ota_error[0] = '\0';
-            registration->ota_updated_seconds = now;
         }
         if (!parent_ready_locked(registration, now)) {
             snprintf(registration->ota_phase,
@@ -963,6 +1013,33 @@ static esp_err_t start_distribution(char *error, size_t error_size) {
     s_next_distribution_at = now + OTA_SCHEDULER_SECONDS;
     xSemaphoreGive(s_mutex);
 
+    size_t recovery_sent = 0;
+    for (size_t index = 0; index < recovery_count; ++index) {
+        static const char payload[] = "{}";
+        uint8_t message[128];
+        int message_length = cab_app_encode(
+            message, sizeof(message), CAB_CMD_REBOOT,
+            cab_next_message_id(), 0, 0,
+            recoveries[index].device_id, "ROOT_OTA",
+            (const uint8_t *)payload, sizeof(payload) - 1, 0);
+        bool delivered = message_length > 0 &&
+            cab_mesh_send_node(recoveries[index].mac, message,
+                               (size_t)message_length) == ESP_OK;
+        if (delivered) {
+            ++recovery_sent;
+        } else if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+            registration_t *registration =
+                &s_registrations[recoveries[index].registration_index];
+            snprintf(registration->ota_phase,
+                     sizeof(registration->ota_phase), "failed");
+            snprintf(registration->ota_error,
+                     sizeof(registration->ota_error),
+                     "stalled download reboot failed");
+            registration->ota_updated_seconds = now_seconds();
+            xSemaphoreGive(s_mutex);
+        }
+    }
+
     if (register_provider) {
         esp_err_t result = esp_mesh_lite_lan_ota_set_file_name(version);
         if (result != ESP_OK) {
@@ -994,6 +1071,7 @@ static esp_err_t start_distribution(char *error, size_t error_size) {
                     retry_delay_seconds(1);
                 xSemaphoreGive(s_mutex);
             }
+            free(recoveries);
             free(targets);
             copy_error(error, error_size, provider_error);
             return result;
@@ -1006,9 +1084,14 @@ static esp_err_t start_distribution(char *error, size_t error_size) {
     }
 
     if (target_count == 0) {
+        free(recoveries);
         free(targets);
-        copy_error(error, error_size, "");
-        return ESP_OK;
+        if (recovery_count == 0 || recovery_sent > 0) {
+            copy_error(error, error_size, "");
+            return ESP_OK;
+        }
+        copy_error(error, error_size, "stalled cabinet reboot failed");
+        return ESP_FAIL;
     }
 
     size_t sent = 0;
@@ -1042,6 +1125,7 @@ static esp_err_t start_distribution(char *error, size_t error_size) {
             xSemaphoreGive(s_mutex);
         }
     }
+    free(recoveries);
     free(targets);
     if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
         if (sent < target_count) {
@@ -1053,7 +1137,7 @@ static esp_err_t start_distribution(char *error, size_t error_size) {
         }
         xSemaphoreGive(s_mutex);
     }
-    if (sent == 0) {
+    if (sent == 0 && recovery_sent == 0) {
         copy_error(error, error_size, "cabinet ota notifications failed");
         return ESP_FAIL;
     }
@@ -1062,7 +1146,117 @@ static esp_err_t start_distribution(char *error, size_t error_size) {
 }
 
 esp_err_t root_ota_start(char *error, size_t error_size) {
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        copy_error(error, error_size, "ota state busy");
+        return ESP_ERR_TIMEOUT;
+    }
+    if (s_status.version[0] == '\0' ||
+        strcmp(s_status.phase, "uploading") == 0) {
+        xSemaphoreGive(s_mutex);
+        copy_error(error, error_size, "ota release is not ready");
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_status.active = true;
+    snprintf(s_status.phase, sizeof(s_status.phase), "published");
+    s_status.error[0] = '\0';
+    if (s_status.started_at_seconds != 0 && s_status.elapsed_seconds > 0) {
+        s_status.started_at_seconds = now_seconds() - s_status.elapsed_seconds;
+    }
+    s_next_distribution_at = now_seconds();
+    bool persisted = persist_policy_locked(error, error_size);
+    xSemaphoreGive(s_mutex);
+    if (!persisted) return ESP_FAIL;
     return start_distribution(error, error_size);
+}
+
+esp_err_t root_ota_pause(char *error, size_t error_size) {
+    notification_target_t *targets = calloc(OTA_REGISTRATION_CAPACITY,
+                                             sizeof(*targets));
+    if (targets == NULL) {
+        copy_error(error, error_size, "allocate ota pause list failed");
+        return ESP_ERR_NO_MEM;
+    }
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        free(targets);
+        copy_error(error, error_size, "ota state busy");
+        return ESP_ERR_TIMEOUT;
+    }
+
+    size_t target_count = 0;
+    uint32_t now = now_seconds();
+    bool upload_in_progress = strcmp(s_status.phase, "uploading") == 0;
+    refresh_counts_locked();
+    for (size_t index = 0; index < OTA_REGISTRATION_CAPACITY; ++index) {
+        registration_t *registration = &s_registrations[index];
+        bool completed = s_status.version[0] != '\0' &&
+            registration->ota_validated &&
+            strcmp(registration->version, s_status.version) == 0;
+        if (registration->device_id[0] != '\0' && !completed) {
+            snprintf(registration->ota_version,
+                     sizeof(registration->ota_version), "%s",
+                     s_status.version);
+            snprintf(registration->ota_phase,
+                     sizeof(registration->ota_phase), "paused");
+            registration->ota_progress = 0;
+            registration->ota_error[0] = '\0';
+            registration->ota_updated_seconds = now;
+        }
+        if (completed || !registration_is_online(registration, now) ||
+            !parse_cabinet_mac(registration->device_id,
+                               targets[target_count].mac)) {
+            continue;
+        }
+        copy_text(targets[target_count].device_id,
+                  sizeof(targets[target_count].device_id),
+                  registration->device_id);
+        ++target_count;
+    }
+
+    if (s_upload_file != NULL) {
+        fclose(s_upload_file);
+        s_upload_file = NULL;
+    }
+    remove(OTA_TEMP_PATH);
+    if (s_provider_file != NULL) {
+        fclose(s_provider_file);
+        s_provider_file = NULL;
+    }
+    s_provider_version[0] = '\0';
+    if (upload_in_progress) {
+        memset(&s_status, 0, sizeof(s_status));
+        snprintf(s_status.phase, sizeof(s_status.phase), "idle");
+        s_status.finish_reason = -1;
+        load_policy_locked();
+    }
+    s_status.active = false;
+    s_next_distribution_at = 0;
+    if (s_status.version[0] != '\0') {
+        snprintf(s_status.phase, sizeof(s_status.phase), "paused");
+    } else {
+        snprintf(s_status.phase, sizeof(s_status.phase), "idle");
+    }
+    s_status.error[0] = '\0';
+    bool persisted = s_status.version[0] == '\0' ||
+        persist_policy_locked(error, error_size);
+    xSemaphoreGive(s_mutex);
+
+    for (size_t index = 0; index < target_count; ++index) {
+        uint8_t message[128];
+        static const char payload[] = "{}";
+        int message_length = cab_app_encode(
+            message, sizeof(message), CAB_CMD_CABINET_OTA_PAUSE,
+            cab_next_message_id(), 0, 0,
+            targets[index].device_id, "ROOT_OTA",
+            (const uint8_t *)payload, sizeof(payload) - 1, 0);
+        if (message_length > 0) {
+            cab_mesh_send_node(targets[index].mac, message,
+                               (size_t)message_length);
+        }
+    }
+    free(targets);
+    if (!persisted) return ESP_FAIL;
+    copy_error(error, error_size, "");
+    return ESP_OK;
 }
 
 void root_ota_maintain(void) {
@@ -1073,11 +1267,18 @@ void root_ota_maintain(void) {
         uint32_t now = now_seconds();
         if (s_status.active && s_status.pending_nodes == 0 &&
             strcmp(s_status.phase, "uploading") != 0) {
-            snprintf(s_status.phase, sizeof(s_status.phase), "published");
+            s_status.active = false;
+            snprintf(s_status.phase, sizeof(s_status.phase), "complete");
             s_next_distribution_at = 0;
             if (s_provider_file != NULL) {
                 fclose(s_provider_file);
                 s_provider_file = NULL;
+            }
+            char persist_error[128] = {0};
+            if (!persist_policy_locked(persist_error,
+                                       sizeof(persist_error))) {
+                ESP_LOGW(TAG, "Persist completed OTA policy failed: %s",
+                         persist_error);
             }
         }
         due = s_status.active && s_status.pending_nodes > 0 &&
@@ -1163,6 +1364,15 @@ void root_ota_note_registration(const char *device_id,
                 registration->ota_progress = 100;
                 registration->ota_error[0] = '\0';
                 registration->ota_updated_seconds = now_seconds();
+            } else if (s_status.active &&
+                       strcmp(registration->ota_version,
+                              s_status.version) == 0 &&
+                       strcmp(registration->ota_phase, "repairing") == 0) {
+                snprintf(registration->ota_phase,
+                         sizeof(registration->ota_phase), "pending");
+                registration->ota_progress = 0;
+                registration->ota_error[0] = '\0';
+                registration->ota_updated_seconds = now_seconds();
             } else if (s_status.active && previously_reported_target) {
                 snprintf(registration->ota_version,
                          sizeof(registration->ota_version), "%s",
@@ -1224,6 +1434,17 @@ void root_ota_note_progress(const char *device_id,
             if (strcmp(registration->device_id, device_id) != 0) continue;
             if (s_status.version[0] != '\0' &&
                 strcmp(version->valuestring, s_status.version) != 0) break;
+            const char *reported_error =
+                cJSON_IsString(error) && error->valuestring != NULL
+                    ? error->valuestring : "";
+            double value = progress->valuedouble;
+            uint8_t reported_progress = value <= 0 ? 0 :
+                value >= 100 ? 100 : (uint8_t)value;
+            bool changed =
+                strcmp(registration->ota_version, version->valuestring) != 0 ||
+                strcmp(registration->ota_phase, phase->valuestring) != 0 ||
+                strcmp(registration->ota_error, reported_error) != 0 ||
+                registration->ota_progress != reported_progress;
             snprintf(registration->ota_version,
                      sizeof(registration->ota_version), "%s",
                      version->valuestring);
@@ -1232,18 +1453,15 @@ void root_ota_note_progress(const char *device_id,
                      phase->valuestring);
             snprintf(registration->ota_error,
                      sizeof(registration->ota_error), "%s",
-                     cJSON_IsString(error) && error->valuestring != NULL
-                         ? error->valuestring : "");
-            double value = progress->valuedouble;
-            registration->ota_progress = value <= 0 ? 0 :
-                value >= 100 ? 100 : (uint8_t)value;
+                     reported_error);
+            registration->ota_progress = reported_progress;
             if (strcmp(registration->ota_phase, "complete") == 0 ||
                 strcmp(registration->ota_phase, "completed") == 0) {
                 registration->ota_validated = true;
             } else if (strcmp(registration->ota_phase, "validating") == 0) {
                 registration->ota_validated = false;
             }
-            registration->ota_updated_seconds = now_seconds();
+            if (changed) registration->ota_updated_seconds = now_seconds();
             if (strcmp(registration->ota_phase, "failed") == 0) {
                 uint32_t due = now_seconds() +
                     registration_retry_delay_seconds(registration);

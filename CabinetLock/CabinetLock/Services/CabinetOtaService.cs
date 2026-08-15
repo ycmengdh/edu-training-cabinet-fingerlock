@@ -281,19 +281,20 @@ namespace CabinetLock
                         Stage = "校验镜像",
                         Detail = "根节点正在核对 SHA-256",
                         Percent = 50,
-                        CanCancel = false
+                        CanCancel = true
                     });
                     try
                     {
                         status = await SendOtaRequestAsync(
                             Protocol.CmdCabinetOtaCommit,
                             new { upload_id = uploadId }, CommitTimeoutMs, 2,
-                            CancellationToken.None).ConfigureAwait(false);
+                            cancellationToken).ConfigureAwait(false);
                     }
                     catch (Exception commitError)
                     {
                         CabinetOtaStatus recovered = await QueryStatusUntilAvailableAsync(
-                            progress, "等待固件提交确认").ConfigureAwait(false);
+                            progress, "等待固件提交确认", cancellationToken)
+                            .ConfigureAwait(false);
                         if (!CanReuseStagedImage(
                                 recovered, firmware, targetHardware))
                             throw new InvalidOperationException(
@@ -307,12 +308,13 @@ namespace CabinetLock
                     status = await SendOtaRequestAsync(
                         Protocol.CmdCabinetOtaStart,
                         new { }, RequestTimeoutMs, 2,
-                        CancellationToken.None).ConfigureAwait(false);
+                        cancellationToken).ConfigureAwait(false);
                 }
                 catch (Exception startError) when (startError is not OperationCanceledException)
                 {
                     CabinetOtaStatus failedStatus = await QueryStatusUntilAvailableAsync(
-                        progress, "等待 OTA 启动确认").ConfigureAwait(false);
+                        progress, "等待 OTA 启动确认", cancellationToken)
+                        .ConfigureAwait(false);
                     string rootDetail = failedStatus.Error;
 
                     if (failedStatus.Active || string.Equals(
@@ -328,7 +330,7 @@ namespace CabinetLock
                                 : $"目标版本已保存，根节点将自动重试：{rootDetail}",
                             Percent = 100,
                             IsImportant = true,
-                            CanCancel = false
+                            CanCancel = true
                         });
                     }
                     else
@@ -354,10 +356,10 @@ namespace CabinetLock
                     CompletedNodes = status.CompletedNodes,
                     ExpectedNodes = status.CompatibleNodes,
                     IsImportant = true,
-                    CanCancel = false
+                    CanCancel = true
                 });
                 status = await MonitorDistributionAsync(
-                    status, progress, CancellationToken.None).ConfigureAwait(false);
+                    status, progress, cancellationToken).ConfigureAwait(false);
                 progress?.Report(new CabinetOtaProgress
                 {
                     Stage = "升级完成",
@@ -378,18 +380,16 @@ namespace CabinetLock
             }
         }
 
-        public Task<CabinetOtaStatus> ResumeActiveDistributionAsync(
-            IProgress<CabinetOtaProgress>? progress = null,
+        public Task<CabinetOtaStatus> EnsureDistributionPausedAsync(
             CancellationToken cancellationToken = default) =>
             App.CommunicationCoordinator.RunExclusiveAsync(
                 CommunicationOperationKind.Ota,
-                "检查并恢复柜机 OTA 分发",
+                "检查并暂停柜机 OTA 分发",
                 App.SdStorageService.RootDeviceId,
-                token => ResumeActiveDistributionCoreAsync(progress, token),
+                token => EnsureDistributionPausedCoreAsync(token),
                 cancellationToken);
 
-        private async Task<CabinetOtaStatus> ResumeActiveDistributionCoreAsync(
-            IProgress<CabinetOtaProgress>? progress,
+        private async Task<CabinetOtaStatus> EnsureDistributionPausedCoreAsync(
             CancellationToken cancellationToken)
         {
             await _deploymentLock.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -397,26 +397,72 @@ namespace CabinetLock
             {
                 CabinetOtaStatus status = await QueryStatusAsync(cancellationToken)
                     .ConfigureAwait(false);
-                if (!IsDistributionInProgress(status)) return status;
-
-                progress?.Report(new CabinetOtaProgress
-                {
-                    Stage = "恢复 OTA 保护",
-                    Detail = $"检测到根节点仍有 {status.PendingNodes} 台柜机待升级",
-                    Percent = Math.Clamp(50 + status.MeshProgress / 2, 50, 99),
-                    CompletedNodes = status.CompletedNodes,
-                    ExpectedNodes = status.CompatibleNodes,
-                    IsImportant = true,
-                    CanCancel = false
-                });
-                return await MonitorDistributionAsync(status, progress, cancellationToken)
-                    .ConfigureAwait(false);
+                if (!status.Active) return status;
+                return await SendOtaRequestAsync(
+                    Protocol.CmdCabinetOtaPause, new { }, RequestTimeoutMs, 2,
+                    cancellationToken).ConfigureAwait(false);
             }
             finally
             {
                 _deploymentLock.Release();
             }
         }
+
+        public Task<CabinetOtaStatus> ResumePausedDistributionAsync(
+            IProgress<CabinetOtaProgress>? progress = null,
+            CancellationToken cancellationToken = default) =>
+            App.CommunicationCoordinator.RunExclusiveAsync(
+                CommunicationOperationKind.Ota,
+                "继续未完成的柜机 OTA",
+                App.SdStorageService.RootDeviceId,
+                token => ResumePausedDistributionCoreAsync(progress, token),
+                cancellationToken);
+
+        private async Task<CabinetOtaStatus> ResumePausedDistributionCoreAsync(
+            IProgress<CabinetOtaProgress>? progress,
+            CancellationToken cancellationToken)
+        {
+            await _deploymentLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                CabinetOtaStatus current = await QueryStatusAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                if (string.IsNullOrWhiteSpace(current.Version))
+                    throw new InvalidOperationException("根节点没有可继续的柜机固件");
+                if (current.PendingNodes == 0) return current;
+
+                CabinetOtaStatus status = await SendOtaRequestAsync(
+                    Protocol.CmdCabinetOtaStart, new { }, RequestTimeoutMs, 2,
+                    cancellationToken).ConfigureAwait(false);
+                progress?.Report(new CabinetOtaProgress
+                {
+                    Stage = "继续柜机升级",
+                    Detail = $"继续目标 {status.Version}，待升级 {status.PendingNodes} 台",
+                    Percent = Math.Clamp(50 + status.MeshProgress / 2, 50, 99),
+                    CompletedNodes = status.CompletedNodes,
+                    ExpectedNodes = status.CompatibleNodes,
+                    IsImportant = true,
+                    CanCancel = true
+                });
+                return await MonitorDistributionAsync(
+                    status, progress, cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                _deploymentLock.Release();
+            }
+        }
+
+        public Task<CabinetOtaStatus> PauseDistributionAsync(
+            CancellationToken cancellationToken = default) =>
+            App.CommunicationCoordinator.RunExclusiveAsync(
+                CommunicationOperationKind.Ota,
+                "暂停柜机 OTA",
+                App.SdStorageService.RootDeviceId,
+                token => SendOtaRequestAsync(
+                    Protocol.CmdCabinetOtaPause, new { }, RequestTimeoutMs, 2,
+                    token),
+                cancellationToken);
 
         public static bool IsDistributionInProgress(CabinetOtaStatus? status) =>
             status?.Active == true &&
@@ -443,7 +489,7 @@ namespace CabinetLock
                         CompletedNodes = status.CompletedNodes,
                         ExpectedNodes = status.CompatibleNodes,
                         IsImportant = true,
-                        CanCancel = false
+                        CanCancel = true
                     });
                     deadline = DateTime.UtcNow + MaximumDistributionProtection;
                 }
@@ -456,7 +502,7 @@ namespace CabinetLock
                     Percent = Math.Clamp(50 + status.MeshProgress / 2, 50, 99),
                     CompletedNodes = status.CompletedNodes,
                     ExpectedNodes = status.CompatibleNodes,
-                    CanCancel = false
+                    CanCancel = true
                 });
 
                 await Task.Delay(DistributionPollInterval, cancellationToken)
@@ -481,7 +527,7 @@ namespace CabinetLock
                         CompletedNodes = status.CompletedNodes,
                         ExpectedNodes = status.CompatibleNodes,
                         IsImportant = consecutiveFailures == 1,
-                        CanCancel = false
+                        CanCancel = true
                     });
                 }
             }
@@ -593,18 +639,20 @@ namespace CabinetLock
         }
 
         private async Task<CabinetOtaStatus> QueryStatusUntilAvailableAsync(
-            IProgress<CabinetOtaProgress>? progress, string stage)
+            IProgress<CabinetOtaProgress>? progress, string stage,
+            CancellationToken cancellationToken)
         {
             int failures = 0;
             while (true)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 try
                 {
                     return await SendOtaRequestAsync(
                         Protocol.CmdCabinetOtaStatus, new { }, RequestTimeoutMs, 2,
-                        CancellationToken.None).ConfigureAwait(false);
+                        cancellationToken).ConfigureAwait(false);
                 }
-                catch (Exception ex)
+                catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
                 {
                     failures++;
                     progress?.Report(new CabinetOtaProgress
@@ -613,9 +661,10 @@ namespace CabinetLock
                         Detail = $"状态查询失败 {failures} 次，保持 OTA 保护：{ex.Message}",
                         Percent = 50,
                         IsImportant = failures == 1,
-                        CanCancel = false
+                        CanCancel = true
                     });
-                    await Task.Delay(DistributionPollInterval).ConfigureAwait(false);
+                    await Task.Delay(DistributionPollInterval, cancellationToken)
+                        .ConfigureAwait(false);
                 }
             }
         }
